@@ -5501,11 +5501,16 @@ function ItemHistorySection({
             </p>
           ) : revisions.length > 0 ? (
             <div className="mt-4 grid gap-4 lg:grid-cols-[180px_minmax(0,1fr)]">
-              <div className="space-y-1.5" aria-label="Historical revisions">
+              <div
+                className="space-y-1.5"
+                role="group"
+                aria-label="Historical revisions"
+              >
                 {revisions.map((revision) => (
                   <button
                     key={revision}
                     type="button"
+                    aria-pressed={selectedRevision === revision}
                     disabled={
                       mutationBusy || detailLoading || revealingField !== null
                     }
