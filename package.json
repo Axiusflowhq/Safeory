@@ -1,0 +1,14 @@
+{
+  "name": "safeory",
+  "private": true,
+  "license": "AGPL-3.0-or-later",
+  "packageManager": "pnpm@12.4.1",
+  "scripts": {
+    "build": "pnpm --filter @safeory/desktop build",
+    "typecheck": "pnpm --filter @safeory/desktop typecheck",
+    "audit:js": "pnpm audit --prod",
+    "check:icons": "node scripts/check-icon-policy.mjs",
+    "test:rust": "cargo test --workspace",
+    "test:session-fence": "node --test scripts/session-fence.test.mjs"
+  }
+}

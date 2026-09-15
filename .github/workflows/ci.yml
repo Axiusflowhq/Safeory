@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust 1.98.1
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt --component clippy
+          rustup default 1.98.1
+
+      - name: Install Node 24 and enable pnpm
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - run: |
+          corepack enable
+          corepack prepare pnpm@12.4.1 --activate
+
+      - name: Install Tauri Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - name: Install locked JavaScript dependencies
+        run: corepack pnpm install --frozen-lockfile
+
+      - name: Rust format
+        run: cargo fmt --all -- --check
+      - name: Rust clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Rust tests and migration/version checks
+        run: cargo test --workspace
+
+      - name: Frontend typecheck
+        run: corepack pnpm --filter @safeory/desktop typecheck
+      - name: Session generation fence test
+        run: corepack pnpm test:session-fence
+      - name: Frontend lint
+        run: corepack pnpm --filter @safeory/desktop lint
+      - name: Enforce icon-family policy
+        run: corepack pnpm check:icons
+      - name: Frontend format
+        run: corepack pnpm --filter @safeory/desktop format:check
+      - name: Frontend build
+        run: corepack pnpm --filter @safeory/desktop build
+      - name: Desktop shell build
+        run: corepack pnpm --filter @safeory/desktop tauri build
+
+      - name: Install Rust security tools
+        run: |
+          cargo install cargo-audit --version 0.22.2 --locked
+          cargo install cargo-deny --version 0.20.2 --locked
+      - name: Rust vulnerability audit
+        run: cargo audit
+      - name: Rust dependency policy
+        run: cargo deny check advisories bans licenses sources
+      - name: JavaScript production audit
+        run: corepack pnpm audit --prod

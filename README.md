@@ -1,0 +1,89 @@
+# Safeory
+
+Safeory is a local-first, zero-knowledge consumer vault for important personal
+information: documents, records, property, insurance, vehicles, and possessions,
+with an encrypted emergency card, recovery kit, and portable export — all
+working offline on one device, before any cloud or trusted-person networking.
+
+## Current phase
+
+Phase 1 — working local platform (no cloud yet).
+
+Implemented now:
+
+- portable Rust workspace with Tauri kept as a replaceable shell,
+- random AccountRootKey protected by an Argon2id-derived KEK,
+- HKDF-separated per-item key wrapping,
+- XChaCha20-Poly1305 authenticated encrypted item envelopes,
+- SQLite persistence of ciphertext-only secret-bearing records,
+- explicit database/envelope/payload version checks,
+- process-restart round-trip and negative security tests,
+- active SQLite rollback-journal plaintext inspection,
+- strict desktop CSP and minimal Tauri capability surface,
+- one-time fail-closed migration of the pre-Safeory `com.lifevault.desktop`
+  app-data directory to `com.safeory.desktop`, preserving the complete local
+  vault directory rather than creating a fresh empty vault,
+- local desktop vault setup, lock/unlock, secure notes, masked credentials,
+  encrypted document-metadata, insurance, financial, property, vehicle, and
+  possession records, revisioned editing, stale-edit conflict protection,
+  metadata-only list projections with narrow on-demand secret reveal/edit,
+  encrypted cross-item links with title resolution and jump navigation,
+  CSPRNG-backed strong-password generation, record-type filtering, local
+  search, a Today panel driven by a tested local deadlines engine, trash with
+  restore/permanent-delete, and a 10-minute inactivity lock,
+- encrypted Emergency Card: selected records, emergency contacts, and
+  instructions in one singleton record, hidden from lists, with stale-edit
+  protection and graceful handling of trashed references,
+- no-backdoor recovery kit: printable high-entropy secret, install/confirm
+  flow, unlock-with-kit while locked, and threshold (2-of-3 style) social
+  recovery plus sealed recovery-share envelopes at the crypto layer,
+- Trust Engine core: conditional access policies with fail-closed local
+  evaluation (destruction/deny wins, private-forever, multi-approval,
+  waiting periods as documented server-enforced policy, not time-lock crypto),
+- portable export: human-readable decrypted JSON plus an encrypted
+  database-file backup, both to user-chosen locations via save dialogs,
+- local database schema migration (v1 to v2) preserving existing vaults,
+- focused Tauri adapter tests for locked-state gating, redacted unlock failure,
+  item listing, credential revision plumbing, and stale-edit rejection,
+- portable Rust item-size bounds before encryption/persistence, with regression
+  tests proving oversized creates/updates fail without replacing valid data,
+- Ownership Wallet: encrypted `vehicle`/`possession` records with masked list
+  projections and narrow secret reveal, plus encrypted cross-item `links`
+  (receipt <-> possession, policy <-> vehicle) with title resolution, jump
+  navigation, and stale-edit-safe link management,
+- Trust Engine V1 spec (`docs/architecture/trust-engine.md`) frozen before
+  screens: compartment key hierarchy, per-object policy model, and no-backdoor
+  recovery order; policy evaluation, Shamir threshold sharing, and sealed
+  recovery-share envelopes implemented and tested in the portable core
+  (no IPC/server path yet),
+- pinned Rust/JS lockfiles and dependency/security CI policy.
+
+Not implemented yet: grant persistence inside item payloads, trusted-person
+grant UX, Emergency Access timed-release coordination, account/passkey flows,
+Cloudflare sync, attachments, clipboard copy. Cloud integration starts only
+after this local platform is stable.
+
+## Validation
+
+```text
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo audit
+cargo deny check advisories bans licenses sources
+corepack pnpm install --frozen-lockfile
+corepack pnpm --filter @safeory/desktop typecheck
+corepack pnpm --filter @safeory/desktop lint
+corepack pnpm --filter @safeory/desktop build
+```
+
+Security design and known dependency risks live under `docs/security/`.
+
+## License
+
+Copyright (C) 2026 Safeory contributors.
+
+Safeory is free software: you can redistribute it and/or modify it under the
+terms of the GNU Affero General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version. See `LICENSE` for the full text.

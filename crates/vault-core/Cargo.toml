@@ -1,0 +1,17 @@
+[package]
+name = "vault-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+getrandom.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+vault-crypto = { path = "../vault-crypto", version = "=0.1.0" }
+vault-models = { path = "../vault-models", version = "=0.1.0" }
+vault-storage = { path = "../vault-storage", version = "=0.1.0" }
+
+[dev-dependencies]
+tempfile = "=3.27.0"

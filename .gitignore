@@ -1,0 +1,10 @@
+﻿/target/
+/node_modules/
+.pnpm-store/
+apps/desktop/dist/
+apps/desktop/node_modules/
+.DS_Store
+*.log
+.env
+.env.*
+!.env.example
