@@ -5,8 +5,8 @@
 //! policy data; enforcement stays local-first. The backend may later
 //! coordinate release timing in a Durable Object, but it can never decrypt.
 
-use serde::{Deserialize, Serialize};
 use blahaj::{Share, Sharks};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::convert::TryFrom;
 use thiserror::Error;

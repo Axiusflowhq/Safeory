@@ -213,6 +213,7 @@ impl VaultBackupPlan {
         }
         let backup_storage = VaultStorage::open(&path)?;
         backup_storage.validate_integrity()?;
+        backup_storage.validate_record_bounds()?;
         if cancelled() {
             return Err(VaultError::OperationCancelled);
         }
@@ -987,6 +988,7 @@ impl VaultSession {
 
     pub fn validate_persisted_state(&self) -> Result<(), VaultError> {
         self.storage.validate_integrity()?;
+        self.storage.validate_record_bounds()?;
         validate_storage_contents(&self.storage, &self.root_key)?;
         let _ = self.storage.load_recovery_wrap()?;
         Ok(())
@@ -1010,6 +1012,7 @@ impl VaultSession {
         self.storage.backup_to(&path)?;
         let backup_storage = VaultStorage::open(&path)?;
         backup_storage.validate_integrity()?;
+        backup_storage.validate_record_bounds()?;
         validate_storage_contents(&backup_storage, &self.root_key)?;
         let _ = backup_storage.load_recovery_wrap()?;
         Ok(())
@@ -1042,6 +1045,7 @@ impl VaultSession {
         let backup_path = path.as_ref().to_path_buf();
         let storage = VaultStorage::open(&backup_path)?;
         storage.validate_integrity()?;
+        storage.validate_record_bounds()?;
         if cancelled() {
             return Err(VaultError::OperationCancelled);
         }

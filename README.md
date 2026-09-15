@@ -24,8 +24,8 @@ Implemented now:
   app-data directory to `com.safeory.desktop`, preserving the complete local
   vault directory rather than creating a fresh empty vault,
 - local desktop vault setup, lock/unlock, secure notes, masked credentials,
-  encrypted document-metadata, insurance, financial, property, vehicle, and
-  possession records, revisioned editing, stale-edit conflict protection,
+  encrypted document-metadata, receipt, insurance, financial, property, vehicle,
+  and possession records, revisioned editing, stale-edit conflict protection,
   metadata-only list projections with narrow on-demand secret reveal/edit,
   encrypted cross-item links with title resolution and jump navigation,
   CSPRNG-backed strong-password generation, record-type filtering, local
@@ -54,9 +54,10 @@ Implemented now:
 - portable Rust item-size bounds before encryption/persistence, with regression
   tests proving oversized creates/updates fail without replacing valid data,
 - Ownership Wallet: encrypted `vehicle`/`possession` records with masked list
-  projections and narrow secret reveal, plus encrypted cross-item `links`
-  (receipt <-> possession, policy <-> vehicle) with title resolution, jump
-  navigation, and stale-edit-safe link management,
+  projections and narrow secret reveal, dedicated encrypted `receipt` records
+  with masked references and return/refund Today tracking, plus encrypted
+  cross-item `links` (receipt <-> possession, policy <-> vehicle) with title
+  resolution, jump navigation, and stale-edit-safe link management,
 - Trust Engine V1 spec (`docs/architecture/trust-engine.md`) frozen before
   screens: compartment key hierarchy, per-object policy model, and no-backdoor
   recovery order; policy evaluation, Shamir threshold sharing, and sealed

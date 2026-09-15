@@ -13,6 +13,18 @@ use vault_crypto::{
 };
 
 const CURRENT_SCHEMA_VERSION: i64 = 3;
+/// Resource ceiling for local encrypted item rows. This is intentionally far
+/// above normal product use while keeping validation/list allocations bounded.
+pub const ITEM_MAX_OBJECTS: u64 = 65_536;
+/// The current core permits up to 32 large string fields plus notes; because
+/// `EncryptedItemV1` is JSON-encoded and its ciphertext is a byte array, the
+/// encoded envelope can be several times larger than plaintext. 128 MiB keeps
+/// all currently-valid item shapes representable while bounding hostile rows.
+pub const ITEM_MAX_ENCRYPTED_RECORD_BYTES: usize = 128 * 1024 * 1024;
+/// Root/recovery wraps contain fixed-size cryptographic material; 16 KiB is a
+/// deliberately generous serialization ceiling for backwards-compatible v1.
+pub const ROOT_WRAP_MAX_ENCODED_BYTES: usize = 16 * 1024;
+pub const RECOVERY_WRAP_MAX_ENCODED_BYTES: usize = 16 * 1024;
 
 #[derive(Error, Debug)]
 pub enum StorageError {
@@ -132,6 +144,9 @@ impl VaultStorage {
 
     pub fn initialize_root_wrap(&self, wrapped: &RootKeyWrapV1) -> Result<(), StorageError> {
         let encoded = serde_json::to_vec(wrapped)?;
+        if encoded.len() > ROOT_WRAP_MAX_ENCODED_BYTES {
+            return Err(StorageError::InconsistentEncryptedRow);
+        }
         let changed = self.connection.execute(
             "INSERT OR IGNORE INTO vault_meta(singleton, root_key_wrap) VALUES (1, ?1)",
             params![encoded],
@@ -143,20 +158,27 @@ impl VaultStorage {
     }
 
     pub fn load_root_wrap(&self) -> Result<RootKeyWrapV1, StorageError> {
-        let bytes: Option<Vec<u8>> = self
+        let max_encoded = i64::try_from(ROOT_WRAP_MAX_ENCODED_BYTES)
+            .map_err(|_| StorageError::InconsistentEncryptedRow)?;
+        let row: Option<(i64, Option<Vec<u8>>)> = self
             .connection
             .query_row(
-                "SELECT root_key_wrap FROM vault_meta WHERE singleton = 1",
-                [],
-                |row| row.get(0),
+                "SELECT length(root_key_wrap), CASE WHEN length(root_key_wrap) <= ?1 THEN root_key_wrap ELSE NULL END FROM vault_meta WHERE singleton = 1",
+                params![max_encoded],
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        let bytes = bytes.ok_or(StorageError::NotInitialized)?;
+        let (encoded_len, bytes) = row.ok_or(StorageError::NotInitialized)?;
+        validate_encoded_blob_length(encoded_len, ROOT_WRAP_MAX_ENCODED_BYTES)?;
+        let bytes = bytes.ok_or(StorageError::InconsistentEncryptedRow)?;
         Ok(serde_json::from_slice(&bytes)?)
     }
 
     pub fn replace_root_wrap(&self, wrapped: &RootKeyWrapV1) -> Result<(), StorageError> {
         let encoded = serde_json::to_vec(wrapped)?;
+        if encoded.len() > ROOT_WRAP_MAX_ENCODED_BYTES {
+            return Err(StorageError::InconsistentEncryptedRow);
+        }
         let changed = self.connection.execute(
             "UPDATE vault_meta SET root_key_wrap = ?1 WHERE singleton = 1",
             params![encoded],
@@ -178,6 +200,9 @@ impl VaultStorage {
 
     pub fn store_recovery_wrap(&self, wrapped: &RecoveryKitWrapV1) -> Result<(), StorageError> {
         let encoded = serde_json::to_vec(wrapped)?;
+        if encoded.len() > RECOVERY_WRAP_MAX_ENCODED_BYTES {
+            return Err(StorageError::InconsistentEncryptedRow);
+        }
         self.connection.execute(
             "INSERT OR REPLACE INTO recovery_kit(singleton, kit_wrap) VALUES (1, ?1)",
             params![encoded],
@@ -186,17 +211,21 @@ impl VaultStorage {
     }
 
     pub fn load_recovery_wrap(&self) -> Result<Option<RecoveryKitWrapV1>, StorageError> {
-        let bytes: Option<Vec<u8>> = self
+        let max_encoded = i64::try_from(RECOVERY_WRAP_MAX_ENCODED_BYTES)
+            .map_err(|_| StorageError::InconsistentEncryptedRow)?;
+        let row: Option<(i64, Option<Vec<u8>>)> = self
             .connection
             .query_row(
-                "SELECT kit_wrap FROM recovery_kit WHERE singleton = 1",
-                [],
-                |row| row.get(0),
+                "SELECT length(kit_wrap), CASE WHEN length(kit_wrap) <= ?1 THEN kit_wrap ELSE NULL END FROM recovery_kit WHERE singleton = 1",
+                params![max_encoded],
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        let Some(bytes) = bytes else {
+        let Some((encoded_len, bytes)) = row else {
             return Ok(None);
         };
+        validate_encoded_blob_length(encoded_len, RECOVERY_WRAP_MAX_ENCODED_BYTES)?;
+        let bytes = bytes.ok_or(StorageError::InconsistentEncryptedRow)?;
         Ok(Some(serde_json::from_slice(&bytes)?))
     }
 
@@ -211,6 +240,9 @@ impl VaultStorage {
 
     pub fn upsert_item(&self, item: &EncryptedItemV1) -> Result<(), StorageError> {
         let encoded = serde_json::to_vec(item)?;
+        if encoded.len() > ITEM_MAX_ENCRYPTED_RECORD_BYTES {
+            return Err(StorageError::InconsistentEncryptedRow);
+        }
         let revision =
             i64::try_from(item.revision).map_err(|_| StorageError::RevisionOutOfRange)?;
         let changed = self.connection.execute(
@@ -236,6 +268,9 @@ impl VaultStorage {
         expected_revision: u64,
     ) -> Result<(), StorageError> {
         let encoded = serde_json::to_vec(item)?;
+        if encoded.len() > ITEM_MAX_ENCRYPTED_RECORD_BYTES {
+            return Err(StorageError::InconsistentEncryptedRow);
+        }
         let revision =
             i64::try_from(item.revision).map_err(|_| StorageError::RevisionOutOfRange)?;
         let expected_revision =
@@ -260,15 +295,20 @@ impl VaultStorage {
     }
 
     pub fn load_item(&self, object_id: Uuid) -> Result<EncryptedItemV1, StorageError> {
-        let row: Option<(i64, Vec<u8>)> = self
+        let max_encoded = i64::try_from(ITEM_MAX_ENCRYPTED_RECORD_BYTES)
+            .map_err(|_| StorageError::InconsistentEncryptedRow)?;
+        let row: Option<(i64, i64, Option<Vec<u8>>)> = self
             .connection
             .query_row(
-                "SELECT revision, encrypted_record FROM encrypted_items WHERE object_id = ?1",
-                params![object_id.to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                "SELECT revision, length(encrypted_record), CASE WHEN length(encrypted_record) <= ?2 THEN encrypted_record ELSE NULL END FROM encrypted_items WHERE object_id = ?1",
+                params![object_id.to_string(), max_encoded],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?;
-        let (stored_revision, bytes) = row.ok_or(StorageError::ItemNotFound)?;
+        let (stored_revision, encrypted_record_len, bytes) =
+            row.ok_or(StorageError::ItemNotFound)?;
+        validate_encoded_blob_length(encrypted_record_len, ITEM_MAX_ENCRYPTED_RECORD_BYTES)?;
+        let bytes = bytes.ok_or(StorageError::InconsistentEncryptedRow)?;
         let encrypted: EncryptedItemV1 = serde_json::from_slice(&bytes)?;
         let stored_revision =
             u64::try_from(stored_revision).map_err(|_| StorageError::InconsistentEncryptedRow)?;
@@ -279,17 +319,70 @@ impl VaultStorage {
     }
 
     pub fn list_item_ids(&self) -> Result<Vec<Uuid>, StorageError> {
+        let count: i64 =
+            self.connection
+                .query_row("SELECT COUNT(*) FROM encrypted_items", [], |row| row.get(0))?;
+        let count = u64::try_from(count).map_err(|_| StorageError::InconsistentEncryptedRow)?;
+        if count > ITEM_MAX_OBJECTS {
+            return Err(StorageError::InconsistentEncryptedRow);
+        }
+        let row_limit = i64::try_from(ITEM_MAX_OBJECTS + 1)
+            .map_err(|_| StorageError::InconsistentEncryptedRow)?;
         let mut statement = self
             .connection
-            .prepare("SELECT object_id FROM encrypted_items ORDER BY object_id ASC")?;
-        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
-        let mut ids = Vec::new();
+            .prepare("SELECT object_id FROM encrypted_items ORDER BY object_id ASC LIMIT ?1")?;
+        let rows = statement.query_map(params![row_limit], |row| row.get::<_, String>(0))?;
+        let mut ids = Vec::with_capacity(
+            usize::try_from(count).map_err(|_| StorageError::InconsistentEncryptedRow)?,
+        );
         for row in rows {
             let raw = row?;
             let id = Uuid::parse_str(&raw).map_err(|_| StorageError::InconsistentEncryptedRow)?;
             ids.push(id);
         }
+        if u64::try_from(ids.len()).map_err(|_| StorageError::InconsistentEncryptedRow)?
+            > ITEM_MAX_OBJECTS
+        {
+            return Err(StorageError::InconsistentEncryptedRow);
+        }
         Ok(ids)
+    }
+
+    pub fn validate_record_bounds(&self) -> Result<(), StorageError> {
+        let item_count: i64 =
+            self.connection
+                .query_row("SELECT COUNT(*) FROM encrypted_items", [], |row| row.get(0))?;
+        let item_count =
+            u64::try_from(item_count).map_err(|_| StorageError::InconsistentEncryptedRow)?;
+        if item_count > ITEM_MAX_OBJECTS {
+            return Err(StorageError::InconsistentEncryptedRow);
+        }
+
+        let max_item_record = i64::try_from(ITEM_MAX_ENCRYPTED_RECORD_BYTES)
+            .map_err(|_| StorageError::InconsistentEncryptedRow)?;
+        let max_root_wrap = i64::try_from(ROOT_WRAP_MAX_ENCODED_BYTES)
+            .map_err(|_| StorageError::InconsistentEncryptedRow)?;
+        let max_recovery_wrap = i64::try_from(RECOVERY_WRAP_MAX_ENCODED_BYTES)
+            .map_err(|_| StorageError::InconsistentEncryptedRow)?;
+        let oversized_item: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM encrypted_items WHERE length(encrypted_record) > ?1)",
+            params![max_item_record],
+            |row| row.get(0),
+        )?;
+        let oversized_root_wrap: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM vault_meta WHERE length(root_key_wrap) > ?1)",
+            params![max_root_wrap],
+            |row| row.get(0),
+        )?;
+        let oversized_recovery_wrap: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM recovery_kit WHERE length(kit_wrap) > ?1)",
+            params![max_recovery_wrap],
+            |row| row.get(0),
+        )?;
+        if oversized_item || oversized_root_wrap || oversized_recovery_wrap {
+            return Err(StorageError::InconsistentEncryptedRow);
+        }
+        Ok(())
     }
 
     pub fn insert_attachment(
@@ -541,6 +634,9 @@ impl VaultStorage {
             return Err(StorageError::InconsistentEncryptedRow);
         }
         let encoded_item = serde_json::to_vec(item)?;
+        if encoded_item.len() > ITEM_MAX_ENCRYPTED_RECORD_BYTES {
+            return Err(StorageError::InconsistentEncryptedRow);
+        }
         let item_revision =
             i64::try_from(item.revision).map_err(|_| StorageError::RevisionOutOfRange)?;
         let expected_item_revision =
@@ -615,6 +711,9 @@ impl VaultStorage {
         tombstones: &[(Uuid, u64, u64, Vec<u8>)],
     ) -> Result<(), StorageError> {
         let encoded_item = serde_json::to_vec(item)?;
+        if encoded_item.len() > ITEM_MAX_ENCRYPTED_RECORD_BYTES {
+            return Err(StorageError::InconsistentEncryptedRow);
+        }
         let item_revision =
             i64::try_from(item.revision).map_err(|_| StorageError::RevisionOutOfRange)?;
         let expected_item_revision =
@@ -705,6 +804,34 @@ impl VaultStorage {
             .map_err(|_| StorageError::InconsistentEncryptedRow)?;
         let max_objects = i64::try_from(ATTACHMENT_MAX_OBJECTS)
             .map_err(|_| StorageError::InconsistentEncryptedRow)?;
+        let max_item_objects =
+            i64::try_from(ITEM_MAX_OBJECTS).map_err(|_| StorageError::InconsistentEncryptedRow)?;
+        let max_item_record = i64::try_from(ITEM_MAX_ENCRYPTED_RECORD_BYTES)
+            .map_err(|_| StorageError::InconsistentEncryptedRow)?;
+        let max_root_wrap = i64::try_from(ROOT_WRAP_MAX_ENCODED_BYTES)
+            .map_err(|_| StorageError::InconsistentEncryptedRow)?;
+        let max_recovery_wrap = i64::try_from(RECOVERY_WRAP_MAX_ENCODED_BYTES)
+            .map_err(|_| StorageError::InconsistentEncryptedRow)?;
+        let too_many_items: bool = transaction.query_row(
+            "SELECT COUNT(*) > ?1 FROM safeory_restore.encrypted_items",
+            params![max_item_objects],
+            |row| row.get(0),
+        )?;
+        let oversized_item: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM safeory_restore.encrypted_items WHERE length(encrypted_record) > ?1)",
+            params![max_item_record],
+            |row| row.get(0),
+        )?;
+        let oversized_root_wrap: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM safeory_restore.vault_meta WHERE length(root_key_wrap) > ?1)",
+            params![max_root_wrap],
+            |row| row.get(0),
+        )?;
+        let oversized_recovery_wrap: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM safeory_restore.recovery_kit WHERE length(kit_wrap) > ?1)",
+            params![max_recovery_wrap],
+            |row| row.get(0),
+        )?;
         let too_many_attachments: bool = transaction.query_row(
             "SELECT COUNT(*) > ?1 FROM safeory_restore.encrypted_attachments",
             params![max_objects],
@@ -725,7 +852,15 @@ impl VaultStorage {
             params![max_chunks],
             |row| row.get(0),
         )?;
-        if too_many_attachments || oversized_record || invalid_chunk || too_many_chunks {
+        if too_many_items
+            || oversized_item
+            || oversized_root_wrap
+            || oversized_recovery_wrap
+            || too_many_attachments
+            || oversized_record
+            || invalid_chunk
+            || too_many_chunks
+        {
             return Err(StorageError::InconsistentEncryptedRow);
         }
         transaction.execute("DELETE FROM vault_meta", [])?;
@@ -758,12 +893,24 @@ impl VaultStorage {
     }
 }
 
+fn validate_encoded_blob_length(encoded_len: i64, max: usize) -> Result<(), StorageError> {
+    if encoded_len < 0
+        || usize::try_from(encoded_len).map_err(|_| StorageError::InconsistentEncryptedRow)? > max
+    {
+        return Err(StorageError::InconsistentEncryptedRow);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
-    use vault_crypto::{AccountRootKey, encrypt_item};
+    use vault_crypto::{
+        AccountRootKey, RecoverySecret, encrypt_item, wrap_root_key,
+        wrap_root_key_with_recovery_secret,
+    };
     use vault_models::VaultItem;
 
     fn seed_zero_blob_attachment_rows(storage: &VaultStorage, count: u64) {
@@ -781,6 +928,23 @@ mod tests {
                 .expect("seed zero-blob attachment row");
         }
         transaction.commit().expect("commit attachment seed rows");
+    }
+
+    fn seed_zero_blob_item_rows(storage: &VaultStorage, count: u64) {
+        let transaction = storage
+            .connection
+            .unchecked_transaction()
+            .expect("start item seed transaction");
+        for index in 0..count {
+            let object_id = Uuid::from_u128(u128::from(index) + 1);
+            transaction
+                .execute(
+                    "INSERT INTO encrypted_items(object_id, revision, encrypted_record) VALUES (?1, 1, zeroblob(0))",
+                    params![object_id.to_string()],
+                )
+                .expect("seed zero-blob item row");
+        }
+        transaction.commit().expect("commit item seed rows");
     }
 
     #[test]
@@ -1573,9 +1737,245 @@ mod tests {
     }
 
     #[test]
-    fn fresh_database_supports_recovery_wrap_round_trip() {
-        use vault_crypto::{RecoverySecret, wrap_root_key_with_recovery_secret};
+    fn list_item_ids_rejects_excessive_rows_before_materializing_ids() {
+        let dir = tempdir().expect("temp directory");
+        let storage = VaultStorage::open(dir.path().join("vault.sqlite3")).expect("open storage");
+        seed_zero_blob_item_rows(&storage, ITEM_MAX_OBJECTS + 1);
 
+        assert!(matches!(
+            storage.list_item_ids(),
+            Err(StorageError::InconsistentEncryptedRow)
+        ));
+        assert!(matches!(
+            storage.validate_record_bounds(),
+            Err(StorageError::InconsistentEncryptedRow)
+        ));
+    }
+
+    #[test]
+    fn core_wrap_loaders_reject_oversized_rows_before_materializing_blobs() {
+        let dir = tempdir().expect("temp directory");
+        let storage = VaultStorage::open(dir.path().join("vault.sqlite3")).expect("open storage");
+        let root = AccountRootKey::generate().expect("root key");
+        let root_wrap =
+            wrap_root_key("a deliberately long test passphrase", &root).expect("wrap root key");
+        storage
+            .initialize_root_wrap(&root_wrap)
+            .expect("initialize root wrap");
+
+        let oversized_root = i64::try_from(ROOT_WRAP_MAX_ENCODED_BYTES + 1)
+            .expect("root wrap bound fits sqlite integer");
+        storage
+            .connection
+            .execute(
+                "UPDATE vault_meta SET root_key_wrap = zeroblob(?1) WHERE singleton = 1",
+                params![oversized_root],
+            )
+            .expect("tamper oversized root wrap");
+        assert!(matches!(
+            storage.load_root_wrap(),
+            Err(StorageError::InconsistentEncryptedRow)
+        ));
+        assert!(matches!(
+            storage.validate_record_bounds(),
+            Err(StorageError::InconsistentEncryptedRow)
+        ));
+
+        storage
+            .replace_root_wrap(&root_wrap)
+            .expect("restore bounded root wrap");
+        let recovery_secret = RecoverySecret::generate().expect("recovery secret");
+        let recovery_wrap =
+            wrap_root_key_with_recovery_secret(&recovery_secret, &root).expect("wrap recovery key");
+        storage
+            .store_recovery_wrap(&recovery_wrap)
+            .expect("store recovery wrap");
+        let oversized_recovery = i64::try_from(RECOVERY_WRAP_MAX_ENCODED_BYTES + 1)
+            .expect("recovery wrap bound fits sqlite integer");
+        storage
+            .connection
+            .execute(
+                "UPDATE recovery_kit SET kit_wrap = zeroblob(?1) WHERE singleton = 1",
+                params![oversized_recovery],
+            )
+            .expect("tamper oversized recovery wrap");
+        assert!(matches!(
+            storage.load_recovery_wrap(),
+            Err(StorageError::InconsistentEncryptedRow)
+        ));
+        assert!(matches!(
+            storage.validate_record_bounds(),
+            Err(StorageError::InconsistentEncryptedRow)
+        ));
+    }
+
+    #[test]
+    fn replace_from_database_rejects_oversized_wraps_before_mutation() {
+        let dir = tempdir().expect("temp directory");
+        let current_path = dir.path().join("current.sqlite3");
+        let restore_path = dir.path().join("restore.sqlite3");
+        let current = VaultStorage::open(&current_path).expect("open current storage");
+        let current_root = AccountRootKey::generate().expect("current root key");
+        let current_wrap = wrap_root_key("a deliberately long current passphrase", &current_root)
+            .expect("wrap current root key");
+        current
+            .initialize_root_wrap(&current_wrap)
+            .expect("initialize current root wrap");
+
+        let restore = VaultStorage::open(&restore_path).expect("open restore storage");
+        let restore_root = AccountRootKey::generate().expect("restore root key");
+        let restore_wrap = wrap_root_key("a deliberately long restore passphrase", &restore_root)
+            .expect("wrap restore root key");
+        restore
+            .initialize_root_wrap(&restore_wrap)
+            .expect("initialize restore root wrap");
+
+        let oversized_root = i64::try_from(ROOT_WRAP_MAX_ENCODED_BYTES + 1)
+            .expect("root wrap bound fits sqlite integer");
+        restore
+            .connection
+            .execute(
+                "UPDATE vault_meta SET root_key_wrap = zeroblob(?1) WHERE singleton = 1",
+                params![oversized_root],
+            )
+            .expect("tamper restore root wrap");
+        drop(restore);
+        assert!(matches!(
+            current.replace_from_database(&restore_path),
+            Err(StorageError::InconsistentEncryptedRow)
+        ));
+        assert_eq!(
+            current
+                .load_root_wrap()
+                .expect("current root wrap remains")
+                .ciphertext,
+            current_wrap.ciphertext
+        );
+
+        let restore = VaultStorage::open(&restore_path).expect("reopen restore storage");
+        restore
+            .replace_root_wrap(&restore_wrap)
+            .expect("restore bounded candidate root wrap");
+        let secret = RecoverySecret::generate().expect("candidate recovery secret");
+        let recovery_wrap = wrap_root_key_with_recovery_secret(&secret, &restore_root)
+            .expect("wrap candidate recovery key");
+        restore
+            .store_recovery_wrap(&recovery_wrap)
+            .expect("store candidate recovery wrap");
+        let oversized_recovery = i64::try_from(RECOVERY_WRAP_MAX_ENCODED_BYTES + 1)
+            .expect("recovery wrap bound fits sqlite integer");
+        restore
+            .connection
+            .execute(
+                "UPDATE recovery_kit SET kit_wrap = zeroblob(?1) WHERE singleton = 1",
+                params![oversized_recovery],
+            )
+            .expect("tamper restore recovery wrap");
+        drop(restore);
+        assert!(matches!(
+            current.replace_from_database(&restore_path),
+            Err(StorageError::InconsistentEncryptedRow)
+        ));
+        assert_eq!(
+            current
+                .load_root_wrap()
+                .expect("current root wrap still remains")
+                .ciphertext,
+            current_wrap.ciphertext
+        );
+    }
+
+    #[test]
+    fn oversized_item_blob_is_rejected_before_load_and_restore_mutation() {
+        let dir = tempdir().expect("temp directory");
+        let current_path = dir.path().join("current.sqlite3");
+        let restore_path = dir.path().join("restore.sqlite3");
+        let current = VaultStorage::open(&current_path).expect("open current storage");
+        let root = AccountRootKey::generate().expect("root key");
+        let current_item = VaultItem::secure_note("current", "body");
+        let current_encrypted =
+            encrypt_item(&root, &current_item, 7).expect("encrypt current item");
+        current
+            .upsert_item(&current_encrypted)
+            .expect("store current item");
+
+        let restore = VaultStorage::open(&restore_path).expect("open restore storage");
+        let restore_item = VaultItem::secure_note("restore", "body");
+        let restore_encrypted =
+            encrypt_item(&root, &restore_item, 1).expect("encrypt restore item");
+        restore
+            .upsert_item(&restore_encrypted)
+            .expect("store restore item");
+        let oversized_record = i64::try_from(ITEM_MAX_ENCRYPTED_RECORD_BYTES + 1)
+            .expect("item record bound fits sqlite integer");
+        restore
+            .connection
+            .execute(
+                "UPDATE encrypted_items SET encrypted_record = zeroblob(?1) WHERE object_id = ?2",
+                params![oversized_record, restore_item.id.to_string()],
+            )
+            .expect("tamper oversized item record");
+        assert!(matches!(
+            restore.load_item(restore_item.id),
+            Err(StorageError::InconsistentEncryptedRow)
+        ));
+        assert!(matches!(
+            restore.validate_record_bounds(),
+            Err(StorageError::InconsistentEncryptedRow)
+        ));
+        drop(restore);
+
+        assert!(matches!(
+            current.replace_from_database(&restore_path),
+            Err(StorageError::InconsistentEncryptedRow)
+        ));
+        assert_eq!(
+            current
+                .load_item(current_item.id)
+                .expect("live item survives rejected restore")
+                .revision,
+            7
+        );
+        assert!(matches!(
+            current.load_item(restore_item.id),
+            Err(StorageError::ItemNotFound)
+        ));
+    }
+
+    #[test]
+    fn replace_from_database_rejects_excessive_item_rows_before_mutation() {
+        let dir = tempdir().expect("temp directory");
+        let current_path = dir.path().join("current.sqlite3");
+        let restore_path = dir.path().join("restore.sqlite3");
+        let current = VaultStorage::open(&current_path).expect("open current storage");
+        let root = AccountRootKey::generate().expect("root key");
+        let current_item = VaultItem::secure_note("current", "body");
+        let current_encrypted =
+            encrypt_item(&root, &current_item, 3).expect("encrypt current item");
+        current
+            .upsert_item(&current_encrypted)
+            .expect("store current item");
+
+        {
+            let restore = VaultStorage::open(&restore_path).expect("open restore storage");
+            seed_zero_blob_item_rows(&restore, ITEM_MAX_OBJECTS + 1);
+        }
+
+        assert!(matches!(
+            current.replace_from_database(&restore_path),
+            Err(StorageError::InconsistentEncryptedRow)
+        ));
+        assert_eq!(
+            current
+                .load_item(current_item.id)
+                .expect("live item survives rejected restore")
+                .revision,
+            3
+        );
+    }
+
+    #[test]
+    fn fresh_database_supports_recovery_wrap_round_trip() {
         let dir = tempdir().expect("temp directory");
         let storage = VaultStorage::open(dir.path().join("vault.sqlite3")).expect("open storage");
         assert!(!storage.has_recovery_wrap().expect("initially empty"));

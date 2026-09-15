@@ -21,7 +21,7 @@ Rule: cloud integration starts only after the local platform below is stable.
 ### OWNERSHIP
 | # | Item | Status |
 |---|------|--------|
-| 7 | Receipts | 🟡 Partial — documents linked to possessions via encrypted links; no dedicated receipt type, no return/refund tracking |
+| 7 | Receipts | ✅ Done — dedicated encrypted receipts, masked references, links/attachments, return/refund tracking + Today deadlines |
 | 8 | Warranty tracking | ✅ Done — `warranty_expiry` + Today alerts |
 | 9 | Expiry/renewal reminders | ✅ Done — tested deadlines engine in `vault-core`, Today panel over IPC |
 
@@ -61,12 +61,11 @@ Rule: cloud integration starts only after the local platform below is stable.
 2. Emergency timed-release state machine (local simulation first, Durable Object later).
 3. Selected legacy access per asset + private-forever/destruction UX.
 4. Plan test (simulation) + preparedness score.
-5. Attachments (chunked encrypted files — needs the nonce-framing review first).
-6. Sync: device auth, D1 metadata, R2 blobs, queues/notifications.
-7. OS keystore + biometric unlock; clipboard timed-clear; passkeys/TOTP.
-8. Subscriptions, return/refund tracking, home inventory, account-closure plan.
-9. Email import, browser capture, mobile scanner, private-AI modes (local-first per spec).
-10. Audit/version history UI (data already exists as revisions), family space, secure links.
+5. Sync: device auth, D1 metadata, R2 blobs, queues/notifications.
+6. OS keystore + biometric unlock; clipboard timed-clear; passkeys/TOTP.
+7. Subscriptions, home inventory, account-closure plan.
+8. Email import, browser capture, mobile scanner, private-AI modes (local-first per spec).
+9. Audit/version history UI (data already exists as revisions), family space, secure links.
 
 ## Non-goals (explicit)
 Password autofill, banking/investment aggregation, resale marketplace, whole-vault

@@ -102,6 +102,7 @@ pub fn civil_from_days(z: i64) -> (i32, u32, u32) {
 /// Sources:
 /// - `Document` → `expiry` ("Document expiry")
 /// - `Insurance` → `renewal` ("Insurance renewal")
+/// - `Receipt` → `return_by` ("Return deadline") or `refund_due` ("Refund due")
 /// - `Vehicle` → `renewal` ("Vehicle renewal")
 /// - `Possession` → `warranty_expiry` ("Warranty expiry")
 ///
@@ -115,6 +116,18 @@ pub fn collect_deadlines(items: &[VaultItem], today: (i32, u32, u32)) -> Vec<Dea
         let (field, label): (&str, &'static str) = match item.kind {
             ItemKind::Document => ("expiry", "Document expiry"),
             ItemKind::Insurance => ("renewal", "Insurance renewal"),
+            ItemKind::Receipt => {
+                let status = item
+                    .fields
+                    .get("tracking_status")
+                    .map_or("", String::as_str);
+                match status {
+                    "" => continue,
+                    "refund_pending" => ("refund_due", "Refund due"),
+                    "refunded" | "kept" | "returned" => continue,
+                    _ => ("return_by", "Return deadline"),
+                }
+            }
             ItemKind::Vehicle => ("renewal", "Vehicle renewal"),
             ItemKind::Possession => ("warranty_expiry", "Warranty expiry"),
             _ => continue,
@@ -290,6 +303,18 @@ mod tests {
     fn labels_and_date_math_match_sources() {
         let doc = VaultItem::document("Doc", "N", "I", "2024-05-10", "");
         let ins = VaultItem::insurance("Ins", "P", "T", "N", "2024-05-10", "");
+        let receipt = VaultItem::receipt(
+            "Receipt",
+            "Store",
+            "2024-05-01",
+            "100",
+            "USD",
+            "R-1",
+            "return_planned",
+            "2024-05-10",
+            "",
+            "",
+        );
         let veh = VaultItem::vehicle(
             "Veh",
             "Make",
@@ -311,8 +336,8 @@ mod tests {
             "2024-05-10",
             "",
         );
-        let deadlines = collect_deadlines(&[doc, ins, veh, pos], today());
-        assert_eq!(deadlines.len(), 4);
+        let deadlines = collect_deadlines(&[doc, ins, receipt, veh, pos], today());
+        assert_eq!(deadlines.len(), 5);
         for deadline in &deadlines {
             assert_eq!(deadline.days_until, 0);
         }
@@ -325,6 +350,7 @@ mod tests {
         };
         assert_eq!(label_for("Doc"), "Document expiry");
         assert_eq!(label_for("Ins"), "Insurance renewal");
+        assert_eq!(label_for("Receipt"), "Return deadline");
         assert_eq!(label_for("Veh"), "Vehicle renewal");
         assert_eq!(label_for("Pos"), "Warranty expiry");
 
@@ -344,6 +370,72 @@ mod tests {
         assert_eq!(parse_ymd("2024-01-00"), None);
         assert_eq!(parse_ymd("2024-04-31"), None);
         assert_eq!(parse_ymd("abcd-ef-gh"), None);
+    }
+
+    #[test]
+    fn completed_receipt_does_not_create_return_deadline() {
+        let refunded = VaultItem::receipt(
+            "refunded",
+            "Store",
+            "2024-05-01",
+            "100",
+            "USD",
+            "R-1",
+            "refunded",
+            "2024-05-12",
+            "2024-05-20",
+            "",
+        );
+        let kept = VaultItem::receipt(
+            "kept",
+            "Store",
+            "2024-05-01",
+            "100",
+            "USD",
+            "R-2",
+            "kept",
+            "2024-05-12",
+            "",
+            "",
+        );
+        assert!(collect_deadlines(&[refunded, kept], today()).is_empty());
+    }
+
+    #[test]
+    fn untracked_receipt_does_not_create_return_deadline() {
+        let receipt = VaultItem::receipt(
+            "Not tracked",
+            "Store",
+            "2024-05-01",
+            "100",
+            "USD",
+            "R-4",
+            "",
+            "2024-05-12",
+            "",
+            "",
+        );
+        assert!(collect_deadlines(&[receipt], today()).is_empty());
+    }
+
+    #[test]
+    fn refund_pending_receipt_uses_refund_due_deadline() {
+        let receipt = VaultItem::receipt(
+            "Refund",
+            "Store",
+            "2024-05-01",
+            "100",
+            "USD",
+            "R-3",
+            "refund_pending",
+            "2024-05-12",
+            "2024-05-15",
+            "",
+        );
+        let deadlines = collect_deadlines(&[receipt], today());
+        assert_eq!(deadlines.len(), 1);
+        assert_eq!(deadlines[0].label, "Refund due");
+        assert_eq!(deadlines[0].date, "2024-05-15");
     }
 
     #[test]

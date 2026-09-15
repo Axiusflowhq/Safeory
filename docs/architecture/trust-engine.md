@@ -54,7 +54,7 @@ Rules:
 ## Ownership Graph (V1 minimal)
 
 - The object is the node; local encrypted files are attachment objects. V1 nodes:
-  `vehicle`, `possession`. Relations: explicit `links: Vec<Uuid>` on
+  `receipt`, `vehicle`, `possession`. Relations: explicit `links: Vec<Uuid>` on
   `VaultItem` (default empty, so v1/v2 payloads still decode).
 - Link semantics: receipt <-> possession, policy <-> vehicle/property,
   service record <-> vehicle. Links are encrypted inside the item payload,

@@ -93,6 +93,36 @@ type DocumentDetailView = {
   notes: string;
 };
 
+type ReceiptView = {
+  id: string;
+  revision: number;
+  title: string;
+  merchant: string;
+  purchase_date: string;
+  amount: string;
+  currency: string;
+  tracking_status: string;
+  return_by: string;
+  refund_due: string;
+  has_receipt_reference: boolean;
+  links: string[];
+};
+
+type ReceiptDetailView = {
+  id: string;
+  revision: number;
+  title: string;
+  merchant: string;
+  purchase_date: string;
+  amount: string;
+  currency: string;
+  receipt_reference: string;
+  tracking_status: string;
+  return_by: string;
+  refund_due: string;
+  notes: string;
+};
+
 type InsuranceView = {
   id: string;
   revision: number;
@@ -220,6 +250,7 @@ type VaultItem =
   | ({ kind: "secure_note" } & NoteView)
   | ({ kind: "password" } & CredentialView)
   | ({ kind: "document" } & DocumentView)
+  | ({ kind: "receipt" } & ReceiptView)
   | ({ kind: "insurance" } & InsuranceView)
   | ({ kind: "financial" } & FinancialView)
   | ({ kind: "property" } & PropertyView)
@@ -230,6 +261,7 @@ type Section =
   | "secure_note"
   | "password"
   | "document"
+  | "receipt"
   | "insurance"
   | "financial"
   | "property"
@@ -240,6 +272,7 @@ type EditorState =
   | { kind: "secure_note"; item: NoteView | null }
   | { kind: "password"; item: CredentialView | null }
   | { kind: "document"; item: DocumentView | null }
+  | { kind: "receipt"; item: ReceiptView | null }
   | { kind: "insurance"; item: InsuranceView | null }
   | { kind: "financial"; item: FinancialView | null }
   | { kind: "property"; item: PropertyView | null }
@@ -327,6 +360,7 @@ export default function App() {
   const [trashItems, setTrashItems] = useState<TrashedItemView[]>([]);
   const [loadingTrash, setLoadingTrash] = useState(false);
   const trashLoadGeneration = useRef(0);
+  const deadlineLoadGeneration = useRef(0);
   const [deviceSettings, setDeviceSettings] = useState<DeviceSettings>(
     DEFAULT_DEVICE_SETTINGS,
   );
@@ -341,7 +375,48 @@ export default function App() {
     [sessionFence],
   );
 
+  const refreshDeadlines = useCallback(
+    (token: number) => {
+      if (!desktopRuntime) return;
+      const requestGeneration = ++deadlineLoadGeneration.current;
+      const today = deviceLocalCalendarDate();
+      void invoke<DeadlineRow[]>("list_deadlines", {
+        todayYear: today.year,
+        todayMonth: today.month,
+        todayDay: today.day,
+      })
+        .then((rows) => {
+          if (
+            !sessionFence.accepts(token) ||
+            requestGeneration !== deadlineLoadGeneration.current
+          )
+            return;
+          // Sorted as returned by Rust; TodayPanel renders the top entries as-is.
+          setDeadlines(
+            rows.slice(0, 8).map((row) => ({
+              id: row.item_id,
+              title: row.title,
+              label: row.label,
+              date: row.date,
+              daysUntil: row.days_until,
+            })),
+          );
+        })
+        .catch(() => {
+          // Deadlines are advisory: fall back to local parsing silently.
+          if (
+            sessionFence.accepts(token) &&
+            requestGeneration === deadlineLoadGeneration.current
+          ) {
+            setDeadlines(null);
+          }
+        });
+    },
+    [sessionFence],
+  );
+
   const clearPlaintextUi = useCallback(() => {
+    deadlineLoadGeneration.current += 1;
     setItems([]);
     setSelectedId(null);
     setEditor(null);
@@ -425,25 +500,54 @@ export default function App() {
   useEffect(() => {
     if (!desktopRuntime || screen !== "vault") return;
     const token = sessionFence.token();
-    void invoke<DeadlineRow[]>("list_deadlines")
-      .then((rows) => {
-        if (!sessionFence.accepts(token)) return;
-        // Sorted as returned by Rust; TodayPanel renders the top entries as-is.
-        setDeadlines(
-          rows.slice(0, 8).map((row) => ({
-            id: row.item_id,
-            title: row.title,
-            label: row.label,
-            date: row.date,
-            daysUntil: row.days_until,
-          })),
-        );
-      })
-      .catch(() => {
-        // Deadlines are advisory: fall back to the local parse helper silently.
-        if (sessionFence.accepts(token)) setDeadlines(null);
-      });
-  }, [screen, sessionFence]);
+    refreshDeadlines(token);
+  }, [refreshDeadlines, screen, sessionFence]);
+
+  useEffect(() => {
+    if (!desktopRuntime || screen !== "vault") return;
+    let currentDay = deviceLocalCalendarDateKey();
+    let timeoutId: number | undefined;
+
+    const refreshAfterDayChange = () => {
+      const nextDay = deviceLocalCalendarDateKey();
+      if (nextDay === currentDay) return;
+      currentDay = nextDay;
+      refreshDeadlines(sessionFence.token());
+    };
+
+    const scheduleNextDayCheck = () => {
+      const now = new Date();
+      const nextLocalDay = new Date(
+        now.getFullYear(),
+        now.getMonth(),
+        now.getDate() + 1,
+        0,
+        0,
+        1,
+        0,
+      );
+      timeoutId = window.setTimeout(
+        () => {
+          refreshAfterDayChange();
+          scheduleNextDayCheck();
+        },
+        Math.max(1_000, nextLocalDay.getTime() - now.getTime()),
+      );
+    };
+
+    const onVisible = () => {
+      if (document.visibilityState === "visible") refreshAfterDayChange();
+    };
+
+    scheduleNextDayCheck();
+    window.addEventListener("focus", refreshAfterDayChange);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+      window.removeEventListener("focus", refreshAfterDayChange);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [refreshDeadlines, screen, sessionFence]);
 
   useEffect(() => {
     if (!desktopRuntime || screen !== "vault") return;
@@ -558,6 +662,7 @@ export default function App() {
     (item) => item.kind === "password",
   ).length;
   const documentCount = items.filter((item) => item.kind === "document").length;
+  const receiptCount = items.filter((item) => item.kind === "receipt").length;
   const insuranceCount = items.filter(
     (item) => item.kind === "insurance",
   ).length;
@@ -662,6 +767,7 @@ export default function App() {
       if (!sessionFence.accepts(token)) return;
       setItems((current) => current.filter((item) => item.id !== selected.id));
       setSelectedId(null);
+      refreshDeadlines(token);
     } catch (reason) {
       if (sessionFence.accepts(token)) setError(readError(reason));
     }
@@ -675,6 +781,7 @@ export default function App() {
         id: item.id,
         revision: item.revision,
       });
+      refreshDeadlines(token);
       const refreshed = await fetchVaultItems();
       if (!sessionFence.accepts(token)) return;
       setItems(refreshed.items);
@@ -718,6 +825,8 @@ export default function App() {
       setEditor({ kind: "password", item: null });
     } else if (section === "document") {
       setEditor({ kind: "document", item: null });
+    } else if (section === "receipt") {
+      setEditor({ kind: "receipt", item: null });
     } else if (section === "insurance") {
       setEditor({ kind: "insurance", item: null });
     } else if (section === "financial") {
@@ -743,6 +852,7 @@ export default function App() {
     setSelectedId(item.id);
     setEditor(null);
     setError(null);
+    refreshDeadlines(token);
   };
 
   return (
@@ -878,6 +988,7 @@ export default function App() {
                   Credentials ({credentialCount})
                 </option>
                 <option value="document">Documents ({documentCount})</option>
+                <option value="receipt">Receipts ({receiptCount})</option>
                 <option value="insurance">Insurance ({insuranceCount})</option>
                 <option value="financial">Financial ({financialCount})</option>
                 <option value="property">Property ({propertyCount})</option>
@@ -1054,6 +1165,18 @@ export default function App() {
               }
               onError={setError}
             />
+          ) : editor?.kind === "receipt" ? (
+            <ReceiptComposer
+              key={`receipt:${editor.item?.id ?? "new"}`}
+              receipt={editor.item}
+              generation={sessionFence.token()}
+              isGenerationCurrent={isSessionGenerationCurrent}
+              onCancel={() => setEditor(null)}
+              onSaved={(receipt, created, token) =>
+                saveItem(token, { kind: "receipt", ...receipt }, created)
+              }
+              onError={setError}
+            />
           ) : editor?.kind === "insurance" ? (
             <InsuranceComposer
               key={`insurance:${editor.item?.id ?? "new"}`}
@@ -1160,6 +1283,22 @@ export default function App() {
               onEdit={() => {
                 setError(null);
                 setEditor({ kind: "document", item: withoutKind(selected) });
+              }}
+              onError={setError}
+            />
+          ) : selected?.kind === "receipt" ? (
+            <ReceiptReader
+              key={selected.id}
+              receipt={selected}
+              linkedTitles={linkedTitles}
+              allItems={items}
+              onJump={jumpToRecord}
+              onLinksChanged={() => void refreshVaultItems()}
+              generation={sessionFence.token()}
+              isGenerationCurrent={isSessionGenerationCurrent}
+              onEdit={() => {
+                setError(null);
+                setEditor({ kind: "receipt", item: withoutKind(selected) });
               }}
               onError={setError}
             />
@@ -3099,6 +3238,243 @@ function DocumentComposer({
   );
 }
 
+function ReceiptComposer({
+  receipt,
+  generation,
+  isGenerationCurrent,
+  onCancel,
+  onSaved,
+  onError,
+}: {
+  receipt: ReceiptView | null;
+  generation: number;
+  isGenerationCurrent: (generation: number) => boolean;
+  onCancel: () => void;
+  onSaved: (receipt: ReceiptView, created: boolean, generation: number) => void;
+  onError: (message: string | null) => void;
+}) {
+  const [title, setTitle] = useState(receipt?.title ?? "");
+  const [merchant, setMerchant] = useState(receipt?.merchant ?? "");
+  const [purchaseDate, setPurchaseDate] = useState(
+    receipt?.purchase_date ?? "",
+  );
+  const [amount, setAmount] = useState(receipt?.amount ?? "");
+  const [currency, setCurrency] = useState(receipt?.currency ?? "");
+  const [receiptReference, setReceiptReference] = useState("");
+  const [trackingStatus, setTrackingStatus] = useState(
+    receipt?.tracking_status ?? "",
+  );
+  const [returnBy, setReturnBy] = useState(receipt?.return_by ?? "");
+  const [refundDue, setRefundDue] = useState(receipt?.refund_due ?? "");
+  const [notes, setNotes] = useState("");
+  const [revealed, setRevealed] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const editing = receipt !== null;
+  const [detailReady, setDetailReady] = useState(!editing);
+
+  useEffect(() => {
+    if (!receipt) return;
+    let active = true;
+    void invoke<ReceiptDetailView>("get_receipt", {
+      id: receipt.id,
+      revision: receipt.revision,
+    })
+      .then((detail) => {
+        if (!active || !isGenerationCurrent(generation)) return;
+        setMerchant(detail.merchant);
+        setPurchaseDate(detail.purchase_date);
+        setAmount(detail.amount);
+        setCurrency(detail.currency);
+        setReceiptReference(detail.receipt_reference);
+        setTrackingStatus(detail.tracking_status);
+        setReturnBy(detail.return_by);
+        setRefundDue(detail.refund_due);
+        setNotes(detail.notes);
+        setDetailReady(true);
+      })
+      .catch((reason: unknown) => {
+        if (active && isGenerationCurrent(generation))
+          onError(readError(reason));
+      });
+    return () => {
+      active = false;
+    };
+  }, [receipt, generation, isGenerationCurrent, onError]);
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (!title.trim() || !detailReady) return;
+    setSaving(true);
+    onError(null);
+    try {
+      const input = {
+        title,
+        merchant,
+        purchaseDate,
+        amount,
+        currency,
+        receiptReference,
+        trackingStatus,
+        returnBy,
+        refundDue,
+        notes,
+      };
+      const saved = editing
+        ? await invoke<ReceiptView>("update_receipt", {
+            id: receipt.id,
+            revision: receipt.revision,
+            ...input,
+          })
+        : await invoke<ReceiptView>("create_receipt", input);
+      setReceiptReference("");
+      setNotes("");
+      if (isGenerationCurrent(generation)) onSaved(saved, !editing, generation);
+    } catch (reason) {
+      if (isGenerationCurrent(generation)) onError(readError(reason));
+    } finally {
+      if (isGenerationCurrent(generation)) setSaving(false);
+    }
+  }
+
+  return (
+    <EditorFrame
+      title={editing ? "Edit receipt" : "New receipt"}
+      onCancel={onCancel}
+    >
+      <form onSubmit={submit} autoComplete="off">
+        <input
+          autoFocus
+          value={title}
+          onChange={(event) => setTitle(event.target.value)}
+          placeholder="MacBook receipt, appliance invoice…"
+          aria-label="Receipt title"
+          className="editor-title"
+        />
+        <div className="mt-8 grid gap-5 sm:grid-cols-2">
+          <Field label="Merchant">
+            <input
+              value={merchant}
+              autoComplete="off"
+              onChange={(event) => setMerchant(event.target.value)}
+              className="field-input"
+              placeholder="Store or seller"
+            />
+          </Field>
+          <Field label="Purchase date">
+            <input
+              value={purchaseDate}
+              type="date"
+              autoComplete="off"
+              onChange={(event) => setPurchaseDate(event.target.value)}
+              className="field-input"
+            />
+          </Field>
+        </div>
+        <div className="mt-5 grid gap-5 sm:grid-cols-2">
+          <Field label="Amount">
+            <input
+              value={amount}
+              autoComplete="off"
+              onChange={(event) => setAmount(event.target.value)}
+              className="field-input"
+              placeholder="199900"
+            />
+          </Field>
+          <Field label="Currency">
+            <input
+              value={currency}
+              autoComplete="off"
+              onChange={(event) => setCurrency(event.target.value)}
+              className="field-input"
+              placeholder="INR, USD, EUR…"
+            />
+          </Field>
+        </div>
+        <div className="mt-5">
+          <Field label="Receipt reference">
+            <div className="relative">
+              <input
+                value={receiptReference}
+                type={revealed ? "text" : "password"}
+                autoComplete="off"
+                onChange={(event) => setReceiptReference(event.target.value)}
+                disabled={!detailReady}
+                className="field-input pr-11"
+                placeholder="Invoice, order or receipt number"
+              />
+              <button
+                type="button"
+                aria-label={
+                  revealed ? "Hide receipt reference" : "Show receipt reference"
+                }
+                onClick={() => setRevealed((current) => !current)}
+                className="absolute right-2 top-1/2 grid size-8 -translate-y-1/2 place-items-center rounded-lg text-[var(--text-muted)] transition hover:bg-[var(--selected)] hover:text-[var(--text-primary)]"
+              >
+                <HugeiconsIcon
+                  icon={revealed ? EyeOffIcon : EyeIcon}
+                  className="size-4"
+                  aria-hidden="true"
+                />
+              </button>
+            </div>
+          </Field>
+        </div>
+        <div className="mt-5 grid gap-5 sm:grid-cols-2">
+          <Field label="Return / refund status">
+            <select
+              value={trackingStatus}
+              onChange={(event) => setTrackingStatus(event.target.value)}
+              className="field-input"
+            >
+              <option value="">Not tracking</option>
+              <option value="kept">Keeping item</option>
+              <option value="return_planned">Return planned</option>
+              <option value="returned">Returned</option>
+              <option value="refund_pending">Refund pending</option>
+              <option value="refunded">Refunded</option>
+            </select>
+          </Field>
+          <Field label="Return by">
+            <input
+              value={returnBy}
+              type="date"
+              autoComplete="off"
+              onChange={(event) => setReturnBy(event.target.value)}
+              className="field-input"
+            />
+          </Field>
+        </div>
+        <div className="mt-5">
+          <Field label="Refund due">
+            <input
+              value={refundDue}
+              type="date"
+              autoComplete="off"
+              onChange={(event) => setRefundDue(event.target.value)}
+              className="field-input"
+            />
+          </Field>
+        </div>
+        <div className="mt-5">
+          <Field label="Notes">
+            <textarea
+              value={notes}
+              onChange={(event) => setNotes(event.target.value)}
+              className="field-input min-h-28 resize-y"
+              placeholder="Optional private context"
+            />
+          </Field>
+        </div>
+        <EditorFooter
+          saving={saving}
+          disabled={!title.trim() || !detailReady}
+          action={editing ? "Save changes" : "Save receipt"}
+        />
+      </form>
+    </EditorFrame>
+  );
+}
+
 function InsuranceComposer({
   insurance,
   generation,
@@ -4780,6 +5156,175 @@ function DocumentReader({
   );
 }
 
+function ReceiptReader({
+  receipt,
+  generation,
+  isGenerationCurrent,
+  linkedTitles,
+  allItems,
+  onJump,
+  onLinksChanged,
+  onEdit,
+  onError,
+}: {
+  receipt: ReceiptView;
+  generation: number;
+  isGenerationCurrent: (generation: number) => boolean;
+  onEdit: () => void;
+  onError: (message: string | null) => void;
+} & LinkedSectionProps) {
+  const [receiptReference, setReceiptReference] = useState<string | null>(null);
+  const [notes, setNotes] = useState("");
+  const [revealed, setRevealed] = useState(false);
+  const [loadingSecret, setLoadingSecret] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    void invoke<string>("get_receipt_notes", {
+      id: receipt.id,
+      revision: receipt.revision,
+    })
+      .then((value) => {
+        if (active && isGenerationCurrent(generation)) setNotes(value);
+      })
+      .catch((reason: unknown) => {
+        if (active && isGenerationCurrent(generation))
+          onError(readError(reason));
+      });
+    return () => {
+      active = false;
+    };
+  }, [receipt.id, receipt.revision, generation, isGenerationCurrent, onError]);
+
+  async function toggleReceiptReference() {
+    if (revealed) {
+      setRevealed(false);
+      setReceiptReference(null);
+      return;
+    }
+    if (!receipt.has_receipt_reference || loadingSecret) return;
+    setLoadingSecret(true);
+    onError(null);
+    try {
+      const value = await invoke<string>("reveal_receipt_reference", {
+        id: receipt.id,
+        revision: receipt.revision,
+      });
+      if (!isGenerationCurrent(generation)) return;
+      setReceiptReference(value);
+      setRevealed(true);
+    } catch (reason) {
+      if (isGenerationCurrent(generation)) onError(readError(reason));
+    } finally {
+      if (isGenerationCurrent(generation)) setLoadingSecret(false);
+    }
+  }
+
+  return (
+    <article className="mx-auto max-w-3xl px-8 py-12">
+      <ReaderHeader icon={FileTextIcon} label="Receipt" onEdit={onEdit} />
+      <h1 className="text-3xl font-semibold tracking-[-0.035em]">
+        {receipt.title}
+      </h1>
+      <div className="mt-8 overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface-secondary)]">
+        <CredentialRow label="Merchant" value={receipt.merchant || "Not set"} />
+        <CredentialRow
+          label="Purchase date"
+          value={receipt.purchase_date || "Not set"}
+        />
+        <CredentialRow
+          label="Amount"
+          value={
+            receipt.amount
+              ? `${receipt.amount}${receipt.currency ? ` ${receipt.currency}` : ""}`
+              : "Not set"
+          }
+        />
+        <CredentialRow
+          label="Status"
+          value={receiptTrackingLabel(receipt.tracking_status)}
+        />
+        <CredentialRow
+          label="Return by"
+          value={receipt.return_by || "Not set"}
+        />
+        <CredentialRow
+          label="Refund due"
+          value={receipt.refund_due || "Not set"}
+        />
+        <div className="grid grid-cols-[140px_minmax(0,1fr)_auto] items-center gap-4 border-t border-[var(--border)] px-5 py-4">
+          <div className="text-sm text-[var(--text-muted)]">
+            Receipt reference
+          </div>
+          <div
+            className={`min-w-0 truncate font-mono text-sm ${
+              receipt.has_receipt_reference
+                ? "text-[var(--text-primary)]"
+                : "text-[var(--text-muted)]"
+            }`}
+          >
+            {receipt.has_receipt_reference
+              ? revealed && receiptReference !== null
+                ? receiptReference
+                : "••••••••••••"
+              : "Not set"}
+          </div>
+          {receipt.has_receipt_reference ? (
+            <button
+              type="button"
+              onClick={() => void toggleReceiptReference()}
+              disabled={loadingSecret}
+              className="flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs text-[var(--text-muted)] transition hover:bg-[var(--selected)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-55"
+            >
+              <HugeiconsIcon
+                icon={revealed ? EyeOffIcon : EyeIcon}
+                className="size-4"
+                aria-hidden="true"
+              />
+              {loadingSecret ? "Opening…" : revealed ? "Hide" : "Reveal"}
+            </button>
+          ) : null}
+        </div>
+      </div>
+      {notes ? (
+        <div className="mt-8">
+          <div className="text-xs font-medium uppercase tracking-[0.12em] text-[var(--text-muted)]">
+            Notes
+          </div>
+          <div className="mt-3 whitespace-pre-wrap text-[15px] leading-7 text-[var(--text-secondary)]">
+            {notes}
+          </div>
+        </div>
+      ) : null}
+      <p className="mt-8 text-xs leading-5 text-[var(--text-muted)]">
+        Receipt references and notes stay out of list and search state and are
+        fetched only inside this receipt view.
+      </p>
+      <AttachmentsSection
+        key={receipt.id}
+        ownerItemId={receipt.id}
+        revision={receipt.revision}
+        generation={generation}
+        isGenerationCurrent={isGenerationCurrent}
+        onAttachmentsChanged={onLinksChanged}
+        onError={onError}
+      />
+      <LinkedRecordsSection
+        itemId={receipt.id}
+        revision={receipt.revision}
+        links={receipt.links ?? []}
+        generation={generation}
+        isGenerationCurrent={isGenerationCurrent}
+        linkedTitles={linkedTitles}
+        allItems={allItems}
+        onJump={onJump}
+        onLinksChanged={onLinksChanged}
+        onError={onError}
+      />
+    </article>
+  );
+}
+
 function InsuranceReader({
   insurance,
   generation,
@@ -5833,7 +6378,7 @@ function TrashCollection({
     <div>
       <div>
         <div className="text-[11px] font-medium uppercase tracking-[0.12em] text-[var(--text-muted)]">
-          Trash Â· {sectionLabel(section)}
+          Trash · {sectionLabel(section)}
         </div>
         <h1 className="mt-1 text-2xl font-semibold tracking-[-0.03em]">
           Deleted records
@@ -5933,6 +6478,7 @@ function sectionLabel(section: Section) {
   if (section === "secure_note") return "Secure notes";
   if (section === "password") return "Credentials";
   if (section === "document") return "Documents";
+  if (section === "receipt") return "Receipts";
   if (section === "insurance") return "Insurance";
   if (section === "financial") return "Financial";
   if (section === "property") return "Property";
@@ -5944,6 +6490,7 @@ function newItemLabel(section: Section) {
   if (section === "secure_note") return "New note";
   if (section === "password") return "New credential";
   if (section === "document") return "New document";
+  if (section === "receipt") return "New receipt";
   if (section === "insurance") return "New insurance";
   if (section === "financial") return "New financial record";
   if (section === "property") return "New property";
@@ -5955,6 +6502,7 @@ function sectionIcon(section: Section) {
   if (section === "secure_note") return FileTextIcon;
   if (section === "password") return Key01Icon;
   if (section === "document") return DocumentValidationIcon;
+  if (section === "receipt") return FileTextIcon;
   if (section === "insurance") return ShieldCheckIcon;
   if (section === "financial") return BankIcon;
   if (section === "property") return Building03Icon;
@@ -5966,6 +6514,7 @@ const SECTION_ORDER: Section[] = [
   "secure_note",
   "password",
   "document",
+  "receipt",
   "insurance",
   "financial",
   "property",
@@ -5978,6 +6527,7 @@ function kindToSection(kind: string): Section | null {
     kind === "secure_note" ||
     kind === "password" ||
     kind === "document" ||
+    kind === "receipt" ||
     kind === "insurance" ||
     kind === "financial" ||
     kind === "property" ||
@@ -6018,6 +6568,7 @@ function EmptyVault({
   const notes = section === "secure_note";
   const credentials = section === "password";
   const documents = section === "document";
+  const receipts = section === "receipt";
   const insurance = section === "insurance";
   const financial = section === "financial";
   const property = section === "property";
@@ -6034,15 +6585,17 @@ function EmptyVault({
                   ? Key01Icon
                   : documents
                     ? DocumentValidationIcon
-                    : insurance
-                      ? ShieldCheckIcon
-                      : financial
-                        ? BankIcon
-                        : property
-                          ? Building03Icon
-                          : vehicle
-                            ? Car01Icon
-                            : PackageIcon
+                    : receipts
+                      ? FileTextIcon
+                      : insurance
+                        ? ShieldCheckIcon
+                        : financial
+                          ? BankIcon
+                          : property
+                            ? Building03Icon
+                            : vehicle
+                              ? Car01Icon
+                              : PackageIcon
             }
             className="size-5"
             aria-hidden="true"
@@ -6057,15 +6610,17 @@ function EmptyVault({
                 ? "No credentials yet"
                 : documents
                   ? "No documents yet"
-                  : insurance
-                    ? "No insurance records yet"
-                    : financial
-                      ? "No financial records yet"
-                      : property
-                        ? "No property records yet"
-                        : vehicle
-                          ? "No vehicle records yet"
-                          : "No possession records yet"}
+                  : receipts
+                    ? "No receipts yet"
+                    : insurance
+                      ? "No insurance records yet"
+                      : financial
+                        ? "No financial records yet"
+                        : property
+                          ? "No property records yet"
+                          : vehicle
+                            ? "No vehicle records yet"
+                            : "No possession records yet"}
         </h1>
         <p className="mt-2 text-sm leading-6 text-[var(--text-muted)]">
           {browserPreview
@@ -6076,15 +6631,17 @@ function EmptyVault({
                 ? "Store an account username, password, website, and private notes in the encrypted local vault."
                 : documents
                   ? "Store document metadata locally with sensitive document numbers hidden until you reveal them."
-                  : insurance
-                    ? "Store insurance details locally with policy numbers hidden until you reveal them."
-                    : financial
-                      ? "Store financial account metadata locally while keeping account numbers out of list and search state."
-                      : property
-                        ? "Store property metadata locally while keeping addresses and property references hidden until you reveal them."
-                        : vehicle
-                          ? "Store vehicle details locally with registration numbers and VINs hidden until you reveal them."
-                          : "Store possession details locally with serial numbers hidden until you reveal them."}
+                  : receipts
+                    ? "Store receipts locally, link them to possessions, and track return or refund deadlines without exposing receipt references in list state."
+                    : insurance
+                      ? "Store insurance details locally with policy numbers hidden until you reveal them."
+                      : financial
+                        ? "Store financial account metadata locally while keeping account numbers out of list and search state."
+                        : property
+                          ? "Store property metadata locally while keeping addresses and property references hidden until you reveal them."
+                          : vehicle
+                            ? "Store vehicle details locally with registration numbers and VINs hidden until you reveal them."
+                            : "Store possession details locally with serial numbers hidden until you reveal them."}
         </p>
       </div>
     </div>
@@ -6114,6 +6671,7 @@ async function fetchVaultItems() {
   const firstNote = sorted.find((item) => item.kind === "secure_note");
   const firstCredential = sorted.find((item) => item.kind === "password");
   const firstDocument = sorted.find((item) => item.kind === "document");
+  const firstReceipt = sorted.find((item) => item.kind === "receipt");
   const firstInsurance = sorted.find((item) => item.kind === "insurance");
   const firstFinancial = sorted.find((item) => item.kind === "financial");
   const firstProperty = sorted.find((item) => item.kind === "property");
@@ -6125,17 +6683,19 @@ async function fetchVaultItems() {
       ? "password"
       : firstDocument
         ? "document"
-        : firstInsurance
-          ? "insurance"
-          : firstFinancial
-            ? "financial"
-            : firstProperty
-              ? "property"
-              : firstVehicle
-                ? "vehicle"
-                : firstPossession
-                  ? "possession"
-                  : "secure_note";
+        : firstReceipt
+          ? "receipt"
+          : firstInsurance
+            ? "insurance"
+            : firstFinancial
+              ? "financial"
+              : firstProperty
+                ? "property"
+                : firstVehicle
+                  ? "vehicle"
+                  : firstPossession
+                    ? "possession"
+                    : "secure_note";
   return {
     items: sorted,
     initialSection,
@@ -6158,6 +6718,17 @@ function itemMatchesSearch(item: VaultItem, needle: string) {
     return [item.issuer, item.expiry, item.notes].some((value) =>
       value.toLocaleLowerCase().includes(needle),
     );
+  }
+  if (item.kind === "receipt") {
+    return [
+      item.merchant,
+      item.purchase_date,
+      item.amount,
+      item.currency,
+      item.tracking_status,
+      item.return_by,
+      item.refund_due,
+    ].some((value) => value.toLocaleLowerCase().includes(needle));
   }
   if (item.kind === "insurance") {
     return [item.provider, item.policy_type, item.renewal, item.notes].some(
@@ -6195,6 +6766,8 @@ function itemPreview(item: VaultItem) {
   if (item.kind === "password")
     return item.username || item.website || "Credential";
   if (item.kind === "document") return item.issuer || item.expiry || "Document";
+  if (item.kind === "receipt")
+    return item.merchant || item.purchase_date || item.amount || "Receipt";
   if (item.kind === "insurance")
     return item.provider || item.policy_type || "Insurance";
   if (item.kind === "financial")
@@ -6206,6 +6779,15 @@ function itemPreview(item: VaultItem) {
   if (item.kind === "vehicle")
     return item.make || item.model || item.year || "Vehicle";
   return item.brand || item.model || item.store || "Possession";
+}
+
+function receiptTrackingLabel(status: string) {
+  if (status === "kept") return "Keeping item";
+  if (status === "return_planned") return "Return planned";
+  if (status === "returned") return "Returned";
+  if (status === "refund_pending") return "Refund pending";
+  if (status === "refunded") return "Refunded";
+  return "Not tracking";
 }
 
 function withoutKind<T extends VaultItem>(item: T): Omit<T, "kind"> {
@@ -6220,6 +6802,19 @@ type TodayEntry = {
   date: string;
   daysUntil: number;
 };
+
+function deviceLocalCalendarDate(now = new Date()) {
+  return {
+    year: now.getFullYear(),
+    month: now.getMonth() + 1,
+    day: now.getDate(),
+  };
+}
+
+function deviceLocalCalendarDateKey(now = new Date()) {
+  const date = deviceLocalCalendarDate(now);
+  return `${date.year}-${date.month}-${date.day}`;
+}
 
 function parseStrictYYYYMMDD(value: string): number | null {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
@@ -6240,12 +6835,8 @@ function parseStrictYYYYMMDD(value: string): number | null {
 }
 
 function collectTodayEntries(items: VaultItem[]): TodayEntry[] {
-  const now = new Date();
-  const todayMs = Date.UTC(
-    now.getUTCFullYear(),
-    now.getUTCMonth(),
-    now.getUTCDate(),
-  );
+  const today = deviceLocalCalendarDate();
+  const todayMs = Date.UTC(today.year, today.month - 1, today.day);
   const entries: TodayEntry[] = [];
   for (const item of items) {
     let date = "";
@@ -6253,6 +6844,22 @@ function collectTodayEntries(items: VaultItem[]): TodayEntry[] {
     if (item.kind === "document") {
       date = item.expiry;
       label = "Document expiry";
+    } else if (item.kind === "receipt") {
+      if (!item.tracking_status) {
+        continue;
+      } else if (item.tracking_status === "refund_pending") {
+        date = item.refund_due;
+        label = "Refund due";
+      } else if (
+        item.tracking_status === "refunded" ||
+        item.tracking_status === "kept" ||
+        item.tracking_status === "returned"
+      ) {
+        continue;
+      } else {
+        date = item.return_by;
+        label = "Return deadline";
+      }
     } else if (item.kind === "insurance") {
       date = item.renewal;
       label = "Insurance renewal";

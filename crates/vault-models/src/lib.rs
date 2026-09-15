@@ -13,6 +13,7 @@ pub enum ItemKind {
     Financial,
     Property,
     Document,
+    Receipt,
     Vehicle,
     Possession,
     EmergencyInstruction,
@@ -122,6 +123,40 @@ impl VaultItem {
         Self {
             id: Uuid::new_v4(),
             kind: ItemKind::Document,
+            title: title.into(),
+            links: Vec::new(),
+            attachments: Vec::new(),
+            fields,
+            notes: (!notes.is_empty()).then_some(notes),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn receipt(
+        title: impl Into<String>,
+        merchant: impl Into<String>,
+        purchase_date: impl Into<String>,
+        amount: impl Into<String>,
+        currency: impl Into<String>,
+        receipt_reference: impl Into<String>,
+        tracking_status: impl Into<String>,
+        return_by: impl Into<String>,
+        refund_due: impl Into<String>,
+        notes: impl Into<String>,
+    ) -> Self {
+        let mut fields = BTreeMap::new();
+        fields.insert("merchant".to_owned(), merchant.into());
+        fields.insert("purchase_date".to_owned(), purchase_date.into());
+        fields.insert("amount".to_owned(), amount.into());
+        fields.insert("currency".to_owned(), currency.into());
+        fields.insert("receipt_reference".to_owned(), receipt_reference.into());
+        fields.insert("tracking_status".to_owned(), tracking_status.into());
+        fields.insert("return_by".to_owned(), return_by.into());
+        fields.insert("refund_due".to_owned(), refund_due.into());
+        let notes = notes.into();
+        Self {
+            id: Uuid::new_v4(),
+            kind: ItemKind::Receipt,
             title: title.into(),
             links: Vec::new(),
             attachments: Vec::new(),
@@ -339,6 +374,36 @@ mod tests {
             item.fields.get("warranty_expiry").map(String::as_str),
             Some("2027-01-15")
         );
+    }
+
+    #[test]
+    fn receipt_constructor_sets_return_tracking_fields() {
+        let item = VaultItem::receipt(
+            "MacBook receipt",
+            "Apple",
+            "2026-09-15",
+            "199900",
+            "INR",
+            "INV-123",
+            "return_planned",
+            "2026-09-29",
+            "",
+            "private note",
+        );
+        assert_eq!(item.kind, ItemKind::Receipt);
+        assert_eq!(
+            item.fields.get("receipt_reference").map(String::as_str),
+            Some("INV-123")
+        );
+        assert_eq!(
+            item.fields.get("return_by").map(String::as_str),
+            Some("2026-09-29")
+        );
+        assert_eq!(
+            item.fields.get("tracking_status").map(String::as_str),
+            Some("return_planned")
+        );
+        assert_eq!(item.notes.as_deref(), Some("private note"));
     }
 
     #[test]

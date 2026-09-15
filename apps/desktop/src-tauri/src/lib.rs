@@ -15,7 +15,7 @@ use tauri_plugin_dialog::DialogExt;
 use vault_core::{
     AttachmentImportSource, AttachmentSummary as CoreAttachmentSummary, PreparedVaultRestore,
     VaultBackupPlan, VaultError, VaultSession, generate_strong_password,
-    reminders::{civil_from_days, collect_deadlines},
+    reminders::{collect_deadlines, parse_ymd},
 };
 use vault_crypto::RecoverySecret;
 use vault_models::{EMERGENCY_CARD_ID, EmergencyCard, EmergencyContact, ItemKind, VaultItem};
@@ -108,6 +108,38 @@ struct DocumentDetailView {
     document_number: String,
     issuer: String,
     expiry: String,
+    notes: String,
+}
+
+#[derive(serde::Serialize)]
+struct ReceiptView {
+    id: String,
+    revision: u64,
+    title: String,
+    merchant: String,
+    purchase_date: String,
+    amount: String,
+    currency: String,
+    tracking_status: String,
+    return_by: String,
+    refund_due: String,
+    has_receipt_reference: bool,
+    links: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+struct ReceiptDetailView {
+    id: String,
+    revision: u64,
+    title: String,
+    merchant: String,
+    purchase_date: String,
+    amount: String,
+    currency: String,
+    receipt_reference: String,
+    tracking_status: String,
+    return_by: String,
+    refund_due: String,
     notes: String,
 }
 
@@ -281,6 +313,20 @@ enum VaultItemView {
         expiry: String,
         notes: String,
         has_document_number: bool,
+        links: Vec<String>,
+    },
+    Receipt {
+        id: String,
+        revision: u64,
+        title: String,
+        merchant: String,
+        purchase_date: String,
+        amount: String,
+        currency: String,
+        tracking_status: String,
+        return_by: String,
+        refund_due: String,
+        has_receipt_reference: bool,
         links: Vec<String>,
     },
     Insurance {
@@ -599,6 +645,97 @@ fn update_document(
         document_number,
         issuer,
         expiry,
+        notes,
+    )
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn create_receipt(
+    state: State<'_, VaultRuntime>,
+    title: String,
+    merchant: String,
+    purchase_date: String,
+    amount: String,
+    currency: String,
+    receipt_reference: String,
+    tracking_status: String,
+    return_by: String,
+    refund_due: String,
+    notes: String,
+) -> Result<ReceiptView, String> {
+    create_receipt_impl(
+        &state,
+        title,
+        merchant,
+        purchase_date,
+        amount,
+        currency,
+        receipt_reference,
+        tracking_status,
+        return_by,
+        refund_due,
+        notes,
+    )
+}
+
+#[tauri::command]
+fn get_receipt(
+    state: State<'_, VaultRuntime>,
+    id: String,
+    revision: u64,
+) -> Result<ReceiptDetailView, String> {
+    get_receipt_impl(&state, id, revision)
+}
+
+#[tauri::command]
+fn reveal_receipt_reference(
+    state: State<'_, VaultRuntime>,
+    id: String,
+    revision: u64,
+) -> Result<String, String> {
+    Ok(get_receipt_impl(&state, id, revision)?.receipt_reference)
+}
+
+#[tauri::command]
+fn get_receipt_notes(
+    state: State<'_, VaultRuntime>,
+    id: String,
+    revision: u64,
+) -> Result<String, String> {
+    Ok(get_receipt_impl(&state, id, revision)?.notes)
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn update_receipt(
+    state: State<'_, VaultRuntime>,
+    id: String,
+    revision: u64,
+    title: String,
+    merchant: String,
+    purchase_date: String,
+    amount: String,
+    currency: String,
+    receipt_reference: String,
+    tracking_status: String,
+    return_by: String,
+    refund_due: String,
+    notes: String,
+) -> Result<ReceiptView, String> {
+    update_receipt_impl(
+        &state,
+        id,
+        revision,
+        title,
+        merchant,
+        purchase_date,
+        amount,
+        currency,
+        receipt_reference,
+        tracking_status,
+        return_by,
+        refund_due,
         notes,
     )
 }
@@ -1052,8 +1189,13 @@ fn delete_attachment(
 }
 
 #[tauri::command]
-fn list_deadlines(state: State<'_, VaultRuntime>) -> Result<Vec<DeadlineView>, String> {
-    list_deadlines_impl(&state)
+fn list_deadlines(
+    state: State<'_, VaultRuntime>,
+    today_year: i32,
+    today_month: u32,
+    today_day: u32,
+) -> Result<Vec<DeadlineView>, String> {
+    list_deadlines_impl(&state, today_year, today_month, today_day)
 }
 
 #[tauri::command]
@@ -1320,6 +1462,23 @@ fn list_vault_items_impl(state: &VaultRuntime) -> Result<Vec<VaultItemView>, Str
                     notes: document.notes,
                     has_document_number: document.has_document_number,
                     links: document.links,
+                });
+            }
+            ItemKind::Receipt => {
+                let receipt = receipt_view(item, revision)?;
+                views.push(VaultItemView::Receipt {
+                    id: receipt.id,
+                    revision: receipt.revision,
+                    title: receipt.title,
+                    merchant: receipt.merchant,
+                    purchase_date: receipt.purchase_date,
+                    amount: receipt.amount,
+                    currency: receipt.currency,
+                    tracking_status: receipt.tracking_status,
+                    return_by: receipt.return_by,
+                    refund_due: receipt.refund_due,
+                    has_receipt_reference: receipt.has_receipt_reference,
+                    links: receipt.links,
                 });
             }
             ItemKind::Insurance => {
@@ -1713,6 +1872,147 @@ fn update_document_impl(
             other => safe_vault_error(other),
         })?;
     document_view(item, revision)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_receipt_impl(
+    state: &VaultRuntime,
+    title: String,
+    merchant: String,
+    purchase_date: String,
+    amount: String,
+    currency: String,
+    receipt_reference: String,
+    tracking_status: String,
+    return_by: String,
+    refund_due: String,
+    notes: String,
+) -> Result<ReceiptView, String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("A receipt title is required.".to_owned());
+    }
+    validate_receipt_tracking_status(&tracking_status)?;
+    validate_optional_receipt_date("Purchase date", &purchase_date)?;
+    validate_optional_receipt_date("Return deadline", &return_by)?;
+    validate_optional_receipt_date("Refund due date", &refund_due)?;
+    validate_receipt_tracking_dates(&tracking_status, &return_by, &refund_due)?;
+    let session = lock_session(state)?;
+    let session = session
+        .as_ref()
+        .ok_or_else(|| "Unlock the vault before creating a receipt.".to_owned())?;
+    let item = VaultItem::receipt(
+        title,
+        merchant,
+        purchase_date,
+        amount,
+        currency,
+        receipt_reference,
+        tracking_status,
+        return_by,
+        refund_due,
+        notes,
+    );
+    session.put_item(&item, 1).map_err(safe_vault_error)?;
+    receipt_view(item, 1)
+}
+
+fn get_receipt_impl(
+    state: &VaultRuntime,
+    id: String,
+    revision: u64,
+) -> Result<ReceiptDetailView, String> {
+    let id = id
+        .parse()
+        .map_err(|_| "The receipt identifier is invalid.".to_owned())?;
+    let session = lock_session(state)?;
+    let session = session
+        .as_ref()
+        .ok_or_else(|| "Unlock the vault before reading a receipt.".to_owned())?;
+    let (item, current_revision) = session
+        .get_item_with_revision(id)
+        .map_err(safe_vault_error)?;
+    if current_revision != revision {
+        return Err(
+            "This receipt changed since you opened it. Reload it before continuing.".to_owned(),
+        );
+    }
+    if item.kind != ItemKind::Receipt {
+        return Err("Only receipt records can be opened from this view.".to_owned());
+    }
+    receipt_detail_view(item, current_revision)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn update_receipt_impl(
+    state: &VaultRuntime,
+    id: String,
+    revision: u64,
+    title: String,
+    merchant: String,
+    purchase_date: String,
+    amount: String,
+    currency: String,
+    receipt_reference: String,
+    tracking_status: String,
+    return_by: String,
+    refund_due: String,
+    notes: String,
+) -> Result<ReceiptView, String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("A receipt title is required.".to_owned());
+    }
+    validate_receipt_tracking_status(&tracking_status)?;
+    validate_optional_receipt_date("Purchase date", &purchase_date)?;
+    validate_optional_receipt_date("Return deadline", &return_by)?;
+    validate_optional_receipt_date("Refund due date", &refund_due)?;
+    validate_receipt_tracking_dates(&tracking_status, &return_by, &refund_due)?;
+    let id = id
+        .parse()
+        .map_err(|_| "The receipt identifier is invalid.".to_owned())?;
+    let session = lock_session(state)?;
+    let session = session
+        .as_ref()
+        .ok_or_else(|| "Unlock the vault before editing a receipt.".to_owned())?;
+    let (existing, current_revision) = session
+        .get_item_with_revision(id)
+        .map_err(safe_vault_error)?;
+    if current_revision != revision {
+        return Err(
+            "This receipt changed since you opened it. Reload it before saving.".to_owned(),
+        );
+    }
+    if existing.kind != ItemKind::Receipt {
+        return Err("Only receipt records can be edited from this view.".to_owned());
+    }
+    let mut fields = BTreeMap::new();
+    fields.insert("merchant".to_owned(), merchant);
+    fields.insert("purchase_date".to_owned(), purchase_date);
+    fields.insert("amount".to_owned(), amount);
+    fields.insert("currency".to_owned(), currency);
+    fields.insert("receipt_reference".to_owned(), receipt_reference);
+    fields.insert("tracking_status".to_owned(), tracking_status);
+    fields.insert("return_by".to_owned(), return_by);
+    fields.insert("refund_due".to_owned(), refund_due);
+    let item = VaultItem {
+        id,
+        kind: ItemKind::Receipt,
+        title: title.to_owned(),
+        links: existing.links.clone(),
+        attachments: existing.attachments.clone(),
+        fields,
+        notes: (!notes.is_empty()).then_some(notes),
+    };
+    let revision = session
+        .update_item(&item, revision)
+        .map_err(|error| match error {
+            vault_core::VaultError::Storage(vault_storage::StorageError::StaleRevision) => {
+                "This receipt changed since you opened it. Reload it before saving.".to_owned()
+            }
+            other => safe_vault_error(other),
+        })?;
+    receipt_view(item, revision)
 }
 
 fn create_insurance_impl(
@@ -2735,18 +3035,21 @@ fn delete_attachment_impl(
         })
 }
 
-fn list_deadlines_impl(state: &VaultRuntime) -> Result<Vec<DeadlineView>, String> {
+fn list_deadlines_impl(
+    state: &VaultRuntime,
+    today_year: i32,
+    today_month: u32,
+    today_day: u32,
+) -> Result<Vec<DeadlineView>, String> {
+    let encoded_today = format!("{today_year:04}-{today_month:02}-{today_day:02}");
+    let today = parse_ymd(&encoded_today)
+        .filter(|date| *date == (today_year, today_month, today_day))
+        .ok_or_else(|| "The device local calendar date is invalid.".to_owned())?;
     let session = lock_session(state)?;
     let session = session
         .as_ref()
         .ok_or_else(|| "Unlock the vault before reading reminders.".to_owned())?;
     let items = session.list_items().map_err(safe_vault_error)?;
-    let now_secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(safe_vault_error)?
-        .as_secs();
-    let now_secs = i64::try_from(now_secs).map_err(safe_vault_error)?;
-    let today = civil_from_days(now_secs.div_euclid(86400));
     let deadlines = collect_deadlines(&items, today);
     Ok(deadlines
         .into_iter()
@@ -2817,18 +3120,61 @@ fn unlock_vault_with_recovery_kit_impl(
     })
 }
 
+struct HumanReadableExportSnapshot {
+    items: Vec<(VaultItem, u64)>,
+    emergency_card: Option<(EmergencyCard, u64)>,
+    generation: u64,
+}
+
 fn export_human_readable_impl(state: &VaultRuntime, path: String) -> Result<ExportView, String> {
     if path.trim().is_empty() {
         return Err("Choose a location for the export.".to_owned());
     }
+    let destination = PathBuf::from(&path);
+    let HumanReadableExportSnapshot {
+        items,
+        emergency_card,
+        generation,
+    } = capture_human_readable_export(state)?;
+    let (staged, item_count) = stage_human_readable_export(&items, emergency_card, &destination)?;
+    commit_human_readable_export(state, generation, &staged, &destination)?;
+    Ok(ExportView {
+        items: item_count,
+        path,
+    })
+}
+
+fn capture_human_readable_export(
+    state: &VaultRuntime,
+) -> Result<HumanReadableExportSnapshot, String> {
     let session = lock_session(state)?;
     let session = session
         .as_ref()
         .ok_or_else(|| "Unlock the vault before exporting records.".to_owned())?;
+    let generation = capture_session_generation(state);
     let items = session
         .list_items_with_revisions()
         .map_err(safe_vault_error)?;
-    let card = session.get_emergency_card().map_err(safe_vault_error)?;
+    let emergency_card = session.get_emergency_card().map_err(safe_vault_error)?;
+    Ok(HumanReadableExportSnapshot {
+        items,
+        emergency_card,
+        generation,
+    })
+}
+
+fn stage_human_readable_export(
+    items: &[(VaultItem, u64)],
+    card: Option<(EmergencyCard, u64)>,
+    destination: &Path,
+) -> Result<(PathBuf, u64), String> {
+    let item_count = u64::try_from(
+        items
+            .iter()
+            .filter(|(item, _)| item.kind != ItemKind::EmergencyInstruction)
+            .count(),
+    )
+    .map_err(safe_vault_error)?;
     let exported_at_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(safe_vault_error)?
@@ -2836,7 +3182,7 @@ fn export_human_readable_impl(state: &VaultRuntime, path: String) -> Result<Expo
     let exported_at_ms =
         u64::try_from(exported_at_ms).map_err(|_| "The system clock is unavailable.".to_owned())?;
     let mut export_items = Vec::with_capacity(items.len());
-    for (item, revision) in &items {
+    for (item, revision) in items {
         if item.kind == ItemKind::EmergencyInstruction {
             continue;
         }
@@ -2865,24 +3211,71 @@ fn export_human_readable_impl(state: &VaultRuntime, path: String) -> Result<Expo
         "emergency_card": emergency_card,
     });
     let encoded = serde_json::to_vec_pretty(&document).map_err(safe_vault_error)?;
-    let destination = PathBuf::from(&path);
-    let staged = temporary_sibling_path(&destination, "export")?;
-    fs::write(&staged, encoded).map_err(|_| {
-        "Unable to write the export file. Choose a different location and try again.".to_owned()
-    })?;
-    install_output_file(&staged, &destination).inspect_err(|_error| {
+    let staged = temporary_sibling_path(destination, "export")?;
+    if fs::write(&staged, encoded).is_err() {
         let _ = fs::remove_file(&staged);
-    })?;
-    Ok(ExportView {
-        items: u64::try_from(
-            items
-                .iter()
-                .filter(|(item, _)| item.kind != ItemKind::EmergencyInstruction)
-                .count(),
-        )
-        .map_err(safe_vault_error)?,
-        path,
-    })
+        return Err(
+            "Unable to write the export file. Choose a different location and try again."
+                .to_owned(),
+        );
+    }
+    Ok((staged, item_count))
+}
+
+fn commit_human_readable_export(
+    state: &VaultRuntime,
+    generation: u64,
+    staged: &Path,
+    destination: &Path,
+) -> Result<(), String> {
+    const SESSION_CHANGED: &str = "The vault session changed while creating the export. Try again.";
+
+    if !is_session_generation_current(state, generation) {
+        let _ = fs::remove_file(staged);
+        return Err(SESSION_CHANGED.to_owned());
+    }
+
+    let rollback = match temporary_sibling_path(destination, "previous") {
+        Ok(rollback) => rollback,
+        Err(error) => {
+            let _ = fs::remove_file(staged);
+            return Err(error);
+        }
+    };
+    let had_destination = destination.exists();
+    if had_destination && fs::rename(destination, &rollback).is_err() {
+        let _ = fs::remove_file(staged);
+        return Err("Unable to replace the existing output file.".to_owned());
+    }
+
+    if !is_session_generation_current(state, generation) {
+        if had_destination {
+            let _ = fs::rename(&rollback, destination);
+        }
+        let _ = fs::remove_file(staged);
+        return Err(SESSION_CHANGED.to_owned());
+    }
+
+    if fs::rename(staged, destination).is_err() {
+        if had_destination {
+            let _ = fs::rename(&rollback, destination);
+        }
+        let _ = fs::remove_file(staged);
+        return Err("Unable to finish writing the selected output file.".to_owned());
+    }
+
+    if !is_session_generation_current(state, generation) {
+        let _ = fs::remove_file(destination);
+        if had_destination {
+            let _ = fs::rename(&rollback, destination);
+        }
+        return Err(SESSION_CHANGED.to_owned());
+    }
+
+    if had_destination {
+        let _ = fs::remove_file(&rollback);
+    }
+    Ok(())
 }
 
 fn backup_database_copy_impl(state: &VaultRuntime, path: String) -> Result<PathView, String> {
@@ -3312,6 +3705,125 @@ fn document_detail_view(item: VaultItem, revision: u64) -> Result<DocumentDetail
     })
 }
 
+fn receipt_view(item: VaultItem, revision: u64) -> Result<ReceiptView, String> {
+    let merchant = item
+        .fields
+        .get("merchant")
+        .cloned()
+        .ok_or_else(|| "The encrypted receipt is missing its merchant field.".to_owned())?;
+    let purchase_date =
+        item.fields.get("purchase_date").cloned().ok_or_else(|| {
+            "The encrypted receipt is missing its purchase date field.".to_owned()
+        })?;
+    let amount = item
+        .fields
+        .get("amount")
+        .cloned()
+        .ok_or_else(|| "The encrypted receipt is missing its amount field.".to_owned())?;
+    let currency = item
+        .fields
+        .get("currency")
+        .cloned()
+        .ok_or_else(|| "The encrypted receipt is missing its currency field.".to_owned())?;
+    let tracking_status =
+        item.fields.get("tracking_status").cloned().ok_or_else(|| {
+            "The encrypted receipt is missing its tracking status field.".to_owned()
+        })?;
+    let return_by =
+        item.fields.get("return_by").cloned().ok_or_else(|| {
+            "The encrypted receipt is missing its return deadline field.".to_owned()
+        })?;
+    let refund_due = item
+        .fields
+        .get("refund_due")
+        .cloned()
+        .ok_or_else(|| "The encrypted receipt is missing its refund due field.".to_owned())?;
+    let has_receipt_reference = !item
+        .fields
+        .get("receipt_reference")
+        .ok_or_else(|| "The encrypted receipt is missing its reference field.".to_owned())?
+        .is_empty();
+    validate_receipt_tracking_status(&tracking_status)?;
+    validate_optional_receipt_date("Purchase date", &purchase_date)?;
+    validate_optional_receipt_date("Return deadline", &return_by)?;
+    validate_optional_receipt_date("Refund due date", &refund_due)?;
+    validate_receipt_tracking_dates(&tracking_status, &return_by, &refund_due)?;
+    let links = item.links.iter().map(ToString::to_string).collect();
+    Ok(ReceiptView {
+        id: item.id.to_string(),
+        revision,
+        title: item.title,
+        merchant,
+        purchase_date,
+        amount,
+        currency,
+        tracking_status,
+        return_by,
+        refund_due,
+        has_receipt_reference,
+        links,
+    })
+}
+
+fn receipt_detail_view(item: VaultItem, revision: u64) -> Result<ReceiptDetailView, String> {
+    let merchant = item
+        .fields
+        .get("merchant")
+        .cloned()
+        .ok_or_else(|| "The encrypted receipt is missing its merchant field.".to_owned())?;
+    let purchase_date =
+        item.fields.get("purchase_date").cloned().ok_or_else(|| {
+            "The encrypted receipt is missing its purchase date field.".to_owned()
+        })?;
+    let amount = item
+        .fields
+        .get("amount")
+        .cloned()
+        .ok_or_else(|| "The encrypted receipt is missing its amount field.".to_owned())?;
+    let currency = item
+        .fields
+        .get("currency")
+        .cloned()
+        .ok_or_else(|| "The encrypted receipt is missing its currency field.".to_owned())?;
+    let receipt_reference = item
+        .fields
+        .get("receipt_reference")
+        .cloned()
+        .ok_or_else(|| "The encrypted receipt is missing its reference field.".to_owned())?;
+    let tracking_status =
+        item.fields.get("tracking_status").cloned().ok_or_else(|| {
+            "The encrypted receipt is missing its tracking status field.".to_owned()
+        })?;
+    let return_by =
+        item.fields.get("return_by").cloned().ok_or_else(|| {
+            "The encrypted receipt is missing its return deadline field.".to_owned()
+        })?;
+    let refund_due = item
+        .fields
+        .get("refund_due")
+        .cloned()
+        .ok_or_else(|| "The encrypted receipt is missing its refund due field.".to_owned())?;
+    validate_receipt_tracking_status(&tracking_status)?;
+    validate_optional_receipt_date("Purchase date", &purchase_date)?;
+    validate_optional_receipt_date("Return deadline", &return_by)?;
+    validate_optional_receipt_date("Refund due date", &refund_due)?;
+    validate_receipt_tracking_dates(&tracking_status, &return_by, &refund_due)?;
+    Ok(ReceiptDetailView {
+        id: item.id.to_string(),
+        revision,
+        title: item.title,
+        merchant,
+        purchase_date,
+        amount,
+        currency,
+        receipt_reference,
+        tracking_status,
+        return_by,
+        refund_due,
+        notes: item.notes.unwrap_or_default(),
+    })
+}
+
 fn insurance_view(item: VaultItem, revision: u64) -> Result<InsuranceView, String> {
     let provider = item.fields.get("provider").cloned().ok_or_else(|| {
         "The encrypted insurance record is missing its provider field.".to_owned()
@@ -3676,6 +4188,37 @@ fn validate_property_ownership(value: &str) -> Result<(), String> {
     }
 }
 
+fn validate_receipt_tracking_status(value: &str) -> Result<(), String> {
+    match value {
+        "" | "kept" | "return_planned" | "returned" | "refund_pending" | "refunded" => Ok(()),
+        _ => Err("Choose a supported receipt tracking status.".to_owned()),
+    }
+}
+
+fn validate_optional_receipt_date(label: &str, value: &str) -> Result<(), String> {
+    if value.is_empty() || vault_core::reminders::parse_ymd(value).is_some() {
+        Ok(())
+    } else {
+        Err(format!("{label} must use YYYY-MM-DD."))
+    }
+}
+
+fn validate_receipt_tracking_dates(
+    status: &str,
+    return_by: &str,
+    refund_due: &str,
+) -> Result<(), String> {
+    match status {
+        "return_planned" if return_by.is_empty() => {
+            Err("Set a return deadline when a return is planned.".to_owned())
+        }
+        "refund_pending" if refund_due.is_empty() => {
+            Err("Set a refund due date while a refund is pending.".to_owned())
+        }
+        _ => Ok(()),
+    }
+}
+
 fn advance_session_generation(session_generation: &AtomicU64) -> u64 {
     session_generation
         .fetch_add(1, Ordering::AcqRel)
@@ -3827,6 +4370,11 @@ pub fn run() {
             create_document,
             get_document,
             update_document,
+            create_receipt,
+            get_receipt,
+            reveal_receipt_reference,
+            get_receipt_notes,
+            update_receipt,
             create_insurance,
             get_insurance,
             update_insurance,
@@ -3917,6 +4465,74 @@ mod tests {
 
         assert!(!is_session_generation_current(&runtime, generation));
         assert!(capture_session_generation(&runtime) > generation);
+    }
+
+    #[test]
+    fn desktop_restart_reopens_locked_and_preserves_local_state() {
+        let (directory, first) = runtime();
+        initialize_vault_impl(&first, PASSPHRASE.to_owned()).expect("initialize vault");
+        let active = create_note_impl(
+            &first,
+            "Restart active".to_owned(),
+            "active body".to_owned(),
+        )
+        .expect("create active record");
+        let trashed = create_note_impl(&first, "Restart trash".to_owned(), "trash body".to_owned())
+            .expect("create trash record");
+        trash_item_impl(&first, trashed.id.clone(), trashed.revision).expect("trash record");
+        let recovery_secret =
+            generate_recovery_secret_impl(&first).expect("generate recovery secret");
+        confirm_recovery_secret_impl(&first, recovery_secret.clone()).expect("confirm recovery");
+        update_device_settings_impl(&first, 30, false).expect("persist device settings");
+        lock_vault_impl(&first).expect("lock before restart");
+        drop(first);
+
+        let settings_path = directory.path().join("device-settings.json");
+        let second = VaultRuntime {
+            database_path: directory.path().join("vault.sqlite3"),
+            settings_path: settings_path.clone(),
+            session: Arc::new(Mutex::new(None)),
+            session_generation: Arc::new(AtomicU64::new(0)),
+            restore_in_progress: Arc::new(AtomicBool::new(false)),
+            settings: Arc::new(Mutex::new(load_device_settings(&settings_path))),
+            last_activity: Arc::new(Mutex::new(Instant::now())),
+        };
+
+        let status = vault_status_impl(&second).expect("status after restart");
+        assert!(status.initialized);
+        assert!(!status.unlocked);
+        assert_eq!(
+            unlock_vault_impl(&second, "wrong restart passphrase".to_owned())
+                .err()
+                .expect("wrong passphrase fails"),
+            "Unable to unlock the vault. Check the master passphrase and try again."
+        );
+
+        unlock_vault_impl(&second, PASSPHRASE.to_owned()).expect("unlock after restart");
+        let active_items = list_vault_items_impl(&second).expect("active records after restart");
+        assert!(active_items.iter().any(|item| match item {
+            VaultItemView::SecureNote { id, .. } => id == &active.id,
+            _ => false,
+        }));
+        assert!(!active_items.iter().any(|item| match item {
+            VaultItemView::SecureNote { id, .. } => id == &trashed.id,
+            _ => false,
+        }));
+        let trash = list_trashed_items_impl(&second).expect("trash after restart");
+        assert!(trash.iter().any(|item| item.id == trashed.id));
+        assert!(
+            get_recovery_status_impl(&second)
+                .expect("recovery status after restart")
+                .configured
+        );
+        let settings = get_device_settings_impl(&second).expect("settings after restart");
+        assert_eq!(settings.auto_lock_minutes, 30);
+        assert!(!settings.lock_on_background);
+
+        lock_vault_impl(&second).expect("lock before recovery restart unlock");
+        unlock_vault_with_recovery_kit_impl(&second, recovery_secret)
+            .expect("recovery secret still unlocks after restart");
+        assert!(vault_status_impl(&second).expect("final status").unlocked);
     }
 
     #[test]
@@ -4440,6 +5056,7 @@ mod tests {
                 } => Some((revision, username, has_password)),
                 VaultItemView::SecureNote { .. }
                 | VaultItemView::Document { .. }
+                | VaultItemView::Receipt { .. }
                 | VaultItemView::Insurance { .. }
                 | VaultItemView::Financial { .. }
                 | VaultItemView::Property { .. }
@@ -5065,6 +5682,213 @@ mod tests {
     }
 
     #[test]
+    fn receipt_records_redact_detail_fields_validate_and_preserve_links() {
+        let (_directory, runtime) = runtime();
+        initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
+
+        assert!(
+            create_receipt_impl(
+                &runtime,
+                "Bad status".to_owned(),
+                "Store".to_owned(),
+                "2026-09-15".to_owned(),
+                "100".to_owned(),
+                "USD".to_owned(),
+                "SECRET".to_owned(),
+                "maybe".to_owned(),
+                "2026-09-30".to_owned(),
+                String::new(),
+                String::new(),
+            )
+            .is_err()
+        );
+        assert!(
+            create_receipt_impl(
+                &runtime,
+                "Bad date".to_owned(),
+                "Store".to_owned(),
+                "2026/09/15".to_owned(),
+                "100".to_owned(),
+                "USD".to_owned(),
+                "SECRET".to_owned(),
+                "return_planned".to_owned(),
+                "2026-09-30".to_owned(),
+                String::new(),
+                String::new(),
+            )
+            .is_err()
+        );
+        assert_eq!(
+            create_receipt_impl(
+                &runtime,
+                "Missing return deadline".to_owned(),
+                "Store".to_owned(),
+                "2026-09-15".to_owned(),
+                "100".to_owned(),
+                "USD".to_owned(),
+                "SECRET".to_owned(),
+                "return_planned".to_owned(),
+                String::new(),
+                String::new(),
+                String::new(),
+            )
+            .err()
+            .expect("planned return without date must fail"),
+            "Set a return deadline when a return is planned."
+        );
+        assert_eq!(
+            create_receipt_impl(
+                &runtime,
+                "Missing refund due".to_owned(),
+                "Store".to_owned(),
+                "2026-09-15".to_owned(),
+                "100".to_owned(),
+                "USD".to_owned(),
+                "SECRET".to_owned(),
+                "refund_pending".to_owned(),
+                "2026-09-30".to_owned(),
+                String::new(),
+                String::new(),
+            )
+            .err()
+            .expect("pending refund without date must fail"),
+            "Set a refund due date while a refund is pending."
+        );
+
+        let receipt = create_receipt_impl(
+            &runtime,
+            "MacBook receipt".to_owned(),
+            "Apple".to_owned(),
+            "2026-09-15".to_owned(),
+            "199900".to_owned(),
+            "INR".to_owned(),
+            "INV-SECRET-123".to_owned(),
+            "return_planned".to_owned(),
+            "2026-09-29".to_owned(),
+            String::new(),
+            "private receipt note".to_owned(),
+        )
+        .expect("create receipt");
+        assert_eq!(receipt.revision, 1);
+        assert!(receipt.has_receipt_reference);
+
+        assert_eq!(
+            update_receipt_impl(
+                &runtime,
+                receipt.id.clone(),
+                receipt.revision,
+                receipt.title.clone(),
+                receipt.merchant.clone(),
+                receipt.purchase_date.clone(),
+                receipt.amount.clone(),
+                receipt.currency.clone(),
+                "INV-SECRET-123".to_owned(),
+                "refund_pending".to_owned(),
+                receipt.return_by.clone(),
+                String::new(),
+                "private receipt note".to_owned(),
+            )
+            .err()
+            .expect("pending refund update without date must fail"),
+            "Set a refund due date while a refund is pending."
+        );
+        let unchanged = get_receipt_impl(&runtime, receipt.id.clone(), receipt.revision)
+            .expect("invalid update must not change receipt revision");
+        assert_eq!(unchanged.tracking_status, "return_planned");
+
+        let serialized =
+            serde_json::to_string(&list_vault_items_impl(&runtime).expect("list with receipt"))
+                .expect("serialize receipt list");
+        assert!(serialized.contains("\"kind\":\"receipt\""));
+        assert!(serialized.contains("has_receipt_reference"));
+        assert!(!serialized.contains("INV-SECRET-123"));
+        assert!(!serialized.contains("private receipt note"));
+
+        let detail = get_receipt_impl(&runtime, receipt.id.clone(), receipt.revision)
+            .expect("get receipt detail");
+        assert_eq!(detail.receipt_reference, "INV-SECRET-123");
+        assert_eq!(detail.notes, "private receipt note");
+        assert!(get_receipt_impl(&runtime, receipt.id.clone(), 2).is_err());
+
+        let target = create_note_impl(&runtime, "Purchase context".to_owned(), "Body".to_owned())
+            .expect("create link target");
+        let linked_revision = set_item_links_impl(
+            &runtime,
+            receipt.id.clone(),
+            receipt.revision,
+            vec![target.id],
+        )
+        .expect("link receipt");
+        assert_eq!(linked_revision, 2);
+
+        let updated = update_receipt_impl(
+            &runtime,
+            receipt.id.clone(),
+            linked_revision,
+            "MacBook receipt".to_owned(),
+            "Apple".to_owned(),
+            "2026-09-15".to_owned(),
+            "199900".to_owned(),
+            "INR".to_owned(),
+            "INV-SECRET-456".to_owned(),
+            "refund_pending".to_owned(),
+            "2026-09-29".to_owned(),
+            "2026-10-05".to_owned(),
+            "refund requested".to_owned(),
+        )
+        .expect("update receipt");
+        assert_eq!(updated.revision, 3);
+        assert_eq!(updated.tracking_status, "refund_pending");
+        assert_eq!(updated.links.len(), 1);
+        assert!(
+            update_receipt_impl(
+                &runtime,
+                receipt.id.clone(),
+                linked_revision,
+                "Stale receipt".to_owned(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+            )
+            .is_err()
+        );
+
+        let trash_revision =
+            trash_item_impl(&runtime, updated.id.clone(), updated.revision).expect("trash receipt");
+        let restore_revision =
+            restore_trashed_item_impl(&runtime, updated.id.clone(), trash_revision)
+                .expect("restore receipt");
+        let restored = get_receipt_impl(&runtime, updated.id.clone(), restore_revision)
+            .expect("get restored receipt");
+        assert_eq!(restored.receipt_reference, "INV-SECRET-456");
+
+        lock_vault_impl(&runtime).expect("lock vault");
+        assert!(get_receipt_impl(&runtime, updated.id.clone(), restore_revision).is_err());
+        assert!(
+            create_receipt_impl(
+                &runtime,
+                "Locked".to_owned(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn emergency_card_round_trip_and_stale_rejected() {
         let (_directory, runtime) = runtime();
         initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
@@ -5320,7 +6144,7 @@ mod tests {
         let _note = create_note_impl(&runtime, "Plain note".to_owned(), "Body".to_owned())
             .expect("create note");
 
-        let deadlines = list_deadlines_impl(&runtime).expect("list deadlines");
+        let deadlines = list_deadlines_impl(&runtime, 2026, 9, 15).expect("list deadlines");
         assert!(deadlines.len() >= 2);
         let vehicle_deadline = deadlines
             .iter()
@@ -5346,6 +6170,41 @@ mod tests {
                 .iter()
                 .any(|deadline| deadline.title == "Plain note")
         );
+    }
+
+    #[test]
+    fn deadlines_use_supplied_device_local_calendar_day() {
+        let (_directory, runtime) = runtime();
+        initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
+        let document = create_document_impl(
+            &runtime,
+            "Local-day document".to_owned(),
+            String::new(),
+            "Issuer".to_owned(),
+            "2026-09-16".to_owned(),
+            String::new(),
+        )
+        .expect("create document");
+
+        let before = list_deadlines_impl(&runtime, 2026, 9, 15).expect("deadlines before due day");
+        let before = before
+            .iter()
+            .find(|deadline| deadline.item_id == document.id)
+            .expect("document deadline before due day");
+        assert_eq!(before.days_until, 1);
+
+        let due = list_deadlines_impl(&runtime, 2026, 9, 16).expect("deadlines on due day");
+        let due = due
+            .iter()
+            .find(|deadline| deadline.item_id == document.id)
+            .expect("document deadline on due day");
+        assert_eq!(due.days_until, 0);
+
+        let invalid = match list_deadlines_impl(&runtime, 2026, 2, 30) {
+            Ok(_) => panic!("invalid local date must fail"),
+            Err(error) => error,
+        };
+        assert_eq!(invalid, "The device local calendar date is invalid.");
     }
 
     #[test]
@@ -5448,6 +6307,39 @@ mod tests {
         backup_session
             .validate_persisted_state()
             .expect("encrypted backup validates completely");
+    }
+
+    #[test]
+    fn human_readable_export_lock_after_capture_prevents_publish_and_cleans_stage() {
+        let (directory, runtime) = runtime();
+        initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
+        create_note_impl(
+            &runtime,
+            "Export race marker".to_owned(),
+            "plaintext body".to_owned(),
+        )
+        .expect("create export marker");
+
+        let destination = directory.path().join("generation-fenced-export.json");
+        let HumanReadableExportSnapshot {
+            items,
+            emergency_card,
+            generation,
+        } = capture_human_readable_export(&runtime).expect("capture export snapshot");
+        let (staged, _) = stage_human_readable_export(&items, emergency_card, &destination)
+            .expect("stage plaintext export");
+        assert!(staged.exists());
+
+        lock_vault_impl(&runtime).expect("lock after export capture");
+        let error = commit_human_readable_export(&runtime, generation, &staged, &destination)
+            .expect_err("stale export must not publish");
+
+        assert_eq!(
+            error,
+            "The vault session changed while creating the export. Try again."
+        );
+        assert!(!staged.exists());
+        assert!(!destination.exists());
     }
 
     #[test]
@@ -5766,7 +6658,7 @@ mod tests {
         );
         assert!(get_item_titles_impl(&runtime, vec![note.id.clone()]).is_err());
         assert!(set_item_links_impl(&runtime, note.id.clone(), note.revision, Vec::new()).is_err());
-        assert!(list_deadlines_impl(&runtime).is_err());
+        assert!(list_deadlines_impl(&runtime, 2026, 9, 15).is_err());
         assert!(generate_recovery_secret_impl(&runtime).is_err());
         assert!(confirm_recovery_secret_impl(&runtime, "secret".to_owned()).is_err());
         assert!(get_recovery_status_impl(&runtime).is_err());
