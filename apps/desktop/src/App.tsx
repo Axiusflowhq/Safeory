@@ -1136,13 +1136,19 @@ export default function App() {
                 </button>
                 <button
                   type="button"
+                  disabled={editor !== null}
+                  title={
+                    editor !== null
+                      ? "Finish or cancel the open editor before opening Settings."
+                      : undefined
+                  }
                   onClick={() => {
                     setSettingsOpen(true);
                     setCardOpen(false);
                     setPlanOpen(false);
                     setError(null);
                   }}
-                  className="flex items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] px-3 py-2 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--selected)]"
+                  className="flex items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] px-3 py-2 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--selected)] disabled:cursor-not-allowed disabled:opacity-55"
                 >
                   <HugeiconsIcon
                     icon={Settings01Icon}
@@ -1174,7 +1180,7 @@ export default function App() {
           settings={deviceSettings}
           generation={sessionFence.token()}
           isGenerationCurrent={isSessionGenerationCurrent}
-          canReplaceVault={canLeaveSelectedRecord}
+          canReplaceVault={() => editor === null && canLeaveSelectedRecord()}
           onClose={() => setSettingsOpen(false)}
           onSettingsSaved={setDeviceSettings}
           onVaultRestored={() => {
@@ -2591,8 +2597,69 @@ function SettingsPanel({
   const [recoveryBusy, setRecoveryBusy] = useState(false);
   const [backupBusy, setBackupBusy] = useState(false);
   const [restorePath, setRestorePath] = useState<string | null>(null);
+  const [restoreCredential, setRestoreCredential] = useState<
+    "passphrase" | "recovery"
+  >("passphrase");
   const [restorePassphrase, setRestorePassphrase] = useState("");
+  const [restoreRecoverySecret, setRestoreRecoverySecret] = useState("");
+  const [restoreNewPassphrase, setRestoreNewPassphrase] = useState("");
+  const [restoreNewPassphraseConfirm, setRestoreNewPassphraseConfirm] =
+    useState("");
+  const [restoreError, setRestoreError] = useState<string | null>(null);
   const [restoreBusy, setRestoreBusy] = useState(false);
+  const restoreBusyRef = useRef(false);
+  const dialogRef = useRef<HTMLElement | null>(null);
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+  const restoreBlockedBySettingsOperation =
+    savingSettings || changingPassphrase || recoveryBusy || backupBusy;
+
+  restoreBusyRef.current = restoreBusy;
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (dialog === null) return;
+    const previousFocus =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    closeButtonRef.current?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        if (restoreBusyRef.current) return;
+        event.preventDefault();
+        onClose();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = Array.from(
+        dialog.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
+        ),
+      );
+      if (focusable.length === 0) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = focusable[0]!;
+      const last = focusable[focusable.length - 1]!;
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      } else if (!dialog.contains(document.activeElement)) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      previousFocus?.focus();
+    };
+  }, [onClose]);
 
   useEffect(() => {
     let active = true;
@@ -2610,11 +2677,15 @@ function SettingsPanel({
       // The recovery secret lives only in this panel's local state.
       setGeneratedRecovery(null);
       setRecoveryConfirm("");
+      setRestorePassphrase("");
+      setRestoreRecoverySecret("");
+      setRestoreNewPassphrase("");
+      setRestoreNewPassphraseConfirm("");
     };
   }, [generation, isGenerationCurrent]);
 
   async function generateRecoverySecret(replacing: boolean) {
-    if (recoveryBusy) return;
+    if (recoveryBusy || restoreBusy) return;
     setRecoveryBusy(true);
     setPanelError(null);
     setStatus(null);
@@ -2634,7 +2705,7 @@ function SettingsPanel({
 
   async function confirmRecoverySecret(event: FormEvent) {
     event.preventDefault();
-    if (recoveryBusy || !generatedRecovery) return;
+    if (recoveryBusy || restoreBusy || !generatedRecovery) return;
     if (recoveryConfirm !== generatedRecovery.secret) {
       setPanelError(
         "The re-entered secret does not match the generated secret. Copy it carefully and try again.",
@@ -2671,7 +2742,7 @@ function SettingsPanel({
   }
 
   async function saveRecoverySecret() {
-    if (recoveryBusy || !generatedRecovery) return;
+    if (recoveryBusy || restoreBusy || !generatedRecovery) return;
     setRecoveryBusy(true);
     setPanelError(null);
     setStatus(null);
@@ -2701,7 +2772,7 @@ function SettingsPanel({
   }
 
   async function exportReadable() {
-    if (backupBusy) return;
+    if (backupBusy || restoreBusy) return;
     setBackupBusy(true);
     setPanelError(null);
     try {
@@ -2724,7 +2795,7 @@ function SettingsPanel({
   }
 
   async function backupDatabase() {
-    if (backupBusy) return;
+    if (backupBusy || restoreBusy) return;
     setBackupBusy(true);
     setPanelError(null);
     try {
@@ -2743,8 +2814,9 @@ function SettingsPanel({
   }
 
   async function chooseRestoreBackup() {
-    if (restoreBusy) return;
+    if (restoreBusy || restoreBlockedBySettingsOperation) return;
     setPanelError(null);
+    setRestoreError(null);
     const selected = await open({
       multiple: false,
       filters: [
@@ -2757,13 +2829,37 @@ function SettingsPanel({
     if (typeof selected === "string") {
       setRestorePath(selected);
       setRestorePassphrase("");
+      setRestoreRecoverySecret("");
+      setRestoreNewPassphrase("");
+      setRestoreNewPassphraseConfirm("");
       setStatus(null);
     }
   }
 
   async function restoreDatabase(event: FormEvent) {
     event.preventDefault();
-    if (restoreBusy || restorePath === null || !restorePassphrase) return;
+    if (
+      restoreBusy ||
+      restoreBlockedBySettingsOperation ||
+      restorePath === null
+    )
+      return;
+    if (restoreCredential === "passphrase" && !restorePassphrase) return;
+    if (restoreCredential === "recovery") {
+      if (!restoreRecoverySecret || !restoreNewPassphrase) return;
+      if (Array.from(restoreNewPassphrase).length < 12) {
+        setRestoreError(
+          "Use at least 12 characters for the new master passphrase.",
+        );
+        return;
+      }
+      if (restoreNewPassphrase !== restoreNewPassphraseConfirm) {
+        setRestoreError(
+          "The new master passphrase confirmation does not match.",
+        );
+        return;
+      }
+    }
     if (!canReplaceVault()) return;
     if (
       !window.confirm(
@@ -2774,12 +2870,23 @@ function SettingsPanel({
     }
     setRestoreBusy(true);
     setPanelError(null);
+    setRestoreError(null);
     setStatus(null);
     try {
-      const status = await invoke<VaultStatus>("restore_database_backup", {
-        path: restorePath,
-        passphrase: restorePassphrase,
-      });
+      const status =
+        restoreCredential === "passphrase"
+          ? await invoke<VaultStatus>("restore_database_backup", {
+              path: restorePath,
+              passphrase: restorePassphrase,
+            })
+          : await invoke<VaultStatus>(
+              "restore_database_backup_with_recovery_kit",
+              {
+                path: restorePath,
+                secret: restoreRecoverySecret,
+                newPassphrase: restoreNewPassphrase,
+              },
+            );
       if (!isGenerationCurrent(generation)) return;
       if (!status.initialized || status.unlocked) {
         throw new Error(
@@ -2787,10 +2894,13 @@ function SettingsPanel({
         );
       }
       setRestorePassphrase("");
+      setRestoreRecoverySecret("");
+      setRestoreNewPassphrase("");
+      setRestoreNewPassphraseConfirm("");
       setRestorePath(null);
       onVaultRestored();
     } catch (reason) {
-      if (isGenerationCurrent(generation)) setPanelError(readError(reason));
+      if (isGenerationCurrent(generation)) setRestoreError(readError(reason));
     } finally {
       if (isGenerationCurrent(generation)) setRestoreBusy(false);
     }
@@ -2798,7 +2908,7 @@ function SettingsPanel({
 
   async function saveSettings(event: FormEvent) {
     event.preventDefault();
-    if (savingSettings) return;
+    if (savingSettings || restoreBusy) return;
     setSavingSettings(true);
     setPanelError(null);
     setStatus(null);
@@ -2820,7 +2930,7 @@ function SettingsPanel({
 
   async function changePassphrase(event: FormEvent) {
     event.preventDefault();
-    if (changingPassphrase) return;
+    if (changingPassphrase || restoreBusy) return;
     if (Array.from(newPassphrase).length < 12) {
       setPanelError(
         "Use at least 12 characters for the new master passphrase.",
@@ -2860,6 +2970,8 @@ function SettingsPanel({
       role="presentation"
     >
       <section
+        ref={dialogRef}
+        tabIndex={-1}
         role="dialog"
         aria-modal="true"
         aria-labelledby="settings-title"
@@ -2878,9 +2990,11 @@ function SettingsPanel({
             </h1>
           </div>
           <button
+            ref={closeButtonRef}
             type="button"
+            disabled={restoreBusy}
             onClick={onClose}
-            className="flex items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] px-3 py-2 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--selected)]"
+            className="flex items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] px-3 py-2 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--selected)] disabled:cursor-not-allowed disabled:opacity-55"
           >
             <HugeiconsIcon
               icon={ArrowLeft01Icon}
@@ -2918,6 +3032,7 @@ function SettingsPanel({
           <div className="mt-4">
             <Field label="Lock after inactivity">
               <select
+                disabled={restoreBusy}
                 value={autoLockMinutes}
                 onChange={(event) =>
                   setAutoLockMinutes(Number(event.target.value))
@@ -2935,6 +3050,7 @@ function SettingsPanel({
           <label className="mt-4 flex items-start gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] p-4">
             <input
               type="checkbox"
+              disabled={restoreBusy}
               checked={lockOnBackground}
               onChange={(event) => setLockOnBackground(event.target.checked)}
               className="mt-1"
@@ -2952,7 +3068,7 @@ function SettingsPanel({
           <div className="mt-4 flex justify-end">
             <button
               type="submit"
-              disabled={savingSettings}
+              disabled={savingSettings || restoreBusy}
               className="rounded-xl bg-[var(--primary)] px-4 py-2.5 text-sm font-medium text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-55"
             >
               {savingSettings ? "Saving…" : "Save lock settings"}
@@ -2973,6 +3089,7 @@ function SettingsPanel({
             <Field label="Current master passphrase">
               <input
                 type="password"
+                disabled={restoreBusy}
                 autoComplete="current-password"
                 value={currentPassphrase}
                 onChange={(event) => setCurrentPassphrase(event.target.value)}
@@ -2982,6 +3099,7 @@ function SettingsPanel({
             <Field label="New master passphrase">
               <input
                 type="password"
+                disabled={restoreBusy}
                 autoComplete="new-password"
                 value={newPassphrase}
                 onChange={(event) => setNewPassphrase(event.target.value)}
@@ -2992,6 +3110,7 @@ function SettingsPanel({
             <Field label="Confirm new passphrase">
               <input
                 type="password"
+                disabled={restoreBusy}
                 autoComplete="new-password"
                 value={confirmation}
                 onChange={(event) => setConfirmation(event.target.value)}
@@ -3004,6 +3123,7 @@ function SettingsPanel({
               type="submit"
               disabled={
                 changingPassphrase ||
+                restoreBusy ||
                 !currentPassphrase ||
                 !newPassphrase ||
                 !confirmation
@@ -3015,7 +3135,10 @@ function SettingsPanel({
           </div>
         </form>
 
-        <div className="mt-9 border-t border-[var(--border)] pt-8">
+        <fieldset
+          disabled={restoreBusy}
+          className="mt-9 min-w-0 border-0 border-t border-[var(--border)] p-0 pt-8"
+        >
           <h2 className="text-base font-semibold">Recovery kit</h2>
           <p className="mt-1 text-sm leading-6 text-[var(--text-muted)]">
             A saved or printed recovery key unlocks this vault when the master
@@ -3163,7 +3286,7 @@ function SettingsPanel({
               </button>
             </div>
           )}
-        </div>
+        </fieldset>
 
         <div className="mt-9 border-t border-[var(--border)] pt-8">
           <h2 className="text-base font-semibold">Backup &amp; export</h2>
@@ -3177,7 +3300,7 @@ function SettingsPanel({
             <button
               type="button"
               onClick={() => void exportReadable()}
-              disabled={backupBusy}
+              disabled={backupBusy || restoreBusy}
               className="flex items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] px-4 py-2.5 text-sm font-medium text-[var(--text-primary)] transition hover:bg-[var(--selected)] disabled:cursor-not-allowed disabled:opacity-55"
             >
               <HugeiconsIcon
@@ -3190,7 +3313,7 @@ function SettingsPanel({
             <button
               type="button"
               onClick={() => void backupDatabase()}
-              disabled={backupBusy}
+              disabled={backupBusy || restoreBusy}
               className="flex items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] px-4 py-2.5 text-sm font-medium text-[var(--text-primary)] transition hover:bg-[var(--selected)] disabled:cursor-not-allowed disabled:opacity-55"
             >
               <HugeiconsIcon
@@ -3227,31 +3350,134 @@ function SettingsPanel({
               <button
                 type="button"
                 onClick={() => void chooseRestoreBackup()}
-                disabled={restoreBusy}
+                disabled={restoreBusy || restoreBlockedBySettingsOperation}
                 className="w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-4 py-2.5 text-left text-sm text-[var(--text-primary)] transition hover:bg-[var(--selected)] disabled:cursor-not-allowed disabled:opacity-55"
               >
                 {restorePath ?? "Choose encrypted backup…"}
               </button>
               {restorePath !== null ? (
-                <Field label="Backup master passphrase">
-                  <input
-                    type="password"
-                    autoComplete="off"
-                    value={restorePassphrase}
-                    onChange={(event) =>
-                      setRestorePassphrase(event.target.value)
-                    }
-                    className="field-input"
-                    placeholder="Passphrase used by this backup"
-                  />
-                </Field>
+                <>
+                  <div
+                    role="group"
+                    aria-label="Backup restore credential"
+                    className="grid grid-cols-2 gap-2"
+                  >
+                    <button
+                      type="button"
+                      aria-pressed={restoreCredential === "passphrase"}
+                      onClick={() => {
+                        setRestoreCredential("passphrase");
+                        setRestoreError(null);
+                        setRestoreRecoverySecret("");
+                        setRestoreNewPassphrase("");
+                        setRestoreNewPassphraseConfirm("");
+                      }}
+                      disabled={
+                        restoreBusy || restoreBlockedBySettingsOperation
+                      }
+                      className="rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-55"
+                    >
+                      Master passphrase
+                    </button>
+                    <button
+                      type="button"
+                      aria-pressed={restoreCredential === "recovery"}
+                      onClick={() => {
+                        setRestoreCredential("recovery");
+                        setRestoreError(null);
+                        setRestorePassphrase("");
+                      }}
+                      disabled={
+                        restoreBusy || restoreBlockedBySettingsOperation
+                      }
+                      className="rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-55"
+                    >
+                      Recovery key
+                    </button>
+                  </div>
+                  {restoreCredential === "passphrase" ? (
+                    <Field label="Backup master passphrase">
+                      <input
+                        type="password"
+                        autoComplete="off"
+                        value={restorePassphrase}
+                        onChange={(event) =>
+                          setRestorePassphrase(event.target.value)
+                        }
+                        className="field-input"
+                        placeholder="Passphrase used by this backup"
+                      />
+                    </Field>
+                  ) : (
+                    <div className="space-y-4">
+                      <p className="text-xs leading-5 text-[var(--text-muted)]">
+                        Use the recovery key that was active when this backup
+                        was created. Older backups may require an older recovery
+                        key. Safeory will validate the backup and protect the
+                        recovered vault with a new master passphrase.
+                      </p>
+                      <Field label="Backup recovery key">
+                        <input
+                          type="password"
+                          autoComplete="off"
+                          spellCheck={false}
+                          value={restoreRecoverySecret}
+                          onChange={(event) =>
+                            setRestoreRecoverySecret(event.target.value)
+                          }
+                          className="field-input font-mono"
+                          placeholder="Paste the recovery key"
+                        />
+                      </Field>
+                      <Field label="New master passphrase">
+                        <input
+                          type="password"
+                          autoComplete="new-password"
+                          value={restoreNewPassphrase}
+                          onChange={(event) =>
+                            setRestoreNewPassphrase(event.target.value)
+                          }
+                          className="field-input"
+                          placeholder="12 characters or more"
+                        />
+                      </Field>
+                      <Field label="Confirm new master passphrase">
+                        <input
+                          type="password"
+                          autoComplete="new-password"
+                          value={restoreNewPassphraseConfirm}
+                          onChange={(event) =>
+                            setRestoreNewPassphraseConfirm(event.target.value)
+                          }
+                          className="field-input"
+                          placeholder="Repeat the new passphrase"
+                        />
+                      </Field>
+                    </div>
+                  )}
+                </>
               ) : null}
             </div>
+            {restoreError ? (
+              <div
+                role="alert"
+                className="mt-4 rounded-xl border border-[var(--danger-border)] bg-[var(--surface)] px-4 py-3 text-sm text-[var(--danger)]"
+              >
+                {restoreError}
+              </div>
+            ) : null}
             <div className="mt-4 flex justify-end">
               <button
                 type="submit"
                 disabled={
-                  restoreBusy || restorePath === null || !restorePassphrase
+                  restoreBusy ||
+                  restoreBlockedBySettingsOperation ||
+                  restorePath === null ||
+                  (restoreCredential === "passphrase"
+                    ? !restorePassphrase
+                    : !restoreRecoverySecret ||
+                      !restoreNewPassphrase ||
+                      !restoreNewPassphraseConfirm)
                 }
                 className="rounded-xl bg-[var(--danger)] px-4 py-2.5 text-sm font-medium text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-55"
               >
@@ -3283,7 +3509,14 @@ function AccessScreen({
   const [recoverySecret, setRecoverySecret] = useState("");
   const [restoreMode, setRestoreMode] = useState(false);
   const [restorePath, setRestorePath] = useState<string | null>(null);
+  const [restoreCredential, setRestoreCredential] = useState<
+    "passphrase" | "recovery"
+  >("passphrase");
   const [restorePassphrase, setRestorePassphrase] = useState("");
+  const [restoreRecoverySecret, setRestoreRecoverySecret] = useState("");
+  const [restoreNewPassphrase, setRestoreNewPassphrase] = useState("");
+  const [restoreNewPassphraseConfirm, setRestoreNewPassphraseConfirm] =
+    useState("");
   const creating = mode === "setup";
 
   useEffect(() => {
@@ -3291,6 +3524,9 @@ function AccessScreen({
       // The recovery secret lives only in this screen's local state.
       setRecoverySecret("");
       setRestorePassphrase("");
+      setRestoreRecoverySecret("");
+      setRestoreNewPassphrase("");
+      setRestoreNewPassphraseConfirm("");
     };
   }, []);
 
@@ -3353,26 +3589,58 @@ function AccessScreen({
     if (typeof selected === "string") {
       setRestorePath(selected);
       setRestorePassphrase("");
+      setRestoreRecoverySecret("");
+      setRestoreNewPassphrase("");
+      setRestoreNewPassphraseConfirm("");
     }
   }
 
   async function submitInitialRestore(event: FormEvent) {
     event.preventDefault();
     onError(null);
-    if (restorePath === null || !restorePassphrase) return;
+    if (restorePath === null) return;
+    if (restoreCredential === "passphrase" && !restorePassphrase) return;
+    if (restoreCredential === "recovery") {
+      if (!restoreRecoverySecret || !restoreNewPassphrase) return;
+      if (Array.from(restoreNewPassphrase).length < 12) {
+        onError("Use at least 12 characters for the new master passphrase.");
+        return;
+      }
+      if (restoreNewPassphrase !== restoreNewPassphraseConfirm) {
+        onError("The new master passphrase confirmation does not match.");
+        return;
+      }
+    }
     setBusy(true);
     try {
-      const status = await invoke<VaultStatus>("restore_database_backup", {
-        path: restorePath,
-        passphrase: restorePassphrase,
-      });
+      const unlockPassphrase =
+        restoreCredential === "passphrase"
+          ? restorePassphrase
+          : restoreNewPassphrase;
+      const status =
+        restoreCredential === "passphrase"
+          ? await invoke<VaultStatus>("restore_database_backup", {
+              path: restorePath,
+              passphrase: restorePassphrase,
+            })
+          : await invoke<VaultStatus>(
+              "restore_database_backup_with_recovery_kit",
+              {
+                path: restorePath,
+                secret: restoreRecoverySecret,
+                newPassphrase: restoreNewPassphrase,
+              },
+            );
       if (!status.initialized) {
         throw new Error("The selected backup was not installed.");
       }
       await invoke<VaultStatus>("unlock_vault", {
-        passphrase: restorePassphrase,
+        passphrase: unlockPassphrase,
       });
       setRestorePassphrase("");
+      setRestoreRecoverySecret("");
+      setRestoreNewPassphrase("");
+      setRestoreNewPassphraseConfirm("");
       setRestorePath(null);
       onauccess();
     } catch (reason) {
@@ -3426,17 +3694,103 @@ function AccessScreen({
               {restorePath ?? "Choose encrypted backup…"}
             </button>
             {restorePath !== null ? (
-              <Field label="Backup master passphrase">
-                <input
-                  autoFocus
-                  type="password"
-                  autoComplete="off"
-                  value={restorePassphrase}
-                  onChange={(event) => setRestorePassphrase(event.target.value)}
-                  className="field-input"
-                  placeholder="Passphrase used by this backup"
-                />
-              </Field>
+              <>
+                <div
+                  role="group"
+                  aria-label="Backup restore credential"
+                  className="grid grid-cols-2 gap-2"
+                >
+                  <button
+                    type="button"
+                    aria-pressed={restoreCredential === "passphrase"}
+                    onClick={() => {
+                      setRestoreCredential("passphrase");
+                      onError(null);
+                      setRestoreRecoverySecret("");
+                      setRestoreNewPassphrase("");
+                      setRestoreNewPassphraseConfirm("");
+                    }}
+                    disabled={busy}
+                    className="rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-55"
+                  >
+                    Master passphrase
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={restoreCredential === "recovery"}
+                    onClick={() => {
+                      setRestoreCredential("recovery");
+                      onError(null);
+                      setRestorePassphrase("");
+                    }}
+                    disabled={busy}
+                    className="rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-55"
+                  >
+                    Recovery key
+                  </button>
+                </div>
+                {restoreCredential === "passphrase" ? (
+                  <Field label="Backup master passphrase">
+                    <input
+                      autoFocus
+                      type="password"
+                      autoComplete="off"
+                      value={restorePassphrase}
+                      onChange={(event) =>
+                        setRestorePassphrase(event.target.value)
+                      }
+                      className="field-input"
+                      placeholder="Passphrase used by this backup"
+                    />
+                  </Field>
+                ) : (
+                  <div className="space-y-4">
+                    <p className="text-xs leading-5 text-[var(--text-muted)]">
+                      Use the recovery key that was active when this backup was
+                      created. Safeory will validate the backup and set a new
+                      master passphrase for the recovered vault.
+                    </p>
+                    <Field label="Backup recovery key">
+                      <input
+                        autoFocus
+                        type="password"
+                        autoComplete="off"
+                        spellCheck={false}
+                        value={restoreRecoverySecret}
+                        onChange={(event) =>
+                          setRestoreRecoverySecret(event.target.value)
+                        }
+                        className="field-input font-mono"
+                        placeholder="Paste the recovery key"
+                      />
+                    </Field>
+                    <Field label="New master passphrase">
+                      <input
+                        type="password"
+                        autoComplete="new-password"
+                        value={restoreNewPassphrase}
+                        onChange={(event) =>
+                          setRestoreNewPassphrase(event.target.value)
+                        }
+                        className="field-input"
+                        placeholder="12 characters or more"
+                      />
+                    </Field>
+                    <Field label="Confirm new master passphrase">
+                      <input
+                        type="password"
+                        autoComplete="new-password"
+                        value={restoreNewPassphraseConfirm}
+                        onChange={(event) =>
+                          setRestoreNewPassphraseConfirm(event.target.value)
+                        }
+                        className="field-input"
+                        placeholder="Repeat the new passphrase"
+                      />
+                    </Field>
+                  </div>
+                )}
+              </>
             ) : null}
 
             {error ? (
@@ -3450,7 +3804,15 @@ function AccessScreen({
 
             <button
               type="submit"
-              disabled={busy || restorePath === null || !restorePassphrase}
+              disabled={
+                busy ||
+                restorePath === null ||
+                (restoreCredential === "passphrase"
+                  ? !restorePassphrase
+                  : !restoreRecoverySecret ||
+                    !restoreNewPassphrase ||
+                    !restoreNewPassphraseConfirm)
+              }
               className="mt-2 flex w-full items-center justify-center gap-2 rounded-xl bg-[var(--primary)] px-4 py-3 text-sm font-medium text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-55"
             >
               <HugeiconsIcon
@@ -3553,15 +3915,19 @@ function AccessScreen({
         {creating ? (
           <button
             type="button"
+            disabled={busy}
             onClick={() => {
               setRestoreMode((current) => !current);
               setRestorePath(null);
               setRestorePassphrase("");
+              setRestoreRecoverySecret("");
+              setRestoreNewPassphrase("");
+              setRestoreNewPassphraseConfirm("");
               setPassphrase("");
               setConfirmation("");
               onError(null);
             }}
-            className="mt-4 text-sm text-[var(--text-muted)] underline-offset-4 transition hover:text-[var(--text-primary)] hover:underline"
+            className="mt-4 text-sm text-[var(--text-muted)] underline-offset-4 transition hover:text-[var(--text-primary)] hover:underline disabled:cursor-not-allowed disabled:opacity-55"
           >
             {restoreMode
               ? "Create a new vault instead"
@@ -3570,11 +3936,12 @@ function AccessScreen({
         ) : (
           <button
             type="button"
+            disabled={busy}
             onClick={() => {
               setRecoveryMode((current) => !current);
               onError(null);
             }}
-            className="mt-4 text-sm text-[var(--text-muted)] underline-offset-4 transition hover:text-[var(--text-primary)] hover:underline"
+            className="mt-4 text-sm text-[var(--text-muted)] underline-offset-4 transition hover:text-[var(--text-primary)] hover:underline disabled:cursor-not-allowed disabled:opacity-55"
           >
             {recoveryMode
               ? "Use your passphrase instead"
@@ -5318,7 +5685,7 @@ function SubscriptionComposer({
           autoFocus
           value={title}
           onChange={(event) => setTitle(event.target.value)}
-          placeholder="Streaming, software, membershipâ€¦"
+          placeholder="Streaming, software, membership…"
           aria-label="Subscription title"
           className="editor-title"
         />
@@ -5336,7 +5703,7 @@ function SubscriptionComposer({
               value={plan}
               onChange={(event) => setPlan(event.target.value)}
               className="field-input"
-              placeholder="Family, Pro, Annualâ€¦"
+              placeholder="Family, Pro, Annual…"
             />
           </Field>
         </div>
@@ -5355,7 +5722,7 @@ function SubscriptionComposer({
               value={currency}
               onChange={(event) => setCurrency(event.target.value)}
               className="field-input"
-              placeholder="USD, INRâ€¦"
+              placeholder="USD, INR…"
             />
           </Field>
         </div>

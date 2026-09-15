@@ -1978,6 +1978,16 @@ fn restore_database_backup(
     restore_database_backup_impl(&state, path, passphrase)
 }
 
+#[tauri::command]
+fn restore_database_backup_with_recovery_kit(
+    state: State<'_, VaultRuntime>,
+    path: String,
+    secret: String,
+    new_passphrase: String,
+) -> Result<VaultStatus, String> {
+    restore_database_backup_with_recovery_kit_impl(&state, path, secret, new_passphrase)
+}
+
 fn vault_status_impl(state: &VaultRuntime) -> Result<VaultStatus, String> {
     let initialized = if state.database_path.exists() {
         VaultSession::is_initialized(&state.database_path).map_err(safe_vault_error)?
@@ -4690,6 +4700,56 @@ fn restore_database_backup_impl(
     path: String,
     passphrase: String,
 ) -> Result<VaultStatus, String> {
+    let passphrase = Zeroizing::new(passphrase);
+    let source = database_restore_source(state, &path)?;
+    let initialized = if state.database_path.exists() {
+        VaultSession::is_initialized(&state.database_path).map_err(safe_vault_error)?
+    } else {
+        false
+    };
+    let generation = authorize_database_restore(state, initialized)?;
+    let preparation = prepare_database_restore_candidate(state, generation, &source, &passphrase);
+    drop(passphrase);
+    let (candidate, prepared) = preparation?;
+    commit_database_restore(state, initialized, generation, &candidate, prepared)
+}
+
+fn restore_database_backup_with_recovery_kit_impl(
+    state: &VaultRuntime,
+    path: String,
+    secret: String,
+    new_passphrase: String,
+) -> Result<VaultStatus, String> {
+    let secret = Zeroizing::new(secret);
+    let new_passphrase = Zeroizing::new(new_passphrase);
+    if new_passphrase.chars().count() < 12 {
+        return Err("Use at least 12 characters for the new master passphrase.".to_owned());
+    }
+    let source = database_restore_source(state, &path)?;
+    let initialized = if state.database_path.exists() {
+        VaultSession::is_initialized(&state.database_path).map_err(safe_vault_error)?
+    } else {
+        false
+    };
+    let generation = authorize_database_restore(state, initialized)?;
+    let parsed = RecoverySecret::from_hex(secret.trim()).map_err(|_| {
+        "Unable to validate this backup with the recovery key. Check the key and make sure the file is a complete Safeory encrypted backup.".to_owned()
+    })?;
+    let preparation = prepare_database_restore_candidate_with_recovery_kit(
+        state,
+        generation,
+        &source,
+        &parsed,
+        &new_passphrase,
+    );
+    drop(parsed);
+    drop(secret);
+    drop(new_passphrase);
+    let (candidate, prepared) = preparation?;
+    commit_database_restore(state, initialized, generation, &candidate, prepared)
+}
+
+fn database_restore_source(state: &VaultRuntime, path: &str) -> Result<PathBuf, String> {
     let source = PathBuf::from(path.trim());
     if path.trim().is_empty() || !source.is_file() {
         return Err("Choose an existing Safeory encrypted backup file.".to_owned());
@@ -4699,18 +4759,7 @@ fn restore_database_backup_impl(
     {
         return Err("Choose a backup file other than the active Safeory database.".to_owned());
     }
-
-    let initialized = if state.database_path.exists() {
-        VaultSession::is_initialized(&state.database_path).map_err(safe_vault_error)?
-    } else {
-        false
-    };
-    let generation = authorize_database_restore(state, initialized)?;
-    let passphrase = Zeroizing::new(passphrase);
-    let preparation = prepare_database_restore_candidate(state, generation, &source, &passphrase);
-    drop(passphrase);
-    let (candidate, prepared) = preparation?;
-    commit_database_restore(state, initialized, generation, &candidate, prepared)
+    Ok(source)
 }
 
 fn authorize_database_restore(state: &VaultRuntime, initialized: bool) -> Result<u64, String> {
@@ -4727,20 +4776,7 @@ fn prepare_database_restore_candidate(
     source: &Path,
     passphrase: &str,
 ) -> Result<(PathBuf, PreparedVaultRestore), String> {
-    let parent = state
-        .database_path
-        .parent()
-        .ok_or_else(|| "The Safeory app-data directory is unavailable.".to_owned())?;
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| "The system clock is unavailable.".to_owned())?
-        .as_nanos();
-    let candidate = parent.join(format!(
-        ".safeory-restore-candidate-{}-{unique}.sqlite3",
-        std::process::id()
-    ));
-    fs::copy(source, &candidate)
-        .map_err(|_| "Unable to read the selected backup file.".to_owned())?;
+    let candidate = copy_database_restore_candidate(state, source)?;
     let prepared = match VaultSession::prepare_restore_with_cancel(&candidate, passphrase, || {
         !is_session_generation_current(state, generation)
     }) {
@@ -4757,6 +4793,73 @@ fn prepare_database_restore_candidate(
         }
     };
     Ok((candidate, prepared))
+}
+
+fn prepare_database_restore_candidate_with_recovery_kit(
+    state: &VaultRuntime,
+    generation: u64,
+    source: &Path,
+    secret: &RecoverySecret,
+    new_passphrase: &str,
+) -> Result<(PathBuf, PreparedVaultRestore), String> {
+    let candidate = copy_database_restore_candidate(state, source)?;
+    let prepared = match VaultSession::prepare_restore_with_recovery_kit_with_cancel(
+        &candidate,
+        secret,
+        || !is_session_generation_current(state, generation),
+    ) {
+        Ok(prepared) => prepared,
+        Err(VaultError::OperationCancelled) => {
+            let _ = fs::remove_file(&candidate);
+            return Err(
+                "The vault session changed while validating the restore. Try again.".to_owned(),
+            );
+        }
+        Err(error) => {
+            let _ = fs::remove_file(&candidate);
+            return Err(backup_recovery_validation_error(error));
+        }
+    };
+    if !is_session_generation_current(state, generation) {
+        let _ = fs::remove_file(&candidate);
+        return Err(
+            "The vault session changed while validating the restore. Try again.".to_owned(),
+        );
+    }
+    let prepared = match prepared.rewrap_candidate_master_passphrase(new_passphrase) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            let _ = fs::remove_file(&candidate);
+            return Err(backup_recovery_validation_error(error));
+        }
+    };
+    if !is_session_generation_current(state, generation) {
+        let _ = fs::remove_file(&candidate);
+        return Err(
+            "The vault session changed while validating the restore. Try again.".to_owned(),
+        );
+    }
+    Ok((candidate, prepared))
+}
+
+fn copy_database_restore_candidate(state: &VaultRuntime, source: &Path) -> Result<PathBuf, String> {
+    let parent = state
+        .database_path
+        .parent()
+        .ok_or_else(|| "The Safeory app-data directory is unavailable.".to_owned())?;
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "The system clock is unavailable.".to_owned())?
+        .as_nanos();
+    let candidate = parent.join(format!(
+        ".safeory-restore-candidate-{}-{unique}.sqlite3",
+        std::process::id()
+    ));
+    if fs::copy(source, &candidate).is_err() {
+        let _ = fs::remove_file(&candidate);
+        return Err("Unable to read the selected backup file.".to_owned());
+    }
+    Ok(candidate)
 }
 
 fn commit_database_restore(
@@ -4793,7 +4896,7 @@ fn commit_database_restore(
     if let Err(error) = restore_result {
         state.restore_in_progress.store(false, Ordering::Release);
         let _ = fs::remove_file(candidate);
-        return Err(backup_validation_error(error));
+        return Err(backup_install_error(error));
     }
     let mut live_session = state
         .session
@@ -4862,6 +4965,27 @@ fn backup_validation_error(error: VaultError) -> String {
                 .to_owned()
         }
         _ => "Unable to validate this backup. Check its master passphrase and make sure the file is a complete Safeory encrypted backup.".to_owned(),
+    }
+}
+
+fn backup_recovery_validation_error(error: VaultError) -> String {
+    match error {
+        VaultError::Storage(StorageError::UnsupportedSchemaVersion(_)) => {
+            "This backup was created by a newer Safeory version and cannot be restored here."
+                .to_owned()
+        }
+        _ => "Unable to validate this backup with the recovery key. Check the key and make sure the file is a complete Safeory encrypted backup.".to_owned(),
+    }
+}
+
+fn backup_install_error(error: VaultError) -> String {
+    match error {
+        VaultError::Storage(StorageError::UnsupportedSchemaVersion(_)) => {
+            "This backup was created by a newer Safeory version and cannot be restored here."
+                .to_owned()
+        }
+        _ => "Unable to install the validated encrypted backup. The current vault was not replaced. Try again."
+            .to_owned(),
     }
 }
 
@@ -6019,7 +6143,8 @@ pub fn run() {
             unlock_vault_with_recovery_kit,
             export_human_readable,
             backup_database_copy,
-            restore_database_backup
+            restore_database_backup,
+            restore_database_backup_with_recovery_kit
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Safeory desktop shell");
@@ -9249,6 +9374,189 @@ mod tests {
         assert!(items.iter().any(|item| matches!(
             item,
             VaultItemView::SecureNote { title, .. } if title == "First-run restore marker"
+        )));
+    }
+
+    #[test]
+    fn first_run_recovery_restore_sets_new_passphrase_and_preserves_backup_key() {
+        const NEW_PASSPHRASE: &str = "a new disaster recovery passphrase";
+
+        let (source_directory, source) = runtime();
+        initialize_vault_impl(&source, PASSPHRASE.to_owned()).expect("initialize source vault");
+        let marker = create_note_impl(
+            &source,
+            "Recovery restore marker".to_owned(),
+            "body".to_owned(),
+        )
+        .expect("create source marker");
+        let recovery = generate_recovery_secret_impl(&source).expect("generate recovery key");
+        confirm_recovery_secret_impl(&source, recovery.secret.to_string(), recovery.generation)
+            .expect("install recovery key");
+        let recovery_secret = recovery.secret.to_string();
+        let backup_path = source_directory
+            .path()
+            .join("first-run-recovery-restore.sqlite3");
+        backup_database_copy_impl(&source, backup_path.to_string_lossy().to_string())
+            .expect("create encrypted backup");
+        let original_backup = fs::read(&backup_path).expect("read source backup");
+
+        let (_target_directory, target) = runtime();
+        let restored = restore_database_backup_with_recovery_kit_impl(
+            &target,
+            backup_path.to_string_lossy().to_string(),
+            recovery_secret.clone(),
+            NEW_PASSPHRASE.to_owned(),
+        )
+        .expect("restore backup with recovery key");
+        assert!(restored.initialized);
+        assert!(!restored.unlocked);
+        assert_eq!(
+            fs::read(&backup_path).expect("read unchanged source backup"),
+            original_backup
+        );
+        assert!(unlock_vault_impl(&target, PASSPHRASE.to_owned()).is_err());
+        unlock_vault_impl(&target, NEW_PASSPHRASE.to_owned())
+            .expect("new passphrase unlocks restored vault");
+        let items = list_vault_items_impl(&target).expect("list restored items");
+        assert!(items.iter().any(|item| matches!(
+            item,
+            VaultItemView::SecureNote { id, title, .. }
+                if id == &marker.id && title == "Recovery restore marker"
+        )));
+        lock_vault_impl(&target).expect("lock recovered vault");
+        unlock_vault_with_recovery_kit_impl(&target, recovery_secret)
+            .expect("captured recovery key remains usable");
+    }
+
+    #[test]
+    fn historical_recovery_key_replaces_existing_vault_and_rotated_key_does_not() {
+        const TARGET_PASSPHRASE: &str = "an existing vault master passphrase";
+        const NEW_PASSPHRASE: &str = "a new passphrase for the historical backup";
+
+        let (source_directory, source) = runtime();
+        initialize_vault_impl(&source, PASSPHRASE.to_owned()).expect("initialize source vault");
+        let marker = create_note_impl(
+            &source,
+            "Historical recovery marker".to_owned(),
+            "historical body".to_owned(),
+        )
+        .expect("create historical marker");
+        let old_recovery = generate_recovery_secret_impl(&source).expect("generate old key");
+        confirm_recovery_secret_impl(
+            &source,
+            old_recovery.secret.to_string(),
+            old_recovery.generation,
+        )
+        .expect("install old recovery key");
+        let old_recovery_secret = old_recovery.secret.to_string();
+        let backup_path = source_directory
+            .path()
+            .join("historical-recovery-restore.sqlite3");
+        backup_database_copy_impl(&source, backup_path.to_string_lossy().to_string())
+            .expect("create historical encrypted backup");
+        let original_backup = fs::read(&backup_path).expect("read historical backup");
+
+        let new_recovery = generate_recovery_secret_impl(&source).expect("generate rotated key");
+        confirm_recovery_secret_impl(
+            &source,
+            new_recovery.secret.to_string(),
+            new_recovery.generation,
+        )
+        .expect("rotate source recovery key");
+        let new_recovery_secret = new_recovery.secret.to_string();
+
+        let (_target_directory, target) = runtime();
+        initialize_vault_impl(&target, TARGET_PASSPHRASE.to_owned()).expect("initialize target");
+        create_note_impl(
+            &target,
+            "Target to replace".to_owned(),
+            "target body".to_owned(),
+        )
+        .expect("create target marker");
+
+        let rotated_error = restore_database_backup_with_recovery_kit_impl(
+            &target,
+            backup_path.to_string_lossy().to_string(),
+            new_recovery_secret.clone(),
+            NEW_PASSPHRASE.to_owned(),
+        );
+        assert!(rotated_error.is_err());
+        assert!(vault_status_impl(&target).expect("target status").unlocked);
+
+        let restored = restore_database_backup_with_recovery_kit_impl(
+            &target,
+            backup_path.to_string_lossy().to_string(),
+            old_recovery_secret.clone(),
+            NEW_PASSPHRASE.to_owned(),
+        )
+        .expect("restore historical backup with captured key");
+        assert!(restored.initialized);
+        assert!(!restored.unlocked);
+        assert_eq!(
+            fs::read(&backup_path).expect("read unchanged historical backup"),
+            original_backup
+        );
+        assert!(unlock_vault_impl(&target, TARGET_PASSPHRASE.to_owned()).is_err());
+        unlock_vault_impl(&target, NEW_PASSPHRASE.to_owned())
+            .expect("new passphrase unlocks historical restore");
+        let items = list_vault_items_impl(&target).expect("list historical restore");
+        assert!(items.iter().any(|item| matches!(
+            item,
+            VaultItemView::SecureNote { id, title, .. }
+                if id == &marker.id && title == "Historical recovery marker"
+        )));
+        lock_vault_impl(&target).expect("lock historical restore");
+        assert!(
+            unlock_vault_with_recovery_kit_impl(&target, new_recovery_secret).is_err(),
+            "rotated current key must not unlock the older backup snapshot"
+        );
+        unlock_vault_with_recovery_kit_impl(&target, old_recovery_secret)
+            .expect("captured historical key remains usable after restore");
+    }
+
+    #[test]
+    fn failed_recovery_restore_leaves_existing_vault_unchanged() {
+        const TARGET_PASSPHRASE: &str = "an existing target passphrase";
+        const NEW_PASSPHRASE: &str = "a replacement recovery passphrase";
+
+        let (source_directory, source) = runtime();
+        initialize_vault_impl(&source, PASSPHRASE.to_owned()).expect("initialize source vault");
+        let recovery = generate_recovery_secret_impl(&source).expect("generate recovery key");
+        confirm_recovery_secret_impl(&source, recovery.secret.to_string(), recovery.generation)
+            .expect("install recovery key");
+        let backup_path = source_directory.path().join("wrong-recovery-key.sqlite3");
+        backup_database_copy_impl(&source, backup_path.to_string_lossy().to_string())
+            .expect("create encrypted backup");
+        let original_backup = fs::read(&backup_path).expect("read source backup");
+
+        let (_target_directory, target) = runtime();
+        initialize_vault_impl(&target, TARGET_PASSPHRASE.to_owned()).expect("initialize target");
+        let marker = create_note_impl(
+            &target,
+            "Existing target marker".to_owned(),
+            "target body".to_owned(),
+        )
+        .expect("create target marker");
+        let wrong = RecoverySecret::generate().expect("wrong recovery key");
+        let error = match restore_database_backup_with_recovery_kit_impl(
+            &target,
+            backup_path.to_string_lossy().to_string(),
+            wrong.to_hex(),
+            NEW_PASSPHRASE.to_owned(),
+        ) {
+            Ok(_) => panic!("wrong recovery key unexpectedly replaced current vault"),
+            Err(error) => error,
+        };
+        assert!(error.contains("Unable to validate this backup with the recovery key"));
+        assert_eq!(
+            fs::read(&backup_path).expect("read unchanged source backup"),
+            original_backup
+        );
+        let items = list_vault_items_impl(&target).expect("target remains unlocked");
+        assert!(items.iter().any(|item| matches!(
+            item,
+            VaultItemView::SecureNote { id, title, .. }
+                if id == &marker.id && title == "Existing target marker"
         )));
     }
 

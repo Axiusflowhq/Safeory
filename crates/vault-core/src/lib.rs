@@ -241,6 +241,23 @@ pub struct LockedVaultRestore {
 }
 
 impl PreparedVaultRestore {
+    /// Rewraps the already-authenticated restore candidate under a new master
+    /// passphrase before installation. Callers must only use this on a staged
+    /// candidate copy, never on the user's source backup file.
+    pub fn rewrap_candidate_master_passphrase(
+        self,
+        new_passphrase: &str,
+    ) -> Result<Self, VaultError> {
+        if new_passphrase.chars().count() < 12 {
+            return Err(VaultError::PassphraseTooShort);
+        }
+        let wrapped = wrap_root_key(new_passphrase, &self.root_key)?;
+        let storage = VaultStorage::open(&self.backup_path)?;
+        storage.replace_root_wrap(&wrapped)?;
+        drop(storage);
+        Ok(self)
+    }
+
     pub fn install_to(self, live_path: impl AsRef<Path>) -> Result<VaultSession, VaultError> {
         let storage = VaultStorage::open(live_path)?;
         storage.replace_from_database(&self.backup_path)?;
@@ -1148,16 +1165,42 @@ impl VaultSession {
         if cancelled() {
             return Err(VaultError::OperationCancelled);
         }
-        validate_storage_contents_with_cancel(&storage, &root_key, &mut cancelled)?;
-        let _ = storage.load_recovery_wrap()?;
+        finish_restore_preparation(backup_path, storage, root_key, &mut cancelled)
+    }
+
+    pub fn prepare_restore_with_recovery_kit(
+        path: impl AsRef<Path>,
+        secret: &RecoverySecret,
+    ) -> Result<PreparedVaultRestore, VaultError> {
+        Self::prepare_restore_with_recovery_kit_with_cancel(path, secret, || false)
+    }
+
+    pub fn prepare_restore_with_recovery_kit_with_cancel<F>(
+        path: impl AsRef<Path>,
+        secret: &RecoverySecret,
+        mut cancelled: F,
+    ) -> Result<PreparedVaultRestore, VaultError>
+    where
+        F: FnMut() -> bool,
+    {
+        let backup_path = path.as_ref().to_path_buf();
+        let storage = VaultStorage::open(&backup_path)?;
+        storage.validate_integrity()?;
+        storage.validate_record_bounds()?;
         if cancelled() {
             return Err(VaultError::OperationCancelled);
         }
-        drop(storage);
-        Ok(PreparedVaultRestore {
-            backup_path,
-            root_key,
-        })
+        // A restore candidate must remain a complete vault even when the
+        // recovery wrap is the credential used to authenticate it.
+        let _ = storage.load_root_wrap()?;
+        let recovery_wrap = storage
+            .load_recovery_wrap()?
+            .ok_or(StorageError::NotInitialized)?;
+        let root_key = unwrap_root_key_with_recovery_secret(secret, &recovery_wrap)?;
+        if cancelled() {
+            return Err(VaultError::OperationCancelled);
+        }
+        finish_restore_preparation(backup_path, storage, root_key, &mut cancelled)
     }
 
     pub fn commit_prepared_restore(
@@ -1214,6 +1257,27 @@ impl VaultSession {
             }
         }
     }
+}
+
+fn finish_restore_preparation<F>(
+    backup_path: PathBuf,
+    storage: VaultStorage,
+    root_key: AccountRootKey,
+    cancelled: &mut F,
+) -> Result<PreparedVaultRestore, VaultError>
+where
+    F: FnMut() -> bool,
+{
+    validate_storage_contents_with_cancel(&storage, &root_key, cancelled)?;
+    let _ = storage.load_recovery_wrap()?;
+    if cancelled() {
+        return Err(VaultError::OperationCancelled);
+    }
+    drop(storage);
+    Ok(PreparedVaultRestore {
+        backup_path,
+        root_key,
+    })
 }
 
 fn validate_storage_contents(
@@ -3160,6 +3224,76 @@ mod tests {
                 .expect("old recovery key still unlocks historical backup"),
         );
         assert!(VaultSession::unlock_with_recovery_kit(&historical_backup, &new_secret).is_err());
+    }
+
+    #[test]
+    fn recovery_kit_can_prepare_staged_backup_restore_with_a_new_master_passphrase() {
+        const NEW_PASSPHRASE: &str = "a new passphrase after disaster recovery";
+
+        let dir = tempdir().expect("temp directory");
+        let database = dir.path().join("source.sqlite3");
+        let backup = dir.path().join("backup.sqlite3");
+        let candidate = dir.path().join("candidate.sqlite3");
+        let target = dir.path().join("target.sqlite3");
+        let source = VaultSession::create(&database, TEST_PASSPHRASE).expect("create source");
+        let secret = RecoverySecret::generate().expect("recovery secret");
+        source
+            .install_recovery_kit(&secret)
+            .expect("install recovery kit");
+        let item = VaultItem::secure_note("recovery restore", "body");
+        source.put_item(&item, 1).expect("store item");
+        source
+            .backup_database_to(&backup)
+            .expect("create encrypted backup");
+        drop(source);
+
+        let original_backup = fs::read(&backup).expect("read source backup");
+        fs::copy(&backup, &candidate).expect("stage candidate copy");
+        let prepared = VaultSession::prepare_restore_with_recovery_kit(&candidate, &secret)
+            .expect("authenticate candidate with recovery kit")
+            .rewrap_candidate_master_passphrase(NEW_PASSPHRASE)
+            .expect("rewrap staged candidate");
+        let restored = prepared
+            .install_to(&target)
+            .expect("install recovered backup");
+        assert!(restored.get_item(item.id).expect("load item") == item);
+        drop(restored);
+
+        assert!(VaultSession::unlock(&target, TEST_PASSPHRASE).is_err());
+        drop(
+            VaultSession::unlock(&target, NEW_PASSPHRASE)
+                .expect("new master passphrase unlocks recovered vault"),
+        );
+        drop(
+            VaultSession::unlock_with_recovery_kit(&target, &secret)
+                .expect("recovery key remains usable after restore"),
+        );
+        assert_eq!(
+            fs::read(&backup).expect("read unchanged source backup"),
+            original_backup
+        );
+    }
+
+    #[test]
+    fn recovery_restore_requires_the_backup_recovery_wrap_and_matching_secret() {
+        let dir = tempdir().expect("temp directory");
+        let without_kit = dir.path().join("without-kit.sqlite3");
+        let with_kit = dir.path().join("with-kit.sqlite3");
+        let secret = RecoverySecret::generate().expect("recovery secret");
+        let wrong = RecoverySecret::generate().expect("wrong recovery secret");
+
+        drop(VaultSession::create(&without_kit, TEST_PASSPHRASE).expect("create vault"));
+        assert!(matches!(
+            VaultSession::prepare_restore_with_recovery_kit(&without_kit, &secret),
+            Err(VaultError::Storage(StorageError::NotInitialized))
+        ));
+
+        let session = VaultSession::create(&with_kit, TEST_PASSPHRASE).expect("create vault");
+        session
+            .install_recovery_kit(&secret)
+            .expect("install recovery kit");
+        drop(session);
+        assert!(VaultSession::prepare_restore_with_recovery_kit(&with_kit, &wrong).is_err());
     }
 
     #[test]

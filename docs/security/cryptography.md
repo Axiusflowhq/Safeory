@@ -119,7 +119,12 @@ Implemented additional domains (Trust Engine foundation):
   Replacing the recovery key atomically replaces the singleton recovery wrap for
   the live database. It does not rewrite historical encrypted backups: an older
   backup retains the recovery wrap captured when that snapshot was created, and
-  restoring such a backup reintroduces that historical recovery configuration.
+  recovery-authenticated restore requires that captured key. Safeory unwraps the
+  staged backup's AccountRootKey with the recovery wrap, runs the same full
+  authenticated backup validation as passphrase restore, then creates a fresh
+  Argon2id passphrase wrap for that exact recovered root using the user's new
+  master passphrase. Only the staged candidate is rewrapped; the selected source
+  backup is not modified, and the captured recovery wrap is preserved.
 - `safeory:v1:share-wrap` — per-envelope wrap key from an ephemeral-static
   X25519 DH shared secret, HKDF salt `SHA256(ephemeral_pub || recipient_pub)`,
   XChaCha20-Poly1305 payload with AAD binding sender/recipient/fingerprint/

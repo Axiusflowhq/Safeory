@@ -38,7 +38,8 @@ Implemented now:
   protection and graceful handling of trashed references,
 - no-backdoor recovery kit: high-entropy key with dedicated plaintext Save and
   print workflows, explicit install/confirm, safe replacement for the live
-  vault, unlock-with-kit while locked, and threshold (2-of-3 style) social
+  vault, unlock-with-kit while locked, recovery-authenticated encrypted-backup
+  restore with a new master passphrase, and threshold (2-of-3 style) social
   recovery plus sealed recovery-share envelopes at the crypto layer,
 - local Plan Test: metadata-only readiness checks for Emergency Card records,
   contacts, instructions, and recovery configuration, plus a read-only recovery
@@ -69,7 +70,9 @@ Implemented now:
 - portable export and recovery: human-readable active-record JSON plus a
   validated encrypted SQLite snapshot, both written atomically to user-chosen
   locations; encrypted backups can be restored transactionally from Settings
-  or during first-run setup without overwriting device-only preferences,
+  or during first-run setup using either the backup master passphrase or the
+  recovery key captured by that backup, without overwriting device-only
+  preferences,
 - encrypted local file attachments with per-file keys, authenticated 1 MiB
   chunks, metadata-only renderer IPC, Trash/restore lifecycle preservation,
   tombstone-based permanent deletion, and attachment-complete encrypted
