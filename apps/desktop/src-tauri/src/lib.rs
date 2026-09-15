@@ -822,6 +822,136 @@ struct AttachmentAddView {
     item_revision: u64,
 }
 
+#[derive(serde::Serialize)]
+struct ItemHistorySupportView {
+    linked_record_count: usize,
+    attachment_count: usize,
+    legacy_disposition: LegacyDisposition,
+    account_closure_plan: Option<AccountClosurePlan>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ItemHistoryDetailView {
+    SecureNote {
+        id: String,
+        revision: u64,
+        title: String,
+        body: String,
+        support: ItemHistorySupportView,
+    },
+    Password {
+        id: String,
+        revision: u64,
+        title: String,
+        username: String,
+        website: String,
+        notes: String,
+        has_password: bool,
+        support: ItemHistorySupportView,
+    },
+    Document {
+        id: String,
+        revision: u64,
+        title: String,
+        issuer: String,
+        expiry: String,
+        notes: String,
+        has_document_number: bool,
+        support: ItemHistorySupportView,
+    },
+    Receipt {
+        id: String,
+        revision: u64,
+        title: String,
+        merchant: String,
+        purchase_date: String,
+        amount: String,
+        currency: String,
+        tracking_status: String,
+        return_by: String,
+        refund_due: String,
+        notes: String,
+        has_receipt_reference: bool,
+        support: ItemHistorySupportView,
+    },
+    Insurance {
+        id: String,
+        revision: u64,
+        title: String,
+        provider: String,
+        policy_type: String,
+        renewal: String,
+        notes: String,
+        has_policy_number: bool,
+        support: ItemHistorySupportView,
+    },
+    Financial {
+        id: String,
+        revision: u64,
+        title: String,
+        institution: String,
+        account_type: String,
+        currency: String,
+        notes: String,
+        has_account_number: bool,
+        support: ItemHistorySupportView,
+    },
+    Property {
+        id: String,
+        revision: u64,
+        title: String,
+        property_type: String,
+        ownership: String,
+        notes: String,
+        has_address: bool,
+        has_property_reference: bool,
+        support: ItemHistorySupportView,
+    },
+    Vehicle {
+        id: String,
+        revision: u64,
+        title: String,
+        make: String,
+        model: String,
+        year: String,
+        renewal: String,
+        notes: String,
+        has_registration_number: bool,
+        has_vin: bool,
+        support: ItemHistorySupportView,
+    },
+    Possession {
+        id: String,
+        revision: u64,
+        title: String,
+        brand: String,
+        model: String,
+        purchase_date: String,
+        purchase_price: String,
+        store: String,
+        warranty_expiry: String,
+        notes: String,
+        has_serial_number: bool,
+        support: ItemHistorySupportView,
+    },
+}
+
+#[derive(Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ItemHistorySensitiveField {
+    Password,
+    DocumentNumber,
+    ReceiptReference,
+    PolicyNumber,
+    AccountNumber,
+    Address,
+    PropertyReference,
+    RegistrationNumber,
+    Vin,
+    SerialNumber,
+}
+
 #[tauri::command]
 fn vault_status(state: State<'_, VaultRuntime>) -> Result<VaultStatus, String> {
     vault_status_impl(&state)
@@ -1513,6 +1643,36 @@ fn set_credential_closure_plan(
     plan: AccountClosurePlan,
 ) -> Result<u64, String> {
     set_credential_closure_plan_impl(&state, id, revision, plan)
+}
+
+#[tauri::command]
+fn list_item_history(
+    state: State<'_, VaultRuntime>,
+    id: String,
+    current_revision: u64,
+) -> Result<Vec<u64>, String> {
+    list_item_history_impl(&state, id, current_revision)
+}
+
+#[tauri::command]
+fn get_item_history_detail(
+    state: State<'_, VaultRuntime>,
+    id: String,
+    current_revision: u64,
+    history_revision: u64,
+) -> Result<ItemHistoryDetailView, String> {
+    get_item_history_detail_impl(&state, id, current_revision, history_revision)
+}
+
+#[tauri::command]
+fn reveal_item_history_sensitive(
+    state: State<'_, VaultRuntime>,
+    id: String,
+    current_revision: u64,
+    history_revision: u64,
+    field: ItemHistorySensitiveField,
+) -> Result<String, String> {
+    reveal_item_history_sensitive_impl(&state, id, current_revision, history_revision, field)
 }
 
 #[tauri::command]
@@ -3386,6 +3546,117 @@ fn set_credential_closure_plan_impl(
         })
 }
 
+fn list_item_history_impl(
+    state: &VaultRuntime,
+    id: String,
+    current_revision: u64,
+) -> Result<Vec<u64>, String> {
+    let id = id
+        .parse()
+        .map_err(|_| "The record identifier is invalid.".to_owned())?;
+    let generation = capture_session_generation(state);
+    let session = lock_session(state)?;
+    if !is_session_generation_current(state, generation) {
+        return Err(history_session_changed_error());
+    }
+    let session = session
+        .as_ref()
+        .ok_or_else(|| "Unlock the vault before reading version history.".to_owned())?;
+    let revisions = session
+        .list_item_history_revisions(id, current_revision)
+        .map_err(map_history_error)?;
+    if !is_session_generation_current(state, generation) {
+        return Err(history_session_changed_error());
+    }
+    Ok(revisions)
+}
+
+fn get_item_history_detail_impl(
+    state: &VaultRuntime,
+    id: String,
+    current_revision: u64,
+    history_revision: u64,
+) -> Result<ItemHistoryDetailView, String> {
+    let id = id
+        .parse()
+        .map_err(|_| "The record identifier is invalid.".to_owned())?;
+    let generation = capture_session_generation(state);
+    let session = lock_session(state)?;
+    if !is_session_generation_current(state, generation) {
+        return Err(history_session_changed_error());
+    }
+    let session = session
+        .as_ref()
+        .ok_or_else(|| "Unlock the vault before reading version history.".to_owned())?;
+    let item = session
+        .get_item_history(id, current_revision, history_revision)
+        .map_err(map_history_error)?;
+    if !is_session_generation_current(state, generation) {
+        return Err(history_session_changed_error());
+    }
+    item_history_detail_view(item, history_revision)
+}
+
+fn reveal_item_history_sensitive_impl(
+    state: &VaultRuntime,
+    id: String,
+    current_revision: u64,
+    history_revision: u64,
+    field: ItemHistorySensitiveField,
+) -> Result<String, String> {
+    let id = id
+        .parse()
+        .map_err(|_| "The record identifier is invalid.".to_owned())?;
+    let generation = capture_session_generation(state);
+    let session = lock_session(state)?;
+    if !is_session_generation_current(state, generation) {
+        return Err(history_session_changed_error());
+    }
+    let item = session
+        .as_ref()
+        .ok_or_else(|| "Unlock the vault before revealing version history.".to_owned())?
+        .get_item_history(id, current_revision, history_revision)
+        .map_err(map_history_error)?;
+    let field_name = match (item.kind, field) {
+        (ItemKind::Password, ItemHistorySensitiveField::Password) => "password",
+        (ItemKind::Document, ItemHistorySensitiveField::DocumentNumber) => "document_number",
+        (ItemKind::Receipt, ItemHistorySensitiveField::ReceiptReference) => "receipt_reference",
+        (ItemKind::Insurance, ItemHistorySensitiveField::PolicyNumber) => "policy_number",
+        (ItemKind::Financial, ItemHistorySensitiveField::AccountNumber) => "account_number",
+        (ItemKind::Property, ItemHistorySensitiveField::Address) => "address",
+        (ItemKind::Property, ItemHistorySensitiveField::PropertyReference) => "property_reference",
+        (ItemKind::Vehicle, ItemHistorySensitiveField::RegistrationNumber) => "registration_number",
+        (ItemKind::Vehicle, ItemHistorySensitiveField::Vin) => "vin",
+        (ItemKind::Possession, ItemHistorySensitiveField::SerialNumber) => "serial_number",
+        _ => return Err("That protected field is not available for this record type.".to_owned()),
+    };
+    let value = item.fields.get(field_name).cloned().ok_or_else(|| {
+        "The encrypted historical record is missing a protected field.".to_owned()
+    })?;
+    if !is_session_generation_current(state, generation) {
+        return Err(history_session_changed_error());
+    }
+    Ok(value)
+}
+
+fn history_session_changed_error() -> String {
+    "The vault session changed while version history was loading. Reopen the record and try again."
+        .to_owned()
+}
+
+fn map_history_error(error: VaultError) -> String {
+    match error {
+        VaultError::Storage(StorageError::StaleRevision) => {
+            "This record changed since version history was opened. Reload it before continuing."
+                .to_owned()
+        }
+        VaultError::HistoryNotAvailable => {
+            "That historical version is no longer available.".to_owned()
+        }
+        other => safe_vault_error(other),
+    }
+}
+
 fn attachment_summary_view(summary: CoreAttachmentSummary) -> AttachmentSummaryView {
     AttachmentSummaryView {
         id: summary.id.to_string(),
@@ -4387,6 +4658,158 @@ fn update_credential_impl(
     credential_view(item, revision)
 }
 
+fn item_history_support_view(item: &VaultItem) -> ItemHistorySupportView {
+    ItemHistorySupportView {
+        linked_record_count: item.links.len(),
+        attachment_count: item.attachments.len(),
+        legacy_disposition: item.legacy_disposition,
+        account_closure_plan: (item.kind == ItemKind::Password)
+            .then(|| item.account_closure_plan.clone()),
+    }
+}
+
+fn item_history_detail_view(
+    item: VaultItem,
+    revision: u64,
+) -> Result<ItemHistoryDetailView, String> {
+    let support = item_history_support_view(&item);
+    let notes = item.notes.clone().unwrap_or_default();
+    match item.kind {
+        ItemKind::SecureNote => {
+            let view = note_view(item, revision)?;
+            Ok(ItemHistoryDetailView::SecureNote {
+                id: view.id,
+                revision,
+                title: view.title,
+                body: view.body,
+                support,
+            })
+        }
+        ItemKind::Password => {
+            let view = credential_view(item, revision)?;
+            Ok(ItemHistoryDetailView::Password {
+                id: view.id,
+                revision,
+                title: view.title,
+                username: view.username,
+                website: view.website,
+                notes: view.notes,
+                has_password: view.has_password,
+                support,
+            })
+        }
+        ItemKind::Document => {
+            let view = document_view(item, revision)?;
+            Ok(ItemHistoryDetailView::Document {
+                id: view.id,
+                revision,
+                title: view.title,
+                issuer: view.issuer,
+                expiry: view.expiry,
+                notes: view.notes,
+                has_document_number: view.has_document_number,
+                support,
+            })
+        }
+        ItemKind::Receipt => {
+            let view = receipt_view(item, revision)?;
+            Ok(ItemHistoryDetailView::Receipt {
+                id: view.id,
+                revision,
+                title: view.title,
+                merchant: view.merchant,
+                purchase_date: view.purchase_date,
+                amount: view.amount,
+                currency: view.currency,
+                tracking_status: view.tracking_status,
+                return_by: view.return_by,
+                refund_due: view.refund_due,
+                notes,
+                has_receipt_reference: view.has_receipt_reference,
+                support,
+            })
+        }
+        ItemKind::Insurance => {
+            let view = insurance_view(item, revision)?;
+            Ok(ItemHistoryDetailView::Insurance {
+                id: view.id,
+                revision,
+                title: view.title,
+                provider: view.provider,
+                policy_type: view.policy_type,
+                renewal: view.renewal,
+                notes: view.notes,
+                has_policy_number: view.has_policy_number,
+                support,
+            })
+        }
+        ItemKind::Financial => {
+            let view = financial_view(item, revision)?;
+            Ok(ItemHistoryDetailView::Financial {
+                id: view.id,
+                revision,
+                title: view.title,
+                institution: view.institution,
+                account_type: view.account_type,
+                currency: view.currency,
+                notes,
+                has_account_number: view.has_account_number,
+                support,
+            })
+        }
+        ItemKind::Property => {
+            let view = property_view(item, revision)?;
+            Ok(ItemHistoryDetailView::Property {
+                id: view.id,
+                revision,
+                title: view.title,
+                property_type: view.property_type,
+                ownership: view.ownership,
+                notes,
+                has_address: view.has_address,
+                has_property_reference: view.has_property_reference,
+                support,
+            })
+        }
+        ItemKind::Vehicle => {
+            let view = vehicle_view(item, revision)?;
+            Ok(ItemHistoryDetailView::Vehicle {
+                id: view.id,
+                revision,
+                title: view.title,
+                make: view.make,
+                model: view.model,
+                year: view.year,
+                renewal: view.renewal,
+                notes: view.notes,
+                has_registration_number: view.has_registration_number,
+                has_vin: view.has_vin,
+                support,
+            })
+        }
+        ItemKind::Possession => {
+            let view = possession_view(item, revision)?;
+            Ok(ItemHistoryDetailView::Possession {
+                id: view.id,
+                revision,
+                title: view.title,
+                brand: view.brand,
+                model: view.model,
+                purchase_date: view.purchase_date,
+                purchase_price: view.purchase_price,
+                store: view.store,
+                warranty_expiry: view.warranty_expiry,
+                notes: view.notes,
+                has_serial_number: view.has_serial_number,
+                support,
+            })
+        }
+        ItemKind::EmergencyInstruction => {
+            Err("Version history is unavailable for emergency instructions.".to_owned())
+        }
+    }
+}
+
 fn note_view(item: VaultItem, revision: u64) -> Result<NoteView, String> {
     let body = item
         .fields
@@ -5221,6 +5644,9 @@ pub fn run() {
             set_item_legacy_disposition,
             get_credential_closure_plan,
             set_credential_closure_plan,
+            list_item_history,
+            get_item_history_detail,
+            reveal_item_history_sensitive,
             add_attachment,
             list_attachments,
             export_attachment,
@@ -7010,6 +7436,210 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn version_history_ipc_is_redacted_exact_revision_and_locked_safe() {
+        let (_directory, runtime) = runtime();
+        initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
+        let credential = create_credential_impl(
+            &runtime,
+            "Primary email".to_owned(),
+            "old-user@example.com".to_owned(),
+            "HISTORY-SECRET-ALPHA".to_owned(),
+            "https://example.com".to_owned(),
+            "old private note".to_owned(),
+        )
+        .expect("create credential");
+        let revision_two = set_item_legacy_disposition_impl(
+            &runtime,
+            credential.id.clone(),
+            credential.revision,
+            LegacyDisposition::PrivateForever,
+        )
+        .expect("advance credential revision");
+
+        assert_eq!(
+            list_item_history_impl(&runtime, credential.id.clone(), revision_two)
+                .expect("list history"),
+            vec![1]
+        );
+        let redacted =
+            get_item_history_detail_impl(&runtime, credential.id.clone(), revision_two, 1)
+                .expect("load redacted history");
+        let serialized = serde_json::to_string(&redacted).expect("serialize history detail");
+        assert!(serialized.contains("\"kind\":\"password\""));
+        assert!(serialized.contains("\"has_password\":true"));
+        assert!(!serialized.contains("HISTORY-SECRET-ALPHA"));
+
+        assert_eq!(
+            reveal_item_history_sensitive_impl(
+                &runtime,
+                credential.id.clone(),
+                revision_two,
+                1,
+                ItemHistorySensitiveField::Password,
+            )
+            .expect("reveal historical password"),
+            "HISTORY-SECRET-ALPHA"
+        );
+        assert!(
+            reveal_item_history_sensitive_impl(
+                &runtime,
+                credential.id.clone(),
+                revision_two,
+                1,
+                ItemHistorySensitiveField::AccountNumber,
+            )
+            .is_err()
+        );
+
+        let revision_three = set_credential_closure_plan_impl(
+            &runtime,
+            credential.id.clone(),
+            revision_two,
+            AccountClosurePlan {
+                disposition: vault_models::AccountClosureDisposition::CloseAccount,
+                instructions: "Close manually after exporting statements.".to_owned(),
+            },
+        )
+        .expect("advance support revision");
+        assert_eq!(
+            list_item_history_impl(&runtime, credential.id.clone(), revision_three)
+                .expect("list refreshed history"),
+            vec![2, 1]
+        );
+        assert!(list_item_history_impl(&runtime, credential.id.clone(), revision_two).is_err());
+        assert!(
+            get_item_history_detail_impl(&runtime, credential.id.clone(), revision_two, 1).is_err()
+        );
+
+        let trashed_revision = trash_item_impl(&runtime, credential.id.clone(), revision_three)
+            .expect("trash credential");
+        assert!(
+            list_item_history_impl(&runtime, credential.id.clone(), trashed_revision).is_err(),
+            "Trash must retain history without exposing historical secrets"
+        );
+        let restored_revision =
+            restore_trashed_item_impl(&runtime, credential.id.clone(), trashed_revision)
+                .expect("restore credential");
+        assert_eq!(
+            list_item_history_impl(&runtime, credential.id.clone(), restored_revision)
+                .expect("history is readable again after restore"),
+            vec![2, 1]
+        );
+
+        lock_vault_impl(&runtime).expect("lock vault");
+        assert!(list_item_history_impl(&runtime, credential.id, restored_revision).is_err());
+    }
+
+    #[test]
+    fn historical_detail_projection_never_serializes_protected_fields() {
+        let cases = vec![
+            (
+                VaultItem::password(
+                    "Credential",
+                    "user",
+                    "SECRET-PASSWORD",
+                    "example.com",
+                    "note",
+                ),
+                "SECRET-PASSWORD",
+            ),
+            (
+                VaultItem::document("Passport", "SECRET-DOCUMENT", "Issuer", "", "note"),
+                "SECRET-DOCUMENT",
+            ),
+            (
+                VaultItem::receipt(
+                    "Receipt",
+                    "Merchant",
+                    "",
+                    "100",
+                    "USD",
+                    "SECRET-RECEIPT",
+                    "kept",
+                    "",
+                    "",
+                    "note",
+                ),
+                "SECRET-RECEIPT",
+            ),
+            (
+                VaultItem::insurance("Policy", "Provider", "Home", "SECRET-POLICY", "", "note"),
+                "SECRET-POLICY",
+            ),
+            (
+                VaultItem::financial(
+                    "Account",
+                    "Bank",
+                    "Checking",
+                    "USD",
+                    "SECRET-ACCOUNT",
+                    "note",
+                ),
+                "SECRET-ACCOUNT",
+            ),
+            (
+                VaultItem::property(
+                    "Home",
+                    "House",
+                    "SECRET-ADDRESS",
+                    "Owned",
+                    "property-ref",
+                    "note",
+                ),
+                "SECRET-ADDRESS",
+            ),
+            (
+                VaultItem::vehicle(
+                    "Car",
+                    "Make",
+                    "Model",
+                    "2026",
+                    "SECRET-REGISTRATION",
+                    "vin-value",
+                    "",
+                    "note",
+                ),
+                "SECRET-REGISTRATION",
+            ),
+            (
+                VaultItem::possession(
+                    "Laptop",
+                    "Brand",
+                    "Model",
+                    "SECRET-SERIAL",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "note",
+                ),
+                "SECRET-SERIAL",
+            ),
+        ];
+
+        for (item, protected) in cases {
+            let projected = item_history_detail_view(item, 7).expect("project historical item");
+            let serialized = serde_json::to_string(&projected).expect("serialize projected item");
+            assert!(
+                !serialized.contains(protected),
+                "protected historical field leaked into detail projection"
+            );
+        }
+
+        let attachment_id = "12345678-1234-4234-8234-123456789abc";
+        let mut with_attachment =
+            VaultItem::password("Credential", "user", "password", "example.com", "");
+        with_attachment
+            .attachments
+            .push(attachment_id.parse().expect("attachment id"));
+        let projected =
+            item_history_detail_view(with_attachment, 9).expect("project attachment summary");
+        let serialized = serde_json::to_string(&projected).expect("serialize attachment summary");
+        assert!(serialized.contains("\"attachment_count\":1"));
+        assert!(!serialized.contains(attachment_id));
     }
 
     #[test]

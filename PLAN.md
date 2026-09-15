@@ -65,7 +65,7 @@ Rule: cloud integration starts only after the local platform below is stable.
 6. OS keystore + biometric unlock; passkeys/TOTP.
 7. Subscriptions, expanded home inventory, and account-closure automation. Local encrypted credential closure planning is done; Safeory still does not contact providers or close accounts automatically.
 8. Email import, browser capture, mobile scanner, private-AI modes (local-first per spec).
-9. Audit/version history UI (revision numbers exist today, but historical ciphertext is not retained yet), family space, secure links.
+9. Version-history restore/rollback and richer audit metadata; bounded encrypted browse-only history is implemented locally (20 prior revisions/item), but restoring an old snapshot is intentionally deferred because historical attachment references may no longer have live attachment data. Family space and secure links remain future work.
 
 ## Non-goals (explicit)
 Password autofill, banking/investment aggregation, resale marketplace, whole-vault

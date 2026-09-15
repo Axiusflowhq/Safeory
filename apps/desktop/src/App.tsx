@@ -362,6 +362,106 @@ type AttachmentAddResult = {
   item_revision: number;
 };
 
+type ItemHistorySupport = {
+  linked_record_count: number;
+  attachment_count: number;
+  legacy_disposition: LegacyDisposition;
+  account_closure_plan: AccountClosurePlan | null;
+};
+
+type ItemHistoryBase = {
+  id: string;
+  revision: number;
+  title: string;
+  support: ItemHistorySupport;
+};
+
+type ItemHistoryDetail =
+  | ({ kind: "secure_note"; body: string } & ItemHistoryBase)
+  | ({
+      kind: "password";
+      username: string;
+      website: string;
+      notes: string;
+      has_password: boolean;
+    } & ItemHistoryBase)
+  | ({
+      kind: "document";
+      issuer: string;
+      expiry: string;
+      notes: string;
+      has_document_number: boolean;
+    } & ItemHistoryBase)
+  | ({
+      kind: "receipt";
+      merchant: string;
+      purchase_date: string;
+      amount: string;
+      currency: string;
+      tracking_status: string;
+      return_by: string;
+      refund_due: string;
+      notes: string;
+      has_receipt_reference: boolean;
+    } & ItemHistoryBase)
+  | ({
+      kind: "insurance";
+      provider: string;
+      policy_type: string;
+      renewal: string;
+      notes: string;
+      has_policy_number: boolean;
+    } & ItemHistoryBase)
+  | ({
+      kind: "financial";
+      institution: string;
+      account_type: string;
+      currency: string;
+      notes: string;
+      has_account_number: boolean;
+    } & ItemHistoryBase)
+  | ({
+      kind: "property";
+      property_type: string;
+      ownership: string;
+      notes: string;
+      has_address: boolean;
+      has_property_reference: boolean;
+    } & ItemHistoryBase)
+  | ({
+      kind: "vehicle";
+      make: string;
+      model: string;
+      year: string;
+      renewal: string;
+      notes: string;
+      has_registration_number: boolean;
+      has_vin: boolean;
+    } & ItemHistoryBase)
+  | ({
+      kind: "possession";
+      brand: string;
+      model: string;
+      purchase_date: string;
+      purchase_price: string;
+      store: string;
+      warranty_expiry: string;
+      notes: string;
+      has_serial_number: boolean;
+    } & ItemHistoryBase);
+
+type ItemHistorySensitiveField =
+  | "password"
+  | "document_number"
+  | "receipt_reference"
+  | "policy_number"
+  | "account_number"
+  | "address"
+  | "property_reference"
+  | "registration_number"
+  | "vin"
+  | "serial_number";
+
 type LinkedSectionProps = {
   linkedTitles: ItemTitle[];
   allItems: VaultItem[];
@@ -1040,6 +1140,7 @@ export default function App() {
           settings={deviceSettings}
           generation={sessionFence.token()}
           isGenerationCurrent={isSessionGenerationCurrent}
+          canReplaceVault={canLeaveSelectedRecord}
           onClose={() => setSettingsOpen(false)}
           onSettingsSaved={setDeviceSettings}
           onVaultRestored={() => {
@@ -2377,6 +2478,7 @@ function SettingsPanel({
   settings,
   generation,
   isGenerationCurrent,
+  canReplaceVault,
   onClose,
   onSettingsSaved,
   onVaultRestored,
@@ -2385,6 +2487,7 @@ function SettingsPanel({
   settings: DeviceSettings;
   generation: number;
   isGenerationCurrent: (generation: number) => boolean;
+  canReplaceVault: () => boolean;
   onClose: () => void;
   onSettingsSaved: (settings: DeviceSettings) => void;
   onVaultRestored: () => void;
@@ -2586,6 +2689,7 @@ function SettingsPanel({
   async function restoreDatabase(event: FormEvent) {
     event.preventDefault();
     if (restoreBusy || restorePath === null || !restorePassphrase) return;
+    if (!canReplaceVault()) return;
     if (
       !window.confirm(
         "Replace the current local vault with this encrypted backup? Current records not present in the backup will be removed.",
@@ -5135,6 +5239,13 @@ function RecordSupportSections({
           onError={onError}
         />
       ) : null}
+      <ItemHistorySection
+        itemId={itemId}
+        generation={generation}
+        isGenerationCurrent={isGenerationCurrent}
+        coordinator={coordinator}
+        onError={onError}
+      />
       <AttachmentsSection
         ownerItemId={itemId}
         generation={generation}
@@ -5155,6 +5266,602 @@ function RecordSupportSections({
       />
     </>
   );
+}
+
+function ItemHistorySection({
+  itemId,
+  generation,
+  isGenerationCurrent,
+  coordinator,
+  onError,
+}: {
+  itemId: string;
+  generation: number;
+  isGenerationCurrent: (generation: number) => boolean;
+  coordinator: RevisionMutationCoordinator;
+  onError: (message: string | null) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [revisions, setRevisions] = useState<number[]>([]);
+  const [listState, setListState] = useState<
+    "idle" | "loading" | "ready" | "error"
+  >("idle");
+  const [selectedRevision, setSelectedRevision] = useState<number | null>(null);
+  const [detail, setDetail] = useState<ItemHistoryDetail | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [revealed, setRevealed] = useState<
+    Partial<Record<ItemHistorySensitiveField, string>>
+  >({});
+  const [revealingField, setRevealingField] =
+    useState<ItemHistorySensitiveField | null>(null);
+  const requestGeneration = useRef(0);
+  const mounted = useRef(true);
+  const currentRevision = coordinator.revision;
+  const mutationBusy = coordinator.mutationBusy;
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      requestGeneration.current += 1;
+    };
+  }, []);
+
+  useEffect(() => {
+    const request = ++requestGeneration.current;
+    setSelectedRevision(null);
+    setDetail(null);
+    setDetailLoading(false);
+    setRevealed({});
+    setRevealingField(null);
+    if (!open) {
+      setRevisions([]);
+      setListState("idle");
+      return;
+    }
+    if (mutationBusy) {
+      setListState("idle");
+      return;
+    }
+
+    let active = true;
+    setListState("loading");
+    void invoke<number[]>("list_item_history", {
+      id: itemId,
+      currentRevision,
+    })
+      .then((loaded) => {
+        if (
+          !active ||
+          request !== requestGeneration.current ||
+          !isGenerationCurrent(generation)
+        )
+          return;
+        setRevisions(loaded);
+        setListState("ready");
+      })
+      .catch((reason: unknown) => {
+        if (
+          active &&
+          request === requestGeneration.current &&
+          isGenerationCurrent(generation)
+        ) {
+          setRevisions([]);
+          setListState("error");
+          onError(readError(reason));
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [
+    currentRevision,
+    generation,
+    isGenerationCurrent,
+    itemId,
+    mutationBusy,
+    onError,
+    open,
+  ]);
+
+  async function selectRevision(revision: number) {
+    if (mutationBusy || detailLoading || revealingField !== null) return;
+    const request = ++requestGeneration.current;
+    setSelectedRevision(revision);
+    setDetail(null);
+    setDetailLoading(true);
+    setRevealed({});
+    setRevealingField(null);
+    onError(null);
+    try {
+      const loaded = await invoke<ItemHistoryDetail>(
+        "get_item_history_detail",
+        {
+          id: itemId,
+          currentRevision,
+          historyRevision: revision,
+        },
+      );
+      if (
+        !mounted.current ||
+        request !== requestGeneration.current ||
+        !isGenerationCurrent(generation)
+      )
+        return;
+      setDetail(loaded);
+    } catch (reason) {
+      if (
+        mounted.current &&
+        request === requestGeneration.current &&
+        isGenerationCurrent(generation)
+      ) {
+        setSelectedRevision(null);
+        onError(readError(reason));
+      }
+    } finally {
+      if (
+        mounted.current &&
+        request === requestGeneration.current &&
+        isGenerationCurrent(generation)
+      ) {
+        setDetailLoading(false);
+      }
+    }
+  }
+
+  async function revealSensitive(field: ItemHistorySensitiveField) {
+    if (
+      mutationBusy ||
+      detail === null ||
+      selectedRevision === null ||
+      revealingField !== null
+    )
+      return;
+    if (revealed[field] !== undefined) {
+      setRevealed((current) => {
+        const next = { ...current };
+        delete next[field];
+        return next;
+      });
+      return;
+    }
+
+    const request = ++requestGeneration.current;
+    setRevealingField(field);
+    onError(null);
+    try {
+      const value = await invoke<string>("reveal_item_history_sensitive", {
+        id: itemId,
+        currentRevision,
+        historyRevision: selectedRevision,
+        field,
+      });
+      if (
+        !mounted.current ||
+        request !== requestGeneration.current ||
+        !isGenerationCurrent(generation)
+      )
+        return;
+      setRevealed((current) => ({ ...current, [field]: value }));
+    } catch (reason) {
+      if (
+        mounted.current &&
+        request === requestGeneration.current &&
+        isGenerationCurrent(generation)
+      ) {
+        onError(readError(reason));
+      }
+    } finally {
+      if (
+        mounted.current &&
+        request === requestGeneration.current &&
+        isGenerationCurrent(generation)
+      ) {
+        setRevealingField(null);
+      }
+    }
+  }
+
+  return (
+    <div className="mt-8">
+      <div className="flex items-center justify-between gap-3">
+        <div className="text-xs font-medium uppercase tracking-[0.12em] text-[var(--text-muted)]">
+          Version history
+        </div>
+        <button
+          type="button"
+          disabled={mutationBusy}
+          onClick={() => setOpen((current) => !current)}
+          className="rounded-lg px-2.5 py-1.5 text-xs text-[var(--text-muted)] transition hover:bg-[var(--selected)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-55"
+        >
+          {open ? "Hide history" : "Browse history"}
+        </button>
+      </div>
+      {open ? (
+        <div className="mt-3 rounded-2xl border border-[var(--border)] bg-[var(--surface-secondary)] p-4">
+          <p className="text-xs leading-5 text-[var(--text-muted)]">
+            Read-only snapshots of earlier encrypted revisions. Historical
+            attachments cannot be opened or exported here.
+          </p>
+          {mutationBusy ? (
+            <p className="mt-3 text-xs text-[var(--text-muted)]">
+              History is paused while this record is changing.
+            </p>
+          ) : listState === "loading" ? (
+            <p className="mt-3 text-xs text-[var(--text-muted)]">
+              Loading version history…
+            </p>
+          ) : listState === "ready" && revisions.length === 0 ? (
+            <p className="mt-3 text-sm text-[var(--text-muted)]">
+              No earlier versions are available.
+            </p>
+          ) : listState === "error" ? (
+            <p className="mt-3 text-sm text-[var(--text-muted)]">
+              Version history could not be loaded.
+            </p>
+          ) : revisions.length > 0 ? (
+            <div className="mt-4 grid gap-4 lg:grid-cols-[180px_minmax(0,1fr)]">
+              <div className="space-y-1.5" aria-label="Historical revisions">
+                {revisions.map((revision) => (
+                  <button
+                    key={revision}
+                    type="button"
+                    disabled={
+                      mutationBusy || detailLoading || revealingField !== null
+                    }
+                    onClick={() => void selectRevision(revision)}
+                    className={`w-full rounded-xl px-3 py-2 text-left text-sm transition disabled:cursor-not-allowed disabled:opacity-55 ${
+                      selectedRevision === revision
+                        ? "bg-[var(--selected)] font-medium text-[var(--text-primary)]"
+                        : "text-[var(--text-secondary)] hover:bg-[var(--selected)]"
+                    }`}
+                  >
+                    Revision {revision}
+                  </button>
+                ))}
+              </div>
+              <div className="min-w-0">
+                {detailLoading ? (
+                  <p className="text-xs text-[var(--text-muted)]">
+                    Loading revision {selectedRevision}…
+                  </p>
+                ) : detail ? (
+                  <ItemHistorySnapshot
+                    detail={detail}
+                    currentRevision={currentRevision}
+                    mutationBusy={mutationBusy}
+                    revealed={revealed}
+                    revealingField={revealingField}
+                    onReveal={revealSensitive}
+                  />
+                ) : (
+                  <p className="text-xs text-[var(--text-muted)]">
+                    Select a revision to inspect its details.
+                  </p>
+                )}
+              </div>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ItemHistorySnapshot({
+  detail,
+  currentRevision,
+  mutationBusy,
+  revealed,
+  revealingField,
+  onReveal,
+}: {
+  detail: ItemHistoryDetail;
+  currentRevision: number;
+  mutationBusy: boolean;
+  revealed: Partial<Record<ItemHistorySensitiveField, string>>;
+  revealingField: ItemHistorySensitiveField | null;
+  onReveal: (field: ItemHistorySensitiveField) => void;
+}) {
+  const rows: Array<{ label: string; value: string }> = [];
+  const sensitive: Array<{
+    label: string;
+    field: ItemHistorySensitiveField;
+    present: boolean;
+    monospace?: boolean;
+  }> = [];
+  let notes = "";
+  let body = "";
+
+  switch (detail.kind) {
+    case "secure_note":
+      body = detail.body;
+      break;
+    case "password":
+      rows.push(
+        { label: "Username", value: detail.username },
+        { label: "Website", value: detail.website },
+      );
+      sensitive.push({
+        label: "Password",
+        field: "password",
+        present: detail.has_password,
+        monospace: true,
+      });
+      notes = detail.notes;
+      break;
+    case "document":
+      rows.push(
+        { label: "Issuer", value: detail.issuer },
+        { label: "Expiry", value: detail.expiry },
+      );
+      sensitive.push({
+        label: "Document number",
+        field: "document_number",
+        present: detail.has_document_number,
+        monospace: true,
+      });
+      notes = detail.notes;
+      break;
+    case "receipt":
+      rows.push(
+        { label: "Merchant", value: detail.merchant },
+        { label: "Purchase date", value: detail.purchase_date },
+        {
+          label: "Amount",
+          value: detail.amount
+            ? `${detail.amount}${detail.currency ? ` ${detail.currency}` : ""}`
+            : "",
+        },
+        {
+          label: "Status",
+          value: receiptTrackingLabel(detail.tracking_status),
+        },
+        { label: "Return by", value: detail.return_by },
+        { label: "Refund due", value: detail.refund_due },
+      );
+      sensitive.push({
+        label: "Receipt reference",
+        field: "receipt_reference",
+        present: detail.has_receipt_reference,
+        monospace: true,
+      });
+      notes = detail.notes;
+      break;
+    case "insurance":
+      rows.push(
+        { label: "Provider", value: detail.provider },
+        { label: "Policy type", value: detail.policy_type },
+        { label: "Renewal", value: detail.renewal },
+      );
+      sensitive.push({
+        label: "Policy number",
+        field: "policy_number",
+        present: detail.has_policy_number,
+        monospace: true,
+      });
+      notes = detail.notes;
+      break;
+    case "financial":
+      rows.push(
+        { label: "Institution", value: detail.institution },
+        { label: "Account type", value: detail.account_type },
+        { label: "Currency", value: detail.currency },
+      );
+      sensitive.push({
+        label: "Account number",
+        field: "account_number",
+        present: detail.has_account_number,
+        monospace: true,
+      });
+      notes = detail.notes;
+      break;
+    case "property":
+      rows.push(
+        { label: "Property type", value: detail.property_type },
+        { label: "Ownership", value: detail.ownership },
+      );
+      sensitive.push(
+        { label: "Address", field: "address", present: detail.has_address },
+        {
+          label: "Property reference",
+          field: "property_reference",
+          present: detail.has_property_reference,
+          monospace: true,
+        },
+      );
+      notes = detail.notes;
+      break;
+    case "vehicle":
+      rows.push(
+        { label: "Make", value: detail.make },
+        { label: "Model", value: detail.model },
+        { label: "Year", value: detail.year },
+        { label: "Renewal", value: detail.renewal },
+      );
+      sensitive.push(
+        {
+          label: "Registration number",
+          field: "registration_number",
+          present: detail.has_registration_number,
+          monospace: true,
+        },
+        {
+          label: "VIN",
+          field: "vin",
+          present: detail.has_vin,
+          monospace: true,
+        },
+      );
+      notes = detail.notes;
+      break;
+    case "possession":
+      rows.push(
+        { label: "Brand", value: detail.brand },
+        { label: "Model", value: detail.model },
+        { label: "Purchase date", value: detail.purchase_date },
+        { label: "Purchase price", value: detail.purchase_price },
+        { label: "Store", value: detail.store },
+        { label: "Warranty expiry", value: detail.warranty_expiry },
+      );
+      sensitive.push({
+        label: "Serial number",
+        field: "serial_number",
+        present: detail.has_serial_number,
+        monospace: true,
+      });
+      notes = detail.notes;
+      break;
+  }
+
+  return (
+    <div className="overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)]">
+      <div className="border-b border-[var(--border)] px-4 py-3">
+        <div className="text-[11px] font-medium uppercase tracking-[0.1em] text-[var(--text-muted)]">
+          Read-only snapshot · Revision {detail.revision} of {currentRevision}
+        </div>
+        <div className="mt-1 text-base font-semibold text-[var(--text-primary)]">
+          {detail.title}
+        </div>
+      </div>
+      {body ? (
+        <div className="whitespace-pre-wrap px-4 py-4 text-sm leading-6 text-[var(--text-secondary)]">
+          {body}
+        </div>
+      ) : null}
+      {rows.map((row) => (
+        <HistoryValueRow key={row.label} label={row.label} value={row.value} />
+      ))}
+      {sensitive.map((row) => (
+        <HistorySensitiveRow
+          key={row.field}
+          label={row.label}
+          present={row.present}
+          value={revealed[row.field]}
+          loading={revealingField === row.field}
+          disabled={mutationBusy || revealingField !== null}
+          monospace={row.monospace}
+          onToggle={() => onReveal(row.field)}
+        />
+      ))}
+      {notes ? (
+        <div className="border-t border-[var(--border)] px-4 py-4">
+          <div className="text-[11px] font-medium uppercase tracking-[0.1em] text-[var(--text-muted)]">
+            Notes
+          </div>
+          <div className="mt-2 whitespace-pre-wrap text-sm leading-6 text-[var(--text-secondary)]">
+            {notes}
+          </div>
+        </div>
+      ) : null}
+      <div className="border-t border-[var(--border)] px-4 py-4 text-xs leading-5 text-[var(--text-muted)]">
+        <div>
+          Linked records: {detail.support.linked_record_count} · Attachments:{" "}
+          {detail.support.attachment_count}
+        </div>
+        <div className="mt-1">
+          Legacy plan:{" "}
+          {legacyDispositionHistoryLabel(detail.support.legacy_disposition)}
+        </div>
+        {detail.support.account_closure_plan ? (
+          <div className="mt-1">
+            Account closure:{" "}
+            {accountClosureHistoryLabel(
+              detail.support.account_closure_plan.disposition,
+            )}
+            {detail.support.account_closure_plan.instructions
+              ? ` · ${detail.support.account_closure_plan.instructions}`
+              : ""}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function HistoryValueRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="grid grid-cols-[140px_minmax(0,1fr)] gap-4 border-t border-[var(--border)] px-4 py-3">
+      <div className="text-xs text-[var(--text-muted)]">{label}</div>
+      <div className="min-w-0 whitespace-pre-wrap text-sm text-[var(--text-primary)]">
+        {value || "Not set"}
+      </div>
+    </div>
+  );
+}
+
+function HistorySensitiveRow({
+  label,
+  present,
+  value,
+  loading,
+  disabled,
+  monospace = false,
+  onToggle,
+}: {
+  label: string;
+  present: boolean;
+  value: string | undefined;
+  loading: boolean;
+  disabled: boolean;
+  monospace?: boolean | undefined;
+  onToggle: () => void;
+}) {
+  return (
+    <div className="grid grid-cols-[140px_minmax(0,1fr)_auto] items-center gap-4 border-t border-[var(--border)] px-4 py-3">
+      <div className="text-xs text-[var(--text-muted)]">{label}</div>
+      <div
+        className={`min-w-0 whitespace-pre-wrap text-sm ${
+          monospace ? "font-mono" : ""
+        } ${present ? "text-[var(--text-primary)]" : "text-[var(--text-muted)]"}`}
+      >
+        {present ? (value === undefined ? "••••••••••••" : value) : "Not set"}
+      </div>
+      {present ? (
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={onToggle}
+          aria-label={
+            loading
+              ? `Opening ${label}`
+              : value === undefined
+                ? `Reveal ${label}`
+                : `Hide ${label}`
+          }
+          className="rounded-lg px-2.5 py-1.5 text-xs text-[var(--text-muted)] transition hover:bg-[var(--selected)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-55"
+        >
+          {loading ? "Opening…" : value === undefined ? "Reveal" : "Hide"}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+function legacyDispositionHistoryLabel(value: LegacyDisposition) {
+  switch (value) {
+    case "selected_for_legacy":
+      return "Selected for legacy";
+    case "private_forever":
+      return "Private forever";
+    case "destroy_on_death":
+      return "Destroy on death";
+    default:
+      return "Unspecified";
+  }
+}
+
+function accountClosureHistoryLabel(value: AccountClosureDisposition) {
+  switch (value) {
+    case "keep_open":
+      return "Keep open";
+    case "close_account":
+      return "Close account";
+    case "review_manually":
+      return "Review manually";
+    default:
+      return "Unspecified";
+  }
 }
 
 function AccountClosurePlanSection({

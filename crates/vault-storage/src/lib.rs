@@ -12,7 +12,7 @@ use vault_crypto::{
     RecoveryKitWrapV1, RootKeyWrapV1,
 };
 
-const CURRENT_SCHEMA_VERSION: i64 = 3;
+const CURRENT_SCHEMA_VERSION: i64 = 4;
 /// Resource ceiling for local encrypted item rows. This is intentionally far
 /// above normal product use while keeping validation/list allocations bounded.
 pub const ITEM_MAX_OBJECTS: u64 = 65_536;
@@ -21,6 +21,11 @@ pub const ITEM_MAX_OBJECTS: u64 = 65_536;
 /// encoded envelope can be several times larger than plaintext. 128 MiB keeps
 /// all currently-valid item shapes representable while bounding hostile rows.
 pub const ITEM_MAX_ENCRYPTED_RECORD_BYTES: usize = 128 * 1024 * 1024;
+/// Keep enough local history for useful auditing without allowing record edits
+/// to grow the encrypted database without bound.
+pub const ITEM_HISTORY_MAX_REVISIONS_PER_ITEM: u64 = 20;
+pub const ITEM_HISTORY_MAX_ROWS: u64 = 131_072;
+pub const ITEM_HISTORY_MAX_STORAGE_BYTES: u64 = 1024 * 1024 * 1024;
 /// Root/recovery wraps contain fixed-size cryptographic material; 16 KiB is a
 /// deliberately generous serialization ceiling for backwards-compatible v1.
 pub const ROOT_WRAP_MAX_ENCODED_BYTES: usize = 16 * 1024;
@@ -139,6 +144,25 @@ impl VaultStorage {
             ",
             )?;
         }
+        if schema_version < 4 {
+            connection.execute_batch(
+                "
+            CREATE TABLE IF NOT EXISTS encrypted_item_history (
+                history_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                object_id TEXT NOT NULL,
+                revision INTEGER NOT NULL,
+                encrypted_record BLOB NOT NULL,
+                UNIQUE(object_id, revision),
+                FOREIGN KEY (object_id) REFERENCES encrypted_items(object_id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_encrypted_item_history_object_revision
+                ON encrypted_item_history(object_id, revision DESC);
+
+            INSERT OR IGNORE INTO schema_migrations(version) VALUES (4);
+            ",
+            )?;
+        }
         Ok(Self { connection, path })
     }
 
@@ -238,7 +262,7 @@ impl VaultStorage {
         Ok(exists)
     }
 
-    pub fn upsert_item(&self, item: &EncryptedItemV1) -> Result<(), StorageError> {
+    pub fn insert_item(&self, item: &EncryptedItemV1) -> Result<(), StorageError> {
         let encoded = serde_json::to_vec(item)?;
         if encoded.len() > ITEM_MAX_ENCRYPTED_RECORD_BYTES {
             return Err(StorageError::InconsistentEncryptedRow);
@@ -246,14 +270,7 @@ impl VaultStorage {
         let revision =
             i64::try_from(item.revision).map_err(|_| StorageError::RevisionOutOfRange)?;
         let changed = self.connection.execute(
-            "
-            INSERT INTO encrypted_items(object_id, revision, encrypted_record)
-            VALUES (?1, ?2, ?3)
-            ON CONFLICT(object_id) DO UPDATE SET
-                revision = excluded.revision,
-                encrypted_record = excluded.encrypted_record
-            WHERE excluded.revision > encrypted_items.revision
-            ",
+            "INSERT INTO encrypted_items(object_id, revision, encrypted_record) VALUES (?1, ?2, ?3) ON CONFLICT(object_id) DO NOTHING",
             params![item.object_id.to_string(), revision, encoded],
         )?;
         if changed != 1 {
@@ -279,7 +296,7 @@ impl VaultStorage {
             "
             UPDATE encrypted_items
             SET revision = ?1, encrypted_record = ?2
-            WHERE object_id = ?3 AND revision = ?4
+            WHERE object_id = ?3 AND revision = ?4 AND ?1 > revision
             ",
             params![
                 revision,
@@ -291,6 +308,34 @@ impl VaultStorage {
         if changed != 1 {
             return Err(StorageError::StaleRevision);
         }
+        Ok(())
+    }
+
+    pub fn update_item_with_history_if_revision(
+        &self,
+        item: &EncryptedItemV1,
+        expected_revision: u64,
+    ) -> Result<(), StorageError> {
+        let encoded = serde_json::to_vec(item)?;
+        if encoded.len() > ITEM_MAX_ENCRYPTED_RECORD_BYTES {
+            return Err(StorageError::InconsistentEncryptedRow);
+        }
+        let revision =
+            i64::try_from(item.revision).map_err(|_| StorageError::RevisionOutOfRange)?;
+        let expected_revision =
+            i64::try_from(expected_revision).map_err(|_| StorageError::RevisionOutOfRange)?;
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        archive_current_item(&transaction, item.object_id, expected_revision)?;
+        update_current_item(
+            &transaction,
+            item.object_id,
+            revision,
+            expected_revision,
+            &encoded,
+        )?;
+        prune_item_history(&transaction, item.object_id)?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -316,6 +361,159 @@ impl VaultStorage {
             return Err(StorageError::InconsistentEncryptedRow);
         }
         Ok(encrypted)
+    }
+
+    pub fn list_item_history_revisions(&self, object_id: Uuid) -> Result<Vec<u64>, StorageError> {
+        let row_limit = i64::try_from(ITEM_HISTORY_MAX_REVISIONS_PER_ITEM + 1)
+            .map_err(|_| StorageError::InconsistentEncryptedRow)?;
+        let mut statement = self.connection.prepare(
+            "
+            SELECT h.revision, length(h.encrypted_record), i.revision
+            FROM encrypted_item_history h
+            LEFT JOIN encrypted_items i ON i.object_id = h.object_id
+            WHERE h.object_id = ?1
+            ORDER BY h.revision DESC
+            LIMIT ?2
+            ",
+        )?;
+        let rows = statement.query_map(params![object_id.to_string(), row_limit], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+            ))
+        })?;
+        let mut revisions = Vec::new();
+        for row in rows {
+            let (revision, encoded_len, current_revision) = row?;
+            validate_encoded_blob_length(encoded_len, ITEM_MAX_ENCRYPTED_RECORD_BYTES)?;
+            let current_revision =
+                current_revision.ok_or(StorageError::InconsistentEncryptedRow)?;
+            if revision < 0 || revision >= current_revision {
+                return Err(StorageError::InconsistentEncryptedRow);
+            }
+            revisions
+                .push(u64::try_from(revision).map_err(|_| StorageError::InconsistentEncryptedRow)?);
+        }
+        if u64::try_from(revisions.len()).map_err(|_| StorageError::InconsistentEncryptedRow)?
+            > ITEM_HISTORY_MAX_REVISIONS_PER_ITEM
+        {
+            return Err(StorageError::InconsistentEncryptedRow);
+        }
+        Ok(revisions)
+    }
+
+    pub fn list_item_history_keys(&self) -> Result<Vec<(Uuid, u64)>, StorageError> {
+        let count: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM encrypted_item_history",
+            [],
+            |row| row.get(0),
+        )?;
+        let count = u64::try_from(count).map_err(|_| StorageError::InconsistentEncryptedRow)?;
+        if count > ITEM_HISTORY_MAX_ROWS {
+            return Err(StorageError::InconsistentEncryptedRow);
+        }
+        if self.item_history_storage_bytes()? > ITEM_HISTORY_MAX_STORAGE_BYTES {
+            return Err(StorageError::InconsistentEncryptedRow);
+        }
+        let max_history_per_item = i64::try_from(ITEM_HISTORY_MAX_REVISIONS_PER_ITEM)
+            .map_err(|_| StorageError::InconsistentEncryptedRow)?;
+        let excessive_per_item_history: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM encrypted_item_history GROUP BY object_id HAVING COUNT(*) > ?1)",
+            params![max_history_per_item],
+            |row| row.get(0),
+        )?;
+        if excessive_per_item_history {
+            return Err(StorageError::InconsistentEncryptedRow);
+        }
+        let row_limit = i64::try_from(ITEM_HISTORY_MAX_ROWS + 1)
+            .map_err(|_| StorageError::InconsistentEncryptedRow)?;
+        let mut statement = self.connection.prepare(
+            "
+            SELECT h.object_id, h.revision, length(h.encrypted_record), i.revision
+            FROM encrypted_item_history h
+            LEFT JOIN encrypted_items i ON i.object_id = h.object_id
+            ORDER BY h.history_id ASC
+            LIMIT ?1
+            ",
+        )?;
+        let rows = statement.query_map(params![row_limit], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+            ))
+        })?;
+        let mut keys = Vec::with_capacity(
+            usize::try_from(count).map_err(|_| StorageError::InconsistentEncryptedRow)?,
+        );
+        for row in rows {
+            let (raw_id, revision, encoded_len, current_revision) = row?;
+            validate_encoded_blob_length(encoded_len, ITEM_MAX_ENCRYPTED_RECORD_BYTES)?;
+            let current_revision =
+                current_revision.ok_or(StorageError::InconsistentEncryptedRow)?;
+            if revision < 0 || revision >= current_revision {
+                return Err(StorageError::InconsistentEncryptedRow);
+            }
+            let id =
+                Uuid::parse_str(&raw_id).map_err(|_| StorageError::InconsistentEncryptedRow)?;
+            let revision =
+                u64::try_from(revision).map_err(|_| StorageError::InconsistentEncryptedRow)?;
+            keys.push((id, revision));
+        }
+        if u64::try_from(keys.len()).map_err(|_| StorageError::InconsistentEncryptedRow)?
+            > ITEM_HISTORY_MAX_ROWS
+        {
+            return Err(StorageError::InconsistentEncryptedRow);
+        }
+        Ok(keys)
+    }
+
+    pub fn load_item_history(
+        &self,
+        object_id: Uuid,
+        revision: u64,
+    ) -> Result<EncryptedItemV1, StorageError> {
+        let revision_i64 = i64::try_from(revision).map_err(|_| StorageError::RevisionOutOfRange)?;
+        let max_encoded = i64::try_from(ITEM_MAX_ENCRYPTED_RECORD_BYTES)
+            .map_err(|_| StorageError::InconsistentEncryptedRow)?;
+        let row: Option<(i64, Option<Vec<u8>>, Option<i64>)> = self
+            .connection
+            .query_row(
+                "
+                SELECT length(h.encrypted_record),
+                       CASE WHEN length(h.encrypted_record) <= ?3 THEN h.encrypted_record ELSE NULL END,
+                       i.revision
+                FROM encrypted_item_history h
+                LEFT JOIN encrypted_items i ON i.object_id = h.object_id
+                WHERE h.object_id = ?1 AND h.revision = ?2
+                ",
+                params![object_id.to_string(), revision_i64, max_encoded],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let (encoded_len, bytes, current_revision) = row.ok_or(StorageError::ItemNotFound)?;
+        validate_encoded_blob_length(encoded_len, ITEM_MAX_ENCRYPTED_RECORD_BYTES)?;
+        let current_revision = current_revision.ok_or(StorageError::InconsistentEncryptedRow)?;
+        if revision_i64 < 0 || revision_i64 >= current_revision {
+            return Err(StorageError::InconsistentEncryptedRow);
+        }
+        let bytes = bytes.ok_or(StorageError::InconsistentEncryptedRow)?;
+        let encrypted: EncryptedItemV1 = serde_json::from_slice(&bytes)?;
+        if encrypted.object_id != object_id || encrypted.revision != revision {
+            return Err(StorageError::InconsistentEncryptedRow);
+        }
+        Ok(encrypted)
+    }
+
+    pub fn item_history_storage_bytes(&self) -> Result<u64, StorageError> {
+        let total: i64 = self.connection.query_row(
+            "SELECT COALESCE(SUM(length(encrypted_record)), 0) FROM encrypted_item_history",
+            [],
+            |row| row.get(0),
+        )?;
+        u64::try_from(total).map_err(|_| StorageError::InconsistentEncryptedRow)
     }
 
     pub fn list_item_ids(&self) -> Result<Vec<Uuid>, StorageError> {
@@ -358,7 +556,23 @@ impl VaultStorage {
             return Err(StorageError::InconsistentEncryptedRow);
         }
 
+        let history_count: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM encrypted_item_history",
+            [],
+            |row| row.get(0),
+        )?;
+        let history_count =
+            u64::try_from(history_count).map_err(|_| StorageError::InconsistentEncryptedRow)?;
+        if history_count > ITEM_HISTORY_MAX_ROWS {
+            return Err(StorageError::InconsistentEncryptedRow);
+        }
+        if self.item_history_storage_bytes()? > ITEM_HISTORY_MAX_STORAGE_BYTES {
+            return Err(StorageError::InconsistentEncryptedRow);
+        }
+
         let max_item_record = i64::try_from(ITEM_MAX_ENCRYPTED_RECORD_BYTES)
+            .map_err(|_| StorageError::InconsistentEncryptedRow)?;
+        let max_history_per_item = i64::try_from(ITEM_HISTORY_MAX_REVISIONS_PER_ITEM)
             .map_err(|_| StorageError::InconsistentEncryptedRow)?;
         let max_root_wrap = i64::try_from(ROOT_WRAP_MAX_ENCODED_BYTES)
             .map_err(|_| StorageError::InconsistentEncryptedRow)?;
@@ -379,7 +593,28 @@ impl VaultStorage {
             params![max_recovery_wrap],
             |row| row.get(0),
         )?;
-        if oversized_item || oversized_root_wrap || oversized_recovery_wrap {
+        let oversized_history_item: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM encrypted_item_history WHERE length(encrypted_record) > ?1)",
+            params![max_item_record],
+            |row| row.get(0),
+        )?;
+        let excessive_per_item_history: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM encrypted_item_history GROUP BY object_id HAVING COUNT(*) > ?1)",
+            params![max_history_per_item],
+            |row| row.get(0),
+        )?;
+        let invalid_history_metadata: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM encrypted_item_history h LEFT JOIN encrypted_items i ON i.object_id = h.object_id WHERE h.revision < 0 OR i.revision IS NULL OR h.revision >= i.revision)",
+            [],
+            |row| row.get(0),
+        )?;
+        if oversized_item
+            || oversized_root_wrap
+            || oversized_recovery_wrap
+            || oversized_history_item
+            || excessive_per_item_history
+            || invalid_history_metadata
+        {
             return Err(StorageError::InconsistentEncryptedRow);
         }
         Ok(())
@@ -646,6 +881,8 @@ impl VaultStorage {
         let transaction =
             Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
 
+        archive_current_item(&transaction, item.object_id, expected_item_revision)?;
+
         let attachment_count: i64 =
             transaction.query_row("SELECT COUNT(*) FROM encrypted_attachments", [], |row| {
                 row.get(0)
@@ -683,22 +920,14 @@ impl VaultStorage {
             )?;
         }
 
-        let changed = transaction.execute(
-            "
-            UPDATE encrypted_items
-            SET revision = ?1, encrypted_record = ?2
-            WHERE object_id = ?3 AND revision = ?4 AND ?1 > revision
-            ",
-            params![
-                item_revision,
-                encoded_item,
-                item.object_id.to_string(),
-                expected_item_revision
-            ],
+        update_current_item(
+            &transaction,
+            item.object_id,
+            item_revision,
+            expected_item_revision,
+            &encoded_item,
         )?;
-        if changed != 1 {
-            return Err(StorageError::StaleRevision);
-        }
+        prune_item_history(&transaction, item.object_id)?;
 
         transaction.commit()?;
         Ok(())
@@ -710,6 +939,53 @@ impl VaultStorage {
         expected_item_revision: u64,
         tombstones: &[(Uuid, u64, u64, Vec<u8>)],
     ) -> Result<(), StorageError> {
+        self.tombstone_attachments_and_update_item_inner(
+            item,
+            expected_item_revision,
+            tombstones,
+            false,
+            false,
+        )
+    }
+
+    pub fn tombstone_attachments_and_update_item_with_history_if_revision(
+        &self,
+        item: &EncryptedItemV1,
+        expected_item_revision: u64,
+        tombstones: &[(Uuid, u64, u64, Vec<u8>)],
+    ) -> Result<(), StorageError> {
+        self.tombstone_attachments_and_update_item_inner(
+            item,
+            expected_item_revision,
+            tombstones,
+            true,
+            false,
+        )
+    }
+
+    pub fn purge_item_and_tombstone_attachments_if_revision(
+        &self,
+        item: &EncryptedItemV1,
+        expected_item_revision: u64,
+        tombstones: &[(Uuid, u64, u64, Vec<u8>)],
+    ) -> Result<(), StorageError> {
+        self.tombstone_attachments_and_update_item_inner(
+            item,
+            expected_item_revision,
+            tombstones,
+            false,
+            true,
+        )
+    }
+
+    fn tombstone_attachments_and_update_item_inner(
+        &self,
+        item: &EncryptedItemV1,
+        expected_item_revision: u64,
+        tombstones: &[(Uuid, u64, u64, Vec<u8>)],
+        archive_history: bool,
+        clear_history: bool,
+    ) -> Result<(), StorageError> {
         let encoded_item = serde_json::to_vec(item)?;
         if encoded_item.len() > ITEM_MAX_ENCRYPTED_RECORD_BYTES {
             return Err(StorageError::InconsistentEncryptedRow);
@@ -718,24 +994,19 @@ impl VaultStorage {
             i64::try_from(item.revision).map_err(|_| StorageError::RevisionOutOfRange)?;
         let expected_item_revision =
             i64::try_from(expected_item_revision).map_err(|_| StorageError::RevisionOutOfRange)?;
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
 
-        let changed = transaction.execute(
-            "
-            UPDATE encrypted_items
-            SET revision = ?1, encrypted_record = ?2
-            WHERE object_id = ?3 AND revision = ?4 AND ?1 > revision
-            ",
-            params![
-                item_revision,
-                encoded_item,
-                item.object_id.to_string(),
-                expected_item_revision
-            ],
-        )?;
-        if changed != 1 {
-            return Err(StorageError::StaleRevision);
+        if archive_history {
+            archive_current_item(&transaction, item.object_id, expected_item_revision)?;
         }
+        update_current_item(
+            &transaction,
+            item.object_id,
+            item_revision,
+            expected_item_revision,
+            &encoded_item,
+        )?;
 
         for (attachment_id, revision, expected_revision, encrypted_record) in tombstones {
             if encrypted_record.len() > ATTACHMENT_MAX_ENCRYPTED_RECORD_BYTES {
@@ -764,6 +1035,16 @@ impl VaultStorage {
             transaction.execute(
                 "DELETE FROM attachment_chunks WHERE attachment_id = ?1",
                 params![attachment_id.to_string()],
+            )?;
+        }
+
+        if archive_history {
+            prune_item_history(&transaction, item.object_id)?;
+        }
+        if clear_history {
+            transaction.execute(
+                "DELETE FROM encrypted_item_history WHERE object_id = ?1",
+                params![item.object_id.to_string()],
             )?;
         }
 
@@ -808,10 +1089,34 @@ impl VaultStorage {
             i64::try_from(ITEM_MAX_OBJECTS).map_err(|_| StorageError::InconsistentEncryptedRow)?;
         let max_item_record = i64::try_from(ITEM_MAX_ENCRYPTED_RECORD_BYTES)
             .map_err(|_| StorageError::InconsistentEncryptedRow)?;
+        let max_history_rows = i64::try_from(ITEM_HISTORY_MAX_ROWS)
+            .map_err(|_| StorageError::InconsistentEncryptedRow)?;
+        let max_history_per_item = i64::try_from(ITEM_HISTORY_MAX_REVISIONS_PER_ITEM)
+            .map_err(|_| StorageError::InconsistentEncryptedRow)?;
+        let max_history_bytes = i64::try_from(ITEM_HISTORY_MAX_STORAGE_BYTES)
+            .map_err(|_| StorageError::InconsistentEncryptedRow)?;
         let max_root_wrap = i64::try_from(ROOT_WRAP_MAX_ENCODED_BYTES)
             .map_err(|_| StorageError::InconsistentEncryptedRow)?;
         let max_recovery_wrap = i64::try_from(RECOVERY_WRAP_MAX_ENCODED_BYTES)
             .map_err(|_| StorageError::InconsistentEncryptedRow)?;
+        let restore_schema_version: i64 = transaction.query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM safeory_restore.schema_migrations",
+            [],
+            |row| row.get(0),
+        )?;
+        if restore_schema_version > CURRENT_SCHEMA_VERSION {
+            return Err(StorageError::UnsupportedSchemaVersion(
+                restore_schema_version,
+            ));
+        }
+        let restore_has_history: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM safeory_restore.sqlite_master WHERE type = 'table' AND name = 'encrypted_item_history')",
+            [],
+            |row| row.get(0),
+        )?;
+        if (restore_schema_version >= 4) != restore_has_history {
+            return Err(StorageError::InconsistentEncryptedRow);
+        }
         let too_many_items: bool = transaction.query_row(
             "SELECT COUNT(*) > ?1 FROM safeory_restore.encrypted_items",
             params![max_item_objects],
@@ -822,6 +1127,48 @@ impl VaultStorage {
             params![max_item_record],
             |row| row.get(0),
         )?;
+        let (
+            too_many_history_rows,
+            oversized_history_item,
+            excessive_history_per_item,
+            oversized_history_total,
+            invalid_history_metadata,
+        ) = if restore_has_history {
+            let too_many_history_rows: bool = transaction.query_row(
+                "SELECT COUNT(*) > ?1 FROM safeory_restore.encrypted_item_history",
+                params![max_history_rows],
+                |row| row.get(0),
+            )?;
+            let oversized_history_item: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM safeory_restore.encrypted_item_history WHERE length(encrypted_record) > ?1)",
+                params![max_item_record],
+                |row| row.get(0),
+            )?;
+            let excessive_history_per_item: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM safeory_restore.encrypted_item_history GROUP BY object_id HAVING COUNT(*) > ?1)",
+                params![max_history_per_item],
+                |row| row.get(0),
+            )?;
+            let oversized_history_total: bool = transaction.query_row(
+                "SELECT COALESCE(SUM(length(encrypted_record)), 0) > ?1 FROM safeory_restore.encrypted_item_history",
+                params![max_history_bytes],
+                |row| row.get(0),
+            )?;
+            let invalid_history_metadata: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM safeory_restore.encrypted_item_history h LEFT JOIN safeory_restore.encrypted_items i ON i.object_id = h.object_id WHERE h.revision < 0 OR i.revision IS NULL OR h.revision >= i.revision)",
+                [],
+                |row| row.get(0),
+            )?;
+            (
+                too_many_history_rows,
+                oversized_history_item,
+                excessive_history_per_item,
+                oversized_history_total,
+                invalid_history_metadata,
+            )
+        } else {
+            (false, false, false, false, false)
+        };
         let oversized_root_wrap: bool = transaction.query_row(
             "SELECT EXISTS(SELECT 1 FROM safeory_restore.vault_meta WHERE length(root_key_wrap) > ?1)",
             params![max_root_wrap],
@@ -854,6 +1201,11 @@ impl VaultStorage {
         )?;
         if too_many_items
             || oversized_item
+            || too_many_history_rows
+            || oversized_history_item
+            || excessive_history_per_item
+            || oversized_history_total
+            || invalid_history_metadata
             || oversized_root_wrap
             || oversized_recovery_wrap
             || too_many_attachments
@@ -873,6 +1225,17 @@ impl VaultStorage {
             "INSERT INTO encrypted_items(object_id, revision, encrypted_record) SELECT object_id, revision, encrypted_record FROM safeory_restore.encrypted_items",
             [],
         )?;
+        transaction.execute("DELETE FROM encrypted_item_history", [])?;
+        transaction.execute(
+            "DELETE FROM sqlite_sequence WHERE name = 'encrypted_item_history'",
+            [],
+        )?;
+        if restore_has_history {
+            transaction.execute(
+                "INSERT INTO encrypted_item_history(object_id, revision, encrypted_record) SELECT object_id, revision, encrypted_record FROM safeory_restore.encrypted_item_history ORDER BY history_id ASC",
+                [],
+            )?;
+        }
         transaction.execute("DELETE FROM attachment_chunks", [])?;
         transaction.execute("DELETE FROM encrypted_attachments", [])?;
         transaction.execute(
@@ -899,6 +1262,124 @@ fn validate_encoded_blob_length(encoded_len: i64, max: usize) -> Result<(), Stor
     {
         return Err(StorageError::InconsistentEncryptedRow);
     }
+    Ok(())
+}
+
+fn archive_current_item(
+    transaction: &Transaction<'_>,
+    object_id: Uuid,
+    expected_revision: i64,
+) -> Result<(), StorageError> {
+    let changed = transaction.execute(
+        "
+        INSERT INTO encrypted_item_history(object_id, revision, encrypted_record)
+        SELECT object_id, revision, encrypted_record
+        FROM encrypted_items
+        WHERE object_id = ?1 AND revision = ?2
+        ",
+        params![object_id.to_string(), expected_revision],
+    )?;
+    if changed != 1 {
+        return Err(StorageError::StaleRevision);
+    }
+    Ok(())
+}
+
+fn update_current_item(
+    transaction: &Transaction<'_>,
+    object_id: Uuid,
+    revision: i64,
+    expected_revision: i64,
+    encoded_item: &[u8],
+) -> Result<(), StorageError> {
+    let changed = transaction.execute(
+        "
+        UPDATE encrypted_items
+        SET revision = ?1, encrypted_record = ?2
+        WHERE object_id = ?3 AND revision = ?4 AND ?1 > revision
+        ",
+        params![
+            revision,
+            encoded_item,
+            object_id.to_string(),
+            expected_revision
+        ],
+    )?;
+    if changed != 1 {
+        return Err(StorageError::StaleRevision);
+    }
+    Ok(())
+}
+
+fn prune_item_history(transaction: &Transaction<'_>, object_id: Uuid) -> Result<(), StorageError> {
+    prune_item_history_with_limits(
+        transaction,
+        object_id,
+        ITEM_HISTORY_MAX_REVISIONS_PER_ITEM,
+        ITEM_HISTORY_MAX_ROWS,
+        ITEM_HISTORY_MAX_STORAGE_BYTES,
+    )
+}
+
+fn prune_item_history_with_limits(
+    transaction: &Transaction<'_>,
+    object_id: Uuid,
+    per_item_limit: u64,
+    global_row_limit: u64,
+    global_storage_bytes: u64,
+) -> Result<(), StorageError> {
+    let per_item_limit =
+        i64::try_from(per_item_limit).map_err(|_| StorageError::InconsistentEncryptedRow)?;
+    transaction.execute(
+        "
+        DELETE FROM encrypted_item_history
+        WHERE object_id = ?1
+          AND history_id NOT IN (
+              SELECT history_id
+              FROM encrypted_item_history
+              WHERE object_id = ?1
+              ORDER BY revision DESC
+              LIMIT ?2
+          )
+        ",
+        params![object_id.to_string(), per_item_limit],
+    )?;
+
+    let global_limit =
+        i64::try_from(global_row_limit).map_err(|_| StorageError::InconsistentEncryptedRow)?;
+    transaction.execute(
+        "
+        DELETE FROM encrypted_item_history
+        WHERE history_id NOT IN (
+            SELECT history_id
+            FROM encrypted_item_history
+            ORDER BY history_id DESC
+            LIMIT ?1
+        )
+        ",
+        params![global_limit],
+    )?;
+
+    let max_bytes =
+        i64::try_from(global_storage_bytes).map_err(|_| StorageError::InconsistentEncryptedRow)?;
+    transaction.execute(
+        "
+        WITH newest AS (
+            SELECT
+                history_id,
+                SUM(length(encrypted_record)) OVER (
+                    ORDER BY history_id DESC
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                ) AS retained_bytes
+            FROM encrypted_item_history
+        )
+        DELETE FROM encrypted_item_history
+        WHERE history_id IN (
+            SELECT history_id FROM newest WHERE retained_bytes > ?1
+        )
+        ",
+        params![max_bytes],
+    )?;
     Ok(())
 }
 
@@ -956,9 +1437,9 @@ mod tests {
         let second = VaultItem::secure_note("second", "two");
         let first_encrypted = encrypt_item(&root, &first, 1).expect("encrypt first");
         let second_encrypted = encrypt_item(&root, &second, 1).expect("encrypt second");
-        storage.upsert_item(&first_encrypted).expect("store first");
+        storage.insert_item(&first_encrypted).expect("store first");
         storage
-            .upsert_item(&second_encrypted)
+            .insert_item(&second_encrypted)
             .expect("store second");
 
         let second_bytes = serde_json::to_vec(&second_encrypted).expect("serialize second");
@@ -984,11 +1465,206 @@ mod tests {
         let item = VaultItem::secure_note("item", "value");
         let current = encrypt_item(&root, &item, 2).expect("encrypt current");
         let stale = encrypt_item(&root, &item, 1).expect("encrypt stale");
-        storage.upsert_item(&current).expect("store current");
+        let newer = encrypt_item(&root, &item, 3).expect("encrypt newer");
+        storage.insert_item(&current).expect("store current");
 
         assert!(matches!(
-            storage.upsert_item(&stale),
+            storage.insert_item(&stale),
             Err(StorageError::StaleRevision)
+        ));
+        assert!(matches!(
+            storage.insert_item(&newer),
+            Err(StorageError::StaleRevision)
+        ));
+        let same_revision = encrypt_item(&root, &item, 2).expect("encrypt same revision");
+        assert!(matches!(
+            storage.update_item_if_revision(&same_revision, 2),
+            Err(StorageError::StaleRevision)
+        ));
+        assert!(matches!(
+            storage.update_item_if_revision(&stale, 2),
+            Err(StorageError::StaleRevision)
+        ));
+        assert_eq!(
+            storage.load_item(item.id).expect("load current").revision,
+            2
+        );
+    }
+
+    #[test]
+    fn item_history_archive_is_atomic_and_pruned_per_item() {
+        let dir = tempdir().expect("temp directory");
+        let storage = VaultStorage::open(dir.path().join("vault.sqlite3")).expect("open storage");
+        let root = AccountRootKey::generate().expect("root key");
+        let item = VaultItem::secure_note("history", "body");
+        storage
+            .insert_item(&encrypt_item(&root, &item, 1).expect("encrypt revision 1"))
+            .expect("insert revision 1");
+
+        let revision_2 = encrypt_item(&root, &item, 2).expect("encrypt revision 2");
+        storage
+            .update_item_with_history_if_revision(&revision_2, 1)
+            .expect("advance to revision 2");
+        assert_eq!(
+            storage
+                .list_item_history_revisions(item.id)
+                .expect("list first history"),
+            vec![1]
+        );
+        assert_eq!(
+            storage
+                .load_item_history(item.id, 1)
+                .expect("load revision 1")
+                .revision,
+            1
+        );
+
+        let same_revision = encrypt_item(&root, &item, 2).expect("encrypt duplicate revision");
+        assert!(matches!(
+            storage.update_item_with_history_if_revision(&same_revision, 2),
+            Err(StorageError::StaleRevision)
+        ));
+        assert_eq!(
+            storage
+                .load_item(item.id)
+                .expect("current after rollback")
+                .revision,
+            2
+        );
+        assert_eq!(
+            storage
+                .list_item_history_revisions(item.id)
+                .expect("history after rollback"),
+            vec![1]
+        );
+
+        let stale_expected = encrypt_item(&root, &item, 3).expect("encrypt stale candidate");
+        assert!(matches!(
+            storage.update_item_with_history_if_revision(&stale_expected, 1),
+            Err(StorageError::StaleRevision)
+        ));
+        assert_eq!(
+            storage
+                .list_item_history_revisions(item.id)
+                .expect("history after stale expected revision"),
+            vec![1]
+        );
+
+        let mut expected_revision = 2;
+        for revision in 3..=22 {
+            let encrypted = encrypt_item(&root, &item, revision).expect("encrypt next revision");
+            storage
+                .update_item_with_history_if_revision(&encrypted, expected_revision)
+                .expect("append bounded history");
+            expected_revision = revision;
+        }
+        let revisions = storage
+            .list_item_history_revisions(item.id)
+            .expect("list bounded history");
+        assert_eq!(
+            revisions.len(),
+            ITEM_HISTORY_MAX_REVISIONS_PER_ITEM as usize
+        );
+        assert_eq!(revisions.first().copied(), Some(21));
+        assert_eq!(revisions.last().copied(), Some(2));
+        storage
+            .validate_record_bounds()
+            .expect("history remains bounded");
+    }
+
+    #[test]
+    fn history_pruning_enforces_global_row_and_ciphertext_limits() {
+        let dir = tempdir().expect("temp directory");
+        let storage = VaultStorage::open(dir.path().join("vault.sqlite3")).expect("open storage");
+        let root = AccountRootKey::generate().expect("root key");
+        let item = VaultItem::secure_note("prune", "body");
+        storage
+            .insert_item(&encrypt_item(&root, &item, 100).expect("encrypt current"))
+            .expect("insert current");
+
+        let transaction = storage
+            .connection
+            .unchecked_transaction()
+            .expect("begin prune test");
+        for revision in 1..=5_i64 {
+            transaction
+                .execute(
+                    "INSERT INTO encrypted_item_history(object_id, revision, encrypted_record) VALUES (?1, ?2, ?3)",
+                    params![item.id.to_string(), revision, b"four".as_slice()],
+                )
+                .expect("seed history row");
+        }
+        prune_item_history_with_limits(&transaction, item.id, 5, 3, 8)
+            .expect("prune small test limits");
+        transaction.commit().expect("commit prune test");
+
+        let mut statement = storage
+            .connection
+            .prepare("SELECT revision FROM encrypted_item_history ORDER BY history_id ASC")
+            .expect("prepare retained revisions");
+        let retained = statement
+            .query_map([], |row| row.get::<_, i64>(0))
+            .expect("query retained revisions")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect retained revisions");
+        assert_eq!(retained, vec![4, 5]);
+        assert_eq!(
+            storage.item_history_storage_bytes().expect("history bytes"),
+            8
+        );
+    }
+
+    #[test]
+    fn history_load_and_lists_fail_closed_on_invalid_metadata() {
+        let dir = tempdir().expect("temp directory");
+        let storage = VaultStorage::open(dir.path().join("vault.sqlite3")).expect("open storage");
+        let root = AccountRootKey::generate().expect("root key");
+        let item = VaultItem::secure_note("history metadata", "body");
+        let other = VaultItem::secure_note("other", "body");
+        storage
+            .insert_item(&encrypt_item(&root, &item, 3).expect("encrypt current"))
+            .expect("insert current");
+        let wrong_envelope = encrypt_item(&root, &other, 2).expect("encrypt wrong envelope");
+        storage
+            .connection
+            .execute(
+                "INSERT INTO encrypted_item_history(object_id, revision, encrypted_record) VALUES (?1, 2, ?2)",
+                params![
+                    item.id.to_string(),
+                    serde_json::to_vec(&wrong_envelope).expect("serialize wrong envelope")
+                ],
+            )
+            .expect("seed mismatched envelope");
+
+        assert_eq!(
+            storage
+                .list_item_history_revisions(item.id)
+                .expect("bounded metadata remains listable"),
+            vec![2]
+        );
+        assert!(matches!(
+            storage.load_item_history(item.id, 2),
+            Err(StorageError::InconsistentEncryptedRow)
+        ));
+
+        storage
+            .connection
+            .execute(
+                "UPDATE encrypted_item_history SET revision = 3 WHERE object_id = ?1",
+                params![item.id.to_string()],
+            )
+            .expect("tamper impossible history revision");
+        assert!(matches!(
+            storage.list_item_history_revisions(item.id),
+            Err(StorageError::InconsistentEncryptedRow)
+        ));
+        assert!(matches!(
+            storage.list_item_history_keys(),
+            Err(StorageError::InconsistentEncryptedRow)
+        ));
+        assert!(matches!(
+            storage.validate_record_bounds(),
+            Err(StorageError::InconsistentEncryptedRow)
         ));
     }
 
@@ -1000,13 +1676,13 @@ mod tests {
             let storage = VaultStorage::open(&path).expect("open storage");
             storage
                 .connection
-                .execute("INSERT INTO schema_migrations(version) VALUES (4)", [])
+                .execute("INSERT INTO schema_migrations(version) VALUES (5)", [])
                 .expect("simulate newer schema");
         }
 
         assert!(matches!(
             VaultStorage::open(&path),
-            Err(StorageError::UnsupportedSchemaVersion(4))
+            Err(StorageError::UnsupportedSchemaVersion(5))
         ));
     }
 
@@ -1022,7 +1698,7 @@ mod tests {
                     CREATE TABLE schema_migrations (
                         version INTEGER PRIMARY KEY NOT NULL
                     );
-                    INSERT INTO schema_migrations(version) VALUES (4);
+                    INSERT INTO schema_migrations(version) VALUES (5);
                     CREATE TABLE future_only (value TEXT NOT NULL);
                     ",
                 )
@@ -1031,7 +1707,7 @@ mod tests {
 
         assert!(matches!(
             VaultStorage::open(&path),
-            Err(StorageError::UnsupportedSchemaVersion(4))
+            Err(StorageError::UnsupportedSchemaVersion(5))
         ));
 
         let connection = Connection::open(&path).expect("reopen raw database");
@@ -1041,6 +1717,7 @@ mod tests {
             "recovery_kit",
             "encrypted_attachments",
             "attachment_chunks",
+            "encrypted_item_history",
         ] {
             let exists: bool = connection
                 .query_row(
@@ -1051,7 +1728,7 @@ mod tests {
                 .expect("check table");
             assert!(
                 !exists,
-                "current binary created {table} before rejecting v4"
+                "current binary created {table} before rejecting v5"
             );
         }
     }
@@ -1069,7 +1746,7 @@ mod tests {
         let item = VaultItem::secure_note(SECRET_TITLE, SECRET_BODY);
         let current = encrypt_item(&root, &item, 1).expect("encrypt current");
         let replacement = encrypt_item(&root, &item, 2).expect("encrypt replacement");
-        storage.upsert_item(&current).expect("store current");
+        storage.insert_item(&current).expect("store current");
 
         let replacement_bytes = serde_json::to_vec(&replacement).expect("serialize replacement");
         storage
@@ -1097,7 +1774,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_database_migrates_to_v3_with_recovery_and_attachment_tables() {
+    fn v1_database_migrates_to_v4_with_recovery_attachment_and_history_tables() {
         use vault_crypto::{RecoverySecret, wrap_root_key_with_recovery_secret};
 
         let dir = tempdir().expect("temp directory");
@@ -1135,7 +1812,7 @@ mod tests {
                 .expect("seed v1 item");
         }
 
-        let storage = VaultStorage::open(&path).expect("migrate to v3");
+        let storage = VaultStorage::open(&path).expect("migrate to v4");
         let restored = storage.load_item(item.id).expect("load migrated item");
         assert_eq!(restored.object_id, item.id);
         assert_eq!(restored.revision, 1);
@@ -1165,7 +1842,13 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("read schema version");
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
+        assert!(
+            storage
+                .list_item_history_revisions(item.id)
+                .expect("migrated history list")
+                .is_empty()
+        );
 
         let attachment_id = Uuid::new_v4();
         storage
@@ -1183,7 +1866,7 @@ mod tests {
     }
 
     #[test]
-    fn v2_database_migrates_to_v3_and_preserves_existing_items() {
+    fn v2_database_migrates_to_v4_and_preserves_existing_items() {
         let dir = tempdir().expect("temp directory");
         let path = dir.path().join("vault.sqlite3");
         let root = AccountRootKey::generate().expect("root key");
@@ -1224,7 +1907,7 @@ mod tests {
                 .expect("seed v2 item");
         }
 
-        let storage = VaultStorage::open(&path).expect("migrate v2 to v3");
+        let storage = VaultStorage::open(&path).expect("migrate v2 to v4");
         let restored = storage.load_item(item.id).expect("load preserved item");
         assert_eq!(restored.object_id, item.id);
         assert_eq!(restored.revision, 7);
@@ -1237,7 +1920,13 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("read schema version");
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
+        assert!(
+            storage
+                .list_item_history_revisions(item.id)
+                .expect("migrated history list")
+                .is_empty()
+        );
 
         let attachment_id = Uuid::new_v4();
         storage
@@ -1246,6 +1935,53 @@ mod tests {
         storage
             .insert_attachment_chunk(attachment_id, 0, b"v3-chunk")
             .expect("insert v3 chunk");
+    }
+
+    #[test]
+    fn v3_database_migrates_to_v4_without_backfilling_history() {
+        let dir = tempdir().expect("temp directory");
+        let path = dir.path().join("vault.sqlite3");
+        let root = AccountRootKey::generate().expect("root key");
+        let item = VaultItem::secure_note("v3 current", "preserved");
+        {
+            let storage = VaultStorage::open(&path).expect("create current schema");
+            storage
+                .insert_item(&encrypt_item(&root, &item, 7).expect("encrypt current item"))
+                .expect("insert current item");
+            storage
+                .connection
+                .execute_batch(
+                    "
+                    DROP TABLE encrypted_item_history;
+                    DELETE FROM schema_migrations WHERE version = 4;
+                    ",
+                )
+                .expect("downgrade test fixture to v3");
+        }
+
+        let storage = VaultStorage::open(&path).expect("migrate v3 to v4");
+        assert_eq!(
+            storage
+                .load_item(item.id)
+                .expect("load current item")
+                .revision,
+            7
+        );
+        assert!(
+            storage
+                .list_item_history_revisions(item.id)
+                .expect("history after v3 migration")
+                .is_empty()
+        );
+        let version: i64 = storage
+            .connection
+            .query_row(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read migrated schema version");
+        assert_eq!(version, 4);
     }
 
     #[test]
@@ -1338,7 +2074,7 @@ mod tests {
         let root = AccountRootKey::generate().expect("root key");
         let mut item = VaultItem::secure_note("with attachment", "body");
         let current = encrypt_item(&root, &item, 1).expect("encrypt current item");
-        storage.upsert_item(&current).expect("store current item");
+        storage.insert_item(&current).expect("store current item");
 
         let attachment_id = Uuid::new_v4();
         item.attachments.push(attachment_id);
@@ -1360,6 +2096,12 @@ mod tests {
                 .expect("load linked item")
                 .revision,
             2
+        );
+        assert_eq!(
+            storage
+                .list_item_history_revisions(item.id)
+                .expect("history after first attachment"),
+            vec![1]
         );
 
         let orphan_candidate = Uuid::new_v4();
@@ -1387,6 +2129,12 @@ mod tests {
                 .expect("rolled-back chunks")
                 .is_empty()
         );
+        assert_eq!(
+            storage
+                .list_item_history_revisions(item.id)
+                .expect("history after stale attachment add"),
+            vec![1]
+        );
 
         let second_attachment = Uuid::new_v4();
         item.attachments.push(second_attachment);
@@ -1401,6 +2149,12 @@ mod tests {
                 &[(0, b"second-chunk".to_vec())],
             )
             .expect("atomically link second attachment");
+        assert_eq!(
+            storage
+                .list_item_history_revisions(item.id)
+                .expect("history after second attachment"),
+            vec![2, 1]
+        );
 
         item.attachments.clear();
         let without_attachments = encrypt_item(&root, &item, 4).expect("encrypt unlinked item");
@@ -1409,7 +2163,7 @@ mod tests {
             (second_attachment, 2, 0, b"second-tombstone".to_vec()),
         ];
         assert!(matches!(
-            storage.tombstone_attachments_and_update_item_if_revision(
+            storage.tombstone_attachments_and_update_item_with_history_if_revision(
                 &without_attachments,
                 3,
                 &stale_tombstones,
@@ -1435,13 +2189,23 @@ mod tests {
                 .expect("first chunks rolled back"),
             chunks
         );
+        assert_eq!(
+            storage
+                .list_item_history_revisions(item.id)
+                .expect("history rolled back with stale attachment tombstone"),
+            vec![2, 1]
+        );
 
         let tombstones = vec![
             (attachment_id, 2, 1, b"first-tombstone".to_vec()),
             (second_attachment, 2, 1, b"second-tombstone".to_vec()),
         ];
         storage
-            .tombstone_attachments_and_update_item_if_revision(&without_attachments, 3, &tombstones)
+            .tombstone_attachments_and_update_item_with_history_if_revision(
+                &without_attachments,
+                3,
+                &tombstones,
+            )
             .expect("atomically tombstone attachments");
         assert_eq!(
             storage
@@ -1474,6 +2238,71 @@ mod tests {
                 .expect("second tombstone chunks")
                 .is_empty()
         );
+        assert_eq!(
+            storage
+                .list_item_history_revisions(item.id)
+                .expect("history after attachment tombstones"),
+            vec![3, 2, 1]
+        );
+    }
+
+    #[test]
+    fn purge_clears_item_history_atomically() {
+        let dir = tempdir().expect("temp directory");
+        let storage = VaultStorage::open(dir.path().join("vault.sqlite3")).expect("open storage");
+        let root = AccountRootKey::generate().expect("root key");
+        let item = VaultItem::secure_note("purge history", "body");
+        storage
+            .insert_item(&encrypt_item(&root, &item, 1).expect("encrypt revision 1"))
+            .expect("insert revision 1");
+        storage
+            .update_item_with_history_if_revision(
+                &encrypt_item(&root, &item, 2).expect("encrypt revision 2"),
+                1,
+            )
+            .expect("advance with history");
+        assert_eq!(
+            storage
+                .list_item_history_revisions(item.id)
+                .expect("history before purge"),
+            vec![1]
+        );
+
+        let revision_3 = encrypt_item(&root, &item, 3).expect("encrypt purge revision");
+        assert!(matches!(
+            storage.purge_item_and_tombstone_attachments_if_revision(&revision_3, 1, &[]),
+            Err(StorageError::StaleRevision)
+        ));
+        assert_eq!(
+            storage
+                .load_item(item.id)
+                .expect("current after stale purge")
+                .revision,
+            2
+        );
+        assert_eq!(
+            storage
+                .list_item_history_revisions(item.id)
+                .expect("history survives stale purge"),
+            vec![1]
+        );
+
+        storage
+            .purge_item_and_tombstone_attachments_if_revision(&revision_3, 2, &[])
+            .expect("purge clears history");
+        assert_eq!(
+            storage
+                .load_item(item.id)
+                .expect("purged current row")
+                .revision,
+            3
+        );
+        assert!(
+            storage
+                .list_item_history_revisions(item.id)
+                .expect("history after purge")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1483,7 +2312,7 @@ mod tests {
         let root = AccountRootKey::generate().expect("root key");
         let item = VaultItem::secure_note("owner", "body");
         let current = encrypt_item(&root, &item, 1).expect("encrypt current item");
-        storage.upsert_item(&current).expect("store current item");
+        storage.insert_item(&current).expect("store current item");
         seed_zero_blob_attachment_rows(&storage, ATTACHMENT_MAX_OBJECTS);
 
         let candidate_attachment = Uuid::from_u128(u128::from(ATTACHMENT_MAX_OBJECTS) + 10_000);
@@ -1513,6 +2342,12 @@ mod tests {
             storage.load_attachment(candidate_attachment),
             Err(StorageError::AttachmentNotFound)
         ));
+        assert!(
+            storage
+                .list_item_history_revisions(item.id)
+                .expect("history rolled back with rejected attachment")
+                .is_empty()
+        );
         let attachment_count: i64 = storage
             .connection
             .query_row("SELECT COUNT(*) FROM encrypted_attachments", [], |row| {
@@ -1572,6 +2407,186 @@ mod tests {
                 (0, b"restored-zero".to_vec()),
                 (1, b"restored-one".to_vec())
             ]
+        );
+    }
+
+    #[test]
+    fn replace_from_database_replaces_item_history() {
+        let dir = tempdir().expect("temp directory");
+        let current_path = dir.path().join("current.sqlite3");
+        let restore_path = dir.path().join("restore.sqlite3");
+        let root = AccountRootKey::generate().expect("root key");
+        let current = VaultStorage::open(&current_path).expect("open current storage");
+        let old_item = VaultItem::secure_note("old", "body");
+        current
+            .insert_item(&encrypt_item(&root, &old_item, 1).expect("encrypt old revision 1"))
+            .expect("insert old revision 1");
+        current
+            .update_item_with_history_if_revision(
+                &encrypt_item(&root, &old_item, 2).expect("encrypt old revision 2"),
+                1,
+            )
+            .expect("archive old history");
+
+        let restored_item = VaultItem::secure_note("restored", "body");
+        {
+            let restore = VaultStorage::open(&restore_path).expect("open restore storage");
+            restore
+                .insert_item(
+                    &encrypt_item(&root, &restored_item, 1).expect("encrypt restored revision 1"),
+                )
+                .expect("insert restored revision 1");
+            restore
+                .update_item_with_history_if_revision(
+                    &encrypt_item(&root, &restored_item, 2).expect("encrypt restored revision 2"),
+                    1,
+                )
+                .expect("archive restored history");
+            restore
+                .connection
+                .execute(
+                    "UPDATE encrypted_item_history SET history_id = ?1",
+                    params![i64::MAX],
+                )
+                .expect("tamper restore history sequence id");
+        }
+
+        current
+            .replace_from_database(&restore_path)
+            .expect("replace history from restore database");
+        assert!(matches!(
+            current.load_item(old_item.id),
+            Err(StorageError::ItemNotFound)
+        ));
+        assert!(
+            current
+                .list_item_history_revisions(old_item.id)
+                .expect("old history removed")
+                .is_empty()
+        );
+        assert_eq!(
+            current
+                .load_item(restored_item.id)
+                .expect("load restored current")
+                .revision,
+            2
+        );
+        assert_eq!(
+            current
+                .list_item_history_revisions(restored_item.id)
+                .expect("restored history revisions"),
+            vec![1]
+        );
+        assert_eq!(
+            current
+                .load_item_history(restored_item.id, 1)
+                .expect("load restored history")
+                .revision,
+            1
+        );
+        current
+            .update_item_with_history_if_revision(
+                &encrypt_item(&root, &restored_item, 3).expect("encrypt restored revision 3"),
+                2,
+            )
+            .expect("restored history ids are normalized before future writes");
+        assert_eq!(
+            current
+                .list_item_history_revisions(restored_item.id)
+                .expect("history remains writable after restore"),
+            vec![2, 1]
+        );
+    }
+
+    #[test]
+    fn replace_from_database_accepts_v3_source_with_empty_history() {
+        let dir = tempdir().expect("temp directory");
+        let current_path = dir.path().join("current.sqlite3");
+        let restore_path = dir.path().join("restore.sqlite3");
+        let root = AccountRootKey::generate().expect("root key");
+        let current = VaultStorage::open(&current_path).expect("open current storage");
+        let restored_item = VaultItem::secure_note("v3 restore", "body");
+        {
+            let restore = VaultStorage::open(&restore_path).expect("open restore storage");
+            restore
+                .insert_item(
+                    &encrypt_item(&root, &restored_item, 4).expect("encrypt restored current"),
+                )
+                .expect("insert restored current");
+            restore
+                .connection
+                .execute_batch(
+                    "
+                    DROP TABLE encrypted_item_history;
+                    DELETE FROM schema_migrations WHERE version = 4;
+                    ",
+                )
+                .expect("downgrade restore fixture to v3");
+        }
+
+        current
+            .replace_from_database(&restore_path)
+            .expect("replace directly from v3 database");
+        assert_eq!(
+            current
+                .load_item(restored_item.id)
+                .expect("load v3 restored item")
+                .revision,
+            4
+        );
+        assert!(
+            current
+                .list_item_history_revisions(restored_item.id)
+                .expect("v3 restore has no backfilled history")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn replace_from_database_rejects_excessive_history_before_mutation() {
+        let dir = tempdir().expect("temp directory");
+        let current_path = dir.path().join("current.sqlite3");
+        let restore_path = dir.path().join("restore.sqlite3");
+        let root = AccountRootKey::generate().expect("root key");
+        let current = VaultStorage::open(&current_path).expect("open current storage");
+        let current_item = VaultItem::secure_note("current marker", "body");
+        current
+            .insert_item(&encrypt_item(&root, &current_item, 1).expect("encrypt current marker"))
+            .expect("insert current marker");
+
+        {
+            let restore = VaultStorage::open(&restore_path).expect("open restore storage");
+            let restore_item = VaultItem::secure_note("malicious history", "body");
+            restore
+                .insert_item(
+                    &encrypt_item(&root, &restore_item, 100).expect("encrypt restore current"),
+                )
+                .expect("insert restore current");
+            for revision in 1..=ITEM_HISTORY_MAX_REVISIONS_PER_ITEM + 1 {
+                restore
+                    .connection
+                    .execute(
+                        "INSERT INTO encrypted_item_history(object_id, revision, encrypted_record) VALUES (?1, ?2, ?3)",
+                        params![
+                            restore_item.id.to_string(),
+                            i64::try_from(revision).expect("revision fits sqlite integer"),
+                            b"malicious".as_slice()
+                        ],
+                    )
+                    .expect("seed excessive restore history");
+            }
+        }
+
+        assert!(matches!(
+            current.replace_from_database(&restore_path),
+            Err(StorageError::InconsistentEncryptedRow)
+        ));
+        assert_eq!(
+            current
+                .load_item(current_item.id)
+                .expect("current marker survives rejected restore")
+                .revision,
+            1
         );
     }
 
@@ -1896,7 +2911,7 @@ mod tests {
         let current_encrypted =
             encrypt_item(&root, &current_item, 7).expect("encrypt current item");
         current
-            .upsert_item(&current_encrypted)
+            .insert_item(&current_encrypted)
             .expect("store current item");
 
         let restore = VaultStorage::open(&restore_path).expect("open restore storage");
@@ -1904,7 +2919,7 @@ mod tests {
         let restore_encrypted =
             encrypt_item(&root, &restore_item, 1).expect("encrypt restore item");
         restore
-            .upsert_item(&restore_encrypted)
+            .insert_item(&restore_encrypted)
             .expect("store restore item");
         let oversized_record = i64::try_from(ITEM_MAX_ENCRYPTED_RECORD_BYTES + 1)
             .expect("item record bound fits sqlite integer");
@@ -1953,7 +2968,7 @@ mod tests {
         let current_encrypted =
             encrypt_item(&root, &current_item, 3).expect("encrypt current item");
         current
-            .upsert_item(&current_encrypted)
+            .insert_item(&current_encrypted)
             .expect("store current item");
 
         {

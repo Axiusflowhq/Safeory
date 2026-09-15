@@ -53,6 +53,12 @@ Implemented now:
   `Close account`, `Review manually`) with private instructions, exact-revision
   detail-only IPC, lifecycle/backup preservation, and no automatic provider
   contact, sign-in, death verification, credential sharing, or account closure,
+- bounded encrypted per-record version history: up to 20 earlier active snapshots
+  per item, archived from the previous authenticated ciphertext inside the same
+  revision-CAS transaction; browsing is read-only and available only from an
+  active record detail, protected fields require explicit reveal, historical
+  attachment references are metadata only, purge erases retained history, and
+  encrypted backups preserve it,
 - Trust Engine core: conditional access policies with fail-closed local
   evaluation (destruction/deny wins, private-forever, multi-approval,
   waiting periods as documented server-enforced policy, not time-lock crypto),
@@ -64,7 +70,8 @@ Implemented now:
   chunks, metadata-only renderer IPC, Trash/restore lifecycle preservation,
   tombstone-based permanent deletion, and attachment-complete encrypted
   backup/restore,
-- local database schema migration (v1/v2 to v3) preserving existing vaults,
+- local database schema migration (v1/v2/v3 to v4) preserving existing vaults;
+  v4 adds bounded encrypted item history without backfilling older revisions,
 - focused Tauri adapter tests for locked-state gating, redacted unlock failure,
   item listing, credential revision plumbing, and stale-edit rejection,
 - portable Rust item-size bounds before encryption/persistence, with regression

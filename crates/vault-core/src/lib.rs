@@ -13,10 +13,10 @@ use uuid::Uuid;
 use vault_crypto::{
     ATTACHMENT_CHUNK_SIZE, ATTACHMENT_MAX_FILENAME_CHARS, ATTACHMENT_MAX_PLAINTEXT_BYTES,
     AccountRootKey, AttachmentCipherContext, AttachmentManifestV1, CryptoError,
-    EncryptedAttachmentV1, EncryptedItemV1, RecoveryKitWrapV1, RecoverySecret, decrypt_item_state,
-    encrypt_item, encrypt_item_state, open_attachment_manifest, recovery_secret_matches_root_key,
-    seal_attachment_manifest, unwrap_root_key, unwrap_root_key_with_recovery_secret, wrap_root_key,
-    wrap_root_key_with_recovery_secret,
+    EncryptedAttachmentV1, EncryptedItemV1, RecoveryKitWrapV1, RecoverySecret, decrypt_item,
+    decrypt_item_state, encrypt_item, encrypt_item_state, open_attachment_manifest,
+    recovery_secret_matches_root_key, seal_attachment_manifest, unwrap_root_key,
+    unwrap_root_key_with_recovery_secret, wrap_root_key, wrap_root_key_with_recovery_secret,
 };
 use vault_models::{
     AccountClosurePlan, EMERGENCY_CARD_ID, EmergencyCard, ItemKind, LegacyDisposition, VaultItem,
@@ -378,6 +378,8 @@ pub enum VaultError {
     InvalidLegacyDisposition,
     #[error("account closure plans are supported only for credential records")]
     InvalidAccountClosurePlan,
+    #[error("version history is not available for this item")]
+    HistoryNotAvailable,
     #[error("attachment file operation failed")]
     AttachmentIo(#[from] std::io::Error),
 }
@@ -474,7 +476,7 @@ impl VaultSession {
         }
         validate_item(item)?;
         let encrypted = encrypt_item(&self.root_key, item, revision)?;
-        self.storage.upsert_item(&encrypted)?;
+        self.storage.insert_item(&encrypted)?;
         Ok(())
     }
 
@@ -494,8 +496,13 @@ impl VaultSession {
             .checked_add(1)
             .ok_or(VaultError::RevisionExhausted)?;
         let encrypted = encrypt_item(&self.root_key, item, revision)?;
-        self.storage
-            .update_item_if_revision(&encrypted, expected_revision)?;
+        if item.id == EMERGENCY_CARD_ID {
+            self.storage
+                .update_item_if_revision(&encrypted, expected_revision)?;
+        } else {
+            self.storage
+                .update_item_with_history_if_revision(&encrypted, expected_revision)?;
+        }
         Ok(revision)
     }
 
@@ -759,7 +766,7 @@ impl VaultSession {
         let tombstone_record =
             serde_json::to_vec(&tombstone).map_err(CryptoError::Serialization)?;
         self.storage
-            .tombstone_attachments_and_update_item_if_revision(
+            .tombstone_attachments_and_update_item_with_history_if_revision(
                 &encrypted_item,
                 expected_item_revision,
                 &[(
@@ -784,6 +791,42 @@ impl VaultSession {
                 Err(VaultError::ItemNotActive)
             }
         }
+    }
+
+    pub fn list_item_history_revisions(
+        &self,
+        id: Uuid,
+        expected_current_revision: u64,
+    ) -> Result<Vec<u64>, VaultError> {
+        let current_revision = self.history_owner_revision(id, expected_current_revision)?;
+        let revisions = self.storage.list_item_history_revisions(id)?;
+        if revisions
+            .iter()
+            .any(|revision| *revision >= current_revision)
+        {
+            return Err(VaultError::Storage(StorageError::InconsistentEncryptedRow));
+        }
+        Ok(revisions)
+    }
+
+    pub fn get_item_history(
+        &self,
+        id: Uuid,
+        expected_current_revision: u64,
+        historical_revision: u64,
+    ) -> Result<VaultItem, VaultError> {
+        let current_revision = self.history_owner_revision(id, expected_current_revision)?;
+        if historical_revision >= current_revision {
+            return Err(VaultError::HistoryNotAvailable);
+        }
+        let encrypted = match self.storage.load_item_history(id, historical_revision) {
+            Ok(encrypted) => encrypted,
+            Err(StorageError::ItemNotFound) => return Err(VaultError::HistoryNotAvailable),
+            Err(error) => return Err(VaultError::Storage(error)),
+        };
+        let item = decrypt_item(&self.root_key, &encrypted)?;
+        validate_item(&item)?;
+        Ok(item)
     }
 
     pub fn set_legacy_disposition(
@@ -968,7 +1011,7 @@ impl VaultSession {
             ));
         }
         self.storage
-            .tombstone_attachments_and_update_item_if_revision(
+            .purge_item_and_tombstone_attachments_if_revision(
                 &encrypted,
                 expected_revision,
                 &tombstones,
@@ -1151,6 +1194,26 @@ impl VaultSession {
         let revision = encrypted.revision;
         Ok((decrypt_item_state(&self.root_key, &encrypted)?, revision))
     }
+
+    fn history_owner_revision(
+        &self,
+        id: Uuid,
+        expected_current_revision: u64,
+    ) -> Result<u64, VaultError> {
+        if id == EMERGENCY_CARD_ID {
+            return Err(VaultError::HistoryNotAvailable);
+        }
+        let (state, current_revision) = self.get_state_with_revision(id)?;
+        if current_revision != expected_current_revision {
+            return Err(VaultError::Storage(StorageError::StaleRevision));
+        }
+        match state {
+            VaultItemState::Active { .. } => Ok(current_revision),
+            VaultItemState::Trashed { .. } | VaultItemState::Tombstone { .. } => {
+                Err(VaultError::HistoryNotAvailable)
+            }
+        }
+    }
 }
 
 fn validate_storage_contents(
@@ -1174,14 +1237,23 @@ where
     validate_attachment_storage_bytes(storage.attachment_storage_bytes()?)?;
     let mut referenced_attachments = BTreeMap::<Uuid, Uuid>::new();
     let mut seen_attachment_refs = BTreeSet::new();
+    let mut current_items = BTreeMap::<Uuid, (u64, bool)>::new();
     for id in storage.list_item_ids()? {
         if cancelled() {
             return Err(VaultError::OperationCancelled);
         }
         let encrypted = storage.load_item(id)?;
+        let current_revision = encrypted.revision;
         let state = decrypt_item_state(root_key, &encrypted)?;
         if cancelled() {
             return Err(VaultError::OperationCancelled);
+        }
+        let is_tombstone = matches!(&state, VaultItemState::Tombstone { .. });
+        if current_items
+            .insert(id, (current_revision, is_tombstone))
+            .is_some()
+        {
+            return Err(VaultError::Storage(StorageError::InconsistentEncryptedRow));
         }
         match state {
             VaultItemState::Active { item } | VaultItemState::Trashed { item, .. } => {
@@ -1201,6 +1273,24 @@ where
             }
             VaultItemState::Tombstone { .. } => {}
         }
+    }
+
+    for (id, historical_revision) in storage.list_item_history_keys()? {
+        if cancelled() {
+            return Err(VaultError::OperationCancelled);
+        }
+        let Some((current_revision, current_is_tombstone)) = current_items.get(&id) else {
+            return Err(VaultError::Storage(StorageError::InconsistentEncryptedRow));
+        };
+        if id == EMERGENCY_CARD_ID
+            || *current_is_tombstone
+            || historical_revision >= *current_revision
+        {
+            return Err(VaultError::Storage(StorageError::InconsistentEncryptedRow));
+        }
+        let encrypted = storage.load_item_history(id, historical_revision)?;
+        let historical_item = decrypt_item(root_key, &encrypted)?;
+        validate_item(&historical_item)?;
     }
 
     let mut stored_attachment_ids = BTreeSet::new();
@@ -1650,6 +1740,269 @@ mod tests {
     }
 
     #[test]
+    fn item_history_is_browse_only_revision_fenced_and_creation_is_create_only() {
+        let dir = tempdir().expect("temp directory");
+        let database = dir.path().join("vault.sqlite3");
+        let session = VaultSession::create(&database, TEST_PASSPHRASE).expect("create vault");
+        let mut item = VaultItem::secure_note("original", "first body");
+        let id = item.id;
+        session.put_item(&item, 1).expect("store original");
+
+        let mut replacement = item.clone();
+        replacement.title = "replacement through create".to_owned();
+        assert!(matches!(
+            session.put_item(&replacement, 2),
+            Err(VaultError::Storage(StorageError::StaleRevision))
+        ));
+        assert!(
+            session
+                .list_item_history_revisions(id, 1)
+                .expect("empty initial history")
+                .is_empty()
+        );
+
+        item.title = "updated".to_owned();
+        item.fields
+            .insert("body".to_owned(), "second body".to_owned());
+        let current_revision = session.update_item(&item, 1).expect("update item");
+        assert_eq!(current_revision, 2);
+        assert_eq!(
+            session
+                .list_item_history_revisions(id, current_revision)
+                .expect("list history"),
+            vec![1]
+        );
+        let historical = session
+            .get_item_history(id, current_revision, 1)
+            .expect("fetch historical revision");
+        assert_eq!(historical.title, "original");
+        assert_eq!(historical.fields["body"], "first body");
+        assert!(matches!(
+            session.list_item_history_revisions(id, 1),
+            Err(VaultError::Storage(StorageError::StaleRevision))
+        ));
+        assert!(matches!(
+            session.get_item_history(id, current_revision, current_revision),
+            Err(VaultError::HistoryNotAvailable)
+        ));
+        assert!(matches!(
+            session.get_item_history(id, current_revision, 0),
+            Err(VaultError::HistoryNotAvailable)
+        ));
+    }
+
+    #[test]
+    fn active_metadata_mutations_archive_prior_snapshots() {
+        let dir = tempdir().expect("temp directory");
+        let database = dir.path().join("vault.sqlite3");
+        let session = VaultSession::create(&database, TEST_PASSPHRASE).expect("create vault");
+        let mut credential = VaultItem::password(
+            "Primary email",
+            "owner@example.test",
+            "secret",
+            "https://example.test",
+            "",
+        );
+        let id = credential.id;
+        session.put_item(&credential, 1).expect("store credential");
+
+        let revision = session
+            .set_legacy_disposition(id, 1, LegacyDisposition::PrivateForever)
+            .expect("set legacy disposition");
+        assert_eq!(revision, 2);
+        let revision = session
+            .set_account_closure_plan(
+                id,
+                revision,
+                AccountClosurePlan {
+                    disposition: vault_models::AccountClosureDisposition::ReviewManually,
+                    instructions: "Review before closing.".to_owned(),
+                },
+            )
+            .expect("set closure plan");
+        assert_eq!(revision, 3);
+        credential = session.get_item(id).expect("load credential for link edit");
+        credential.links.push(Uuid::new_v4());
+        let revision = session
+            .update_item(&credential, revision)
+            .expect("update links");
+        assert_eq!(revision, 4);
+
+        assert_eq!(
+            session
+                .list_item_history_revisions(id, revision)
+                .expect("list metadata history"),
+            vec![3, 2, 1]
+        );
+        let original = session
+            .get_item_history(id, revision, 1)
+            .expect("original snapshot");
+        assert_eq!(original.legacy_disposition, LegacyDisposition::Unspecified);
+        assert_eq!(original.account_closure_plan, AccountClosurePlan::default());
+        assert!(original.links.is_empty());
+        let after_legacy = session
+            .get_item_history(id, revision, 2)
+            .expect("legacy snapshot");
+        assert_eq!(
+            after_legacy.legacy_disposition,
+            LegacyDisposition::PrivateForever
+        );
+        assert_eq!(
+            after_legacy.account_closure_plan,
+            AccountClosurePlan::default()
+        );
+        assert!(after_legacy.links.is_empty());
+    }
+
+    #[test]
+    fn trash_and_restore_do_not_archive_and_purge_clears_history() {
+        let dir = tempdir().expect("temp directory");
+        let database = dir.path().join("vault.sqlite3");
+        let session = VaultSession::create(&database, TEST_PASSPHRASE).expect("create vault");
+        let mut item = VaultItem::secure_note("history lifecycle", "body");
+        let id = item.id;
+        session.put_item(&item, 1).expect("store item");
+        item.title = "edited".to_owned();
+        let edited_revision = session.update_item(&item, 1).expect("edit item");
+        assert_eq!(edited_revision, 2);
+
+        let trashed_revision = session
+            .trash_item(id, edited_revision, 10)
+            .expect("trash item");
+        assert_eq!(trashed_revision, 3);
+        assert!(matches!(
+            session.list_item_history_revisions(id, trashed_revision),
+            Err(VaultError::HistoryNotAvailable)
+        ));
+        assert_eq!(
+            session
+                .storage
+                .list_item_history_revisions(id)
+                .expect("history remains encrypted while trashed"),
+            vec![1]
+        );
+        let restored_revision = session
+            .restore_item(id, trashed_revision)
+            .expect("restore item");
+        assert_eq!(restored_revision, 4);
+        assert_eq!(
+            session
+                .list_item_history_revisions(id, restored_revision)
+                .expect("history unchanged after restore"),
+            vec![1]
+        );
+
+        let second_trash_revision = session
+            .trash_item(id, restored_revision, 11)
+            .expect("trash before purge");
+        let tombstone_revision = session
+            .purge_item(id, second_trash_revision)
+            .expect("purge item");
+        assert_eq!(tombstone_revision, 6);
+        assert!(
+            session
+                .storage
+                .list_item_history_revisions(id)
+                .expect("history cleared by purge")
+                .is_empty()
+        );
+        assert!(matches!(
+            session.list_item_history_revisions(id, tombstone_revision),
+            Err(VaultError::HistoryNotAvailable)
+        ));
+    }
+
+    #[test]
+    fn emergency_card_history_is_excluded() {
+        use vault_models::EmergencyContact;
+
+        let dir = tempdir().expect("temp directory");
+        let database = dir.path().join("vault.sqlite3");
+        let session = VaultSession::create(&database, TEST_PASSPHRASE).expect("create vault");
+        let first = EmergencyCard::empty();
+        assert_eq!(session.set_emergency_card(&first).expect("create card"), 1);
+        let updated = EmergencyCard {
+            selected_item_ids: Vec::new(),
+            contacts: vec![EmergencyContact {
+                name: "Ada".to_owned(),
+                relation: "Sibling".to_owned(),
+                phone: "+1-555-0100".to_owned(),
+                notes: String::new(),
+            }],
+            instructions: "Call first.".to_owned(),
+        };
+        assert_eq!(
+            session.set_emergency_card(&updated).expect("update card"),
+            2
+        );
+        assert!(
+            session
+                .storage
+                .list_item_history_revisions(EMERGENCY_CARD_ID)
+                .expect("no emergency history")
+                .is_empty()
+        );
+        assert!(matches!(
+            session.list_item_history_revisions(EMERGENCY_CARD_ID, 2),
+            Err(VaultError::HistoryNotAvailable)
+        ));
+        assert!(matches!(
+            session.get_item_history(EMERGENCY_CARD_ID, 2, 1),
+            Err(VaultError::HistoryNotAvailable)
+        ));
+
+        let forced_current =
+            encrypt_item(&session.root_key, &VaultItem::emergency_card(&updated), 3)
+                .expect("encrypt forced emergency revision");
+        session
+            .storage
+            .update_item_with_history_if_revision(&forced_current, 2)
+            .expect("force excluded emergency history");
+        assert!(matches!(
+            session.validate_persisted_state(),
+            Err(VaultError::Storage(StorageError::InconsistentEncryptedRow))
+        ));
+    }
+
+    #[test]
+    fn encrypted_backup_restore_preserves_item_history() {
+        let dir = tempdir().expect("temp directory");
+        let database = dir.path().join("vault.sqlite3");
+        let backup = dir.path().join("history-backup.sqlite3");
+        let mut session = VaultSession::create(&database, TEST_PASSPHRASE).expect("create vault");
+        let mut item = VaultItem::secure_note("revision one", "first");
+        let id = item.id;
+        session.put_item(&item, 1).expect("store item");
+        item.title = "revision two".to_owned();
+        let backup_revision = session.update_item(&item, 1).expect("first edit");
+        session
+            .backup_database_to(&backup)
+            .expect("backup with history");
+
+        item.title = "revision three".to_owned();
+        session
+            .update_item(&item, backup_revision)
+            .expect("mutate live item");
+        session
+            .replace_with_backup(&backup, TEST_PASSPHRASE)
+            .expect("restore backup with history");
+
+        assert_eq!(
+            session
+                .list_item_history_revisions(id, backup_revision)
+                .expect("restored history revisions"),
+            vec![1]
+        );
+        assert_eq!(
+            session
+                .get_item_history(id, backup_revision, 1)
+                .expect("restored historical item")
+                .title,
+            "revision one"
+        );
+    }
+
+    #[test]
     fn legacy_disposition_is_cas_safe_and_survives_lifecycle_transitions() {
         let dir = tempdir().expect("temp directory");
         let database = dir.path().join("vault.sqlite3");
@@ -2012,6 +2365,149 @@ mod tests {
         session
             .validate_persisted_state()
             .expect("attachment lifecycle state validates");
+    }
+
+    #[test]
+    fn historical_attachment_references_are_metadata_only() {
+        let dir = tempdir().expect("temp directory");
+        let database = dir.path().join("vault.sqlite3");
+        let source_path = dir.path().join("history-attachment.bin");
+        fs::write(&source_path, b"historical attachment bytes").expect("write attachment source");
+        let session = VaultSession::create(&database, TEST_PASSPHRASE).expect("create vault");
+        let item = VaultItem::secure_note("attachment history", "body");
+        let id = item.id;
+        session.put_item(&item, 1).expect("store owner");
+        let (summary, with_attachment_revision) = session
+            .add_attachment_from_path(id, 1, &source_path)
+            .expect("add attachment");
+        assert_eq!(with_attachment_revision, 2);
+        let without_attachment_revision = session
+            .delete_attachment(
+                id,
+                summary.id,
+                with_attachment_revision,
+                summary.revision,
+                99,
+            )
+            .expect("delete attachment");
+        assert_eq!(without_attachment_revision, 3);
+
+        assert_eq!(
+            session
+                .list_item_history_revisions(id, without_attachment_revision)
+                .expect("list attachment history"),
+            vec![2, 1]
+        );
+        let historical = session
+            .get_item_history(id, without_attachment_revision, 2)
+            .expect("fetch historical attachment reference");
+        assert_eq!(historical.attachments, vec![summary.id]);
+        assert!(
+            session
+                .get_item(id)
+                .expect("current owner")
+                .attachments
+                .is_empty()
+        );
+        assert!(
+            session
+                .storage
+                .list_attachment_chunks(summary.id)
+                .expect("deleted attachment chunks")
+                .is_empty()
+        );
+        session
+            .validate_persisted_state()
+            .expect("historical attachment reference is not live ownership");
+    }
+
+    #[test]
+    fn persisted_history_validation_rejects_non_active_snapshots() {
+        let dir = tempdir().expect("temp directory");
+        let database = dir.path().join("vault.sqlite3");
+        let session = VaultSession::create(&database, TEST_PASSPHRASE).expect("create vault");
+        let item = VaultItem::secure_note("owner", "body");
+        session.put_item(&item, 1).expect("store owner");
+
+        let trashed = encrypt_item_state(
+            &session.root_key,
+            &VaultItemState::Trashed {
+                item: item.clone(),
+                deleted_at_ms: 42,
+            },
+            2,
+        )
+        .expect("encrypt trashed state");
+        session
+            .storage
+            .update_item_if_revision(&trashed, 1)
+            .expect("install trashed current state");
+        let active = encrypt_item(&session.root_key, &item, 3).expect("encrypt active state");
+        session
+            .storage
+            .update_item_with_history_if_revision(&active, 2)
+            .expect("archive non-active state");
+
+        assert!(matches!(
+            session.validate_persisted_state(),
+            Err(VaultError::Crypto(CryptoError::InconsistentRecord))
+        ));
+    }
+
+    #[test]
+    fn persisted_history_validation_rejects_tombstone_owner() {
+        let dir = tempdir().expect("temp directory");
+        let database = dir.path().join("vault.sqlite3");
+        let session = VaultSession::create(&database, TEST_PASSPHRASE).expect("create vault");
+        let mut item = VaultItem::secure_note("owner", "body");
+        let id = item.id;
+        session.put_item(&item, 1).expect("store owner");
+        item.title = "edited".to_owned();
+        session
+            .update_item(&item, 1)
+            .expect("archive first revision");
+        let tombstone = encrypt_item_state(
+            &session.root_key,
+            &VaultItemState::Tombstone {
+                id,
+                deleted_at_ms: 50,
+            },
+            3,
+        )
+        .expect("encrypt tombstone");
+        session
+            .storage
+            .update_item_if_revision(&tombstone, 2)
+            .expect("install tombstone without purge cleanup");
+        assert!(matches!(
+            session.validate_persisted_state(),
+            Err(VaultError::Storage(StorageError::InconsistentEncryptedRow))
+        ));
+    }
+
+    #[test]
+    fn persisted_history_validation_authenticates_ciphertext() {
+        let dir = tempdir().expect("temp directory");
+        let database = dir.path().join("vault.sqlite3");
+        let session = VaultSession::create(&database, TEST_PASSPHRASE).expect("create vault");
+        let item = VaultItem::secure_note("owner", "body");
+
+        let mut tampered = encrypt_item(&session.root_key, &item, 1).expect("encrypt item");
+        tampered.ciphertext[0] ^= 1;
+        session
+            .storage
+            .insert_item(&tampered)
+            .expect("seed tampered current envelope");
+        let current = encrypt_item(&session.root_key, &item, 2).expect("encrypt current item");
+        session
+            .storage
+            .update_item_with_history_if_revision(&current, 1)
+            .expect("archive tampered envelope");
+
+        assert!(matches!(
+            session.validate_persisted_state(),
+            Err(VaultError::Crypto(CryptoError::Authentication))
+        ));
     }
 
     #[test]
