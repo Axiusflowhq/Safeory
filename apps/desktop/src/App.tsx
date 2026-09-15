@@ -227,6 +227,8 @@ type PossessionView = {
   id: string;
   revision: number;
   title: string;
+  category: string;
+  location: string;
   brand: string;
   model: string;
   purchase_date: string;
@@ -242,6 +244,8 @@ type PossessionDetailView = {
   id: string;
   revision: number;
   title: string;
+  category: string;
+  location: string;
   brand: string;
   model: string;
   serial_number: string;
@@ -459,6 +463,8 @@ type ItemHistoryDetail =
     } & ItemHistoryBase)
   | ({
       kind: "possession";
+      category: string;
+      location: string;
       brand: string;
       model: string;
       purchase_date: string;
@@ -5400,6 +5406,8 @@ function PossessionComposer({
   onError: (message: string | null) => void;
 }) {
   const [title, setTitle] = useState(possession?.title ?? "");
+  const [category, setCategory] = useState(possession?.category ?? "");
+  const [location, setLocation] = useState(possession?.location ?? "");
   const [brand, setBrand] = useState(possession?.brand ?? "");
   const [model, setModel] = useState(possession?.model ?? "");
   const [serialNumber, setSerialNumber] = useState("");
@@ -5448,6 +5456,8 @@ function PossessionComposer({
     try {
       const input = {
         title,
+        category,
+        location,
         brand,
         model,
         serialNumber,
@@ -5488,6 +5498,26 @@ function PossessionComposer({
           className="editor-title"
         />
         <div className="mt-8 grid gap-5 sm:grid-cols-2">
+          <Field label="Category">
+            <input
+              value={category}
+              autoComplete="off"
+              onChange={(event) => setCategory(event.target.value)}
+              className="field-input"
+              placeholder="Electronics, jewelry, furniture…"
+            />
+          </Field>
+          <Field label="Location">
+            <input
+              value={location}
+              autoComplete="off"
+              onChange={(event) => setLocation(event.target.value)}
+              className="field-input"
+              placeholder="Home office, garage, storage unit…"
+            />
+          </Field>
+        </div>
+        <div className="mt-5 grid gap-5 sm:grid-cols-2">
           <Field label="Brand">
             <input
               value={brand}
@@ -6349,6 +6379,8 @@ function ItemHistorySnapshot({
       break;
     case "possession":
       rows.push(
+        { label: "Category", value: detail.category },
+        { label: "Location", value: detail.location },
         { label: "Brand", value: detail.brand },
         { label: "Model", value: detail.model },
         { label: "Purchase date", value: detail.purchase_date },
@@ -8513,6 +8545,14 @@ function PossessionReader({
         {possession.title}
       </h1>
       <div className="mt-8 overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface-secondary)]">
+        <CredentialRow
+          label="Category"
+          value={possession.category || "Not set"}
+        />
+        <CredentialRow
+          label="Location"
+          value={possession.location || "Not set"}
+        />
         <CredentialRow label="Brand" value={possession.brand || "Not set"} />
         <CredentialRow label="Model" value={possession.model || "Not set"} />
         <CredentialRow
@@ -9235,7 +9275,7 @@ function EmptyVault({
                           : vehicle
                             ? "Store vehicle details locally with registration numbers and VINs hidden until you reveal them."
                             : possession
-                              ? "Store possession details locally with serial numbers hidden until you reveal them."
+                              ? "Track possessions by category and location, keep warranty details handy, and keep serial numbers hidden until you reveal them."
                               : "Track subscriptions locally with billing context and renewal dates. Safeory does not contact providers or process payments."}
         </p>
       </div>
@@ -9360,6 +9400,8 @@ function itemMatchesSearch(item: VaultItem, needle: string) {
     ].some((value) => value.toLocaleLowerCase().includes(needle));
   }
   return [
+    item.category,
+    item.location,
     item.brand,
     item.model,
     item.purchase_date,
@@ -9387,8 +9429,14 @@ function itemPreview(item: VaultItem) {
     return item.property_type || item.ownership || "Property";
   if (item.kind === "vehicle")
     return item.make || item.model || item.year || "Vehicle";
-  if (item.kind === "possession")
-    return item.brand || item.model || item.store || "Possession";
+  if (item.kind === "possession") {
+    const classification = [item.category, item.location]
+      .filter(Boolean)
+      .join(" · ");
+    return (
+      classification || item.brand || item.model || item.store || "Possession"
+    );
+  }
   return item.provider || item.plan || item.next_renewal || "Subscription";
 }
 

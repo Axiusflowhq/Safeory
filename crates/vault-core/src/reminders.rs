@@ -239,6 +239,8 @@ mod tests {
         );
         let bad_day = VaultItem::possession(
             "BadDay",
+            "",
+            "",
             "Brand",
             "Model",
             "SN",
@@ -265,6 +267,8 @@ mod tests {
 
         let item = VaultItem::possession(
             "Laptop",
+            "",
+            "",
             "Brand",
             "Model",
             "SN",
@@ -329,6 +333,8 @@ mod tests {
         );
         let pos = VaultItem::possession(
             "Pos",
+            "",
+            "",
             "Brand",
             "Model",
             "SN",

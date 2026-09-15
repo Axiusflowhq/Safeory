@@ -1614,6 +1614,8 @@ mod tests {
         session.put_item(&receipt, 1).expect("store receipt");
         let mut macbook = VaultItem::possession(
             "MacBook",
+            "Electronics",
+            "Home office",
             "Apple",
             "Pro 14",
             "SN123",

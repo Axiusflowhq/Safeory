@@ -16,7 +16,7 @@ Rule: cloud integration starts only after the local platform below is stable.
 | 3 | Property | ✅ Done — masked address/reference, ownership validation |
 | 4 | Insurance | ✅ Done — masked policy number, renewal feeds Today |
 | 5 | Vehicles | ✅ Done — make/model/year/renewal, reg/VIN masked, renewal feeds Today |
-| 6 | Valuable possessions | ✅ Done — brand/serial/purchase/warranty, serial masked, warranty feeds Today |
+| 6 | Valuable possessions | ✅ Done — category/location/brand/serial/purchase/warranty, serial masked, warranty feeds Today |
 
 ### OWNERSHIP
 | # | Item | Status |
@@ -63,7 +63,7 @@ Rule: cloud integration starts only after the local platform below is stable.
 4. Plan test (simulation) + preparedness score beyond today's local readiness checks.
 5. Sync: device auth, D1 metadata, R2 blobs, queues/notifications.
 6. OS keystore + biometric unlock; passkeys/TOTP.
-7. Expanded home inventory and account-closure automation. Local encrypted subscription tracking and credential closure planning are done; Safeory still does not contact providers, process subscription payments, cancel subscriptions, or close accounts automatically.
+7. Expanded home inventory and account-closure automation. Possessions now support local encrypted category/location metadata, and local encrypted subscription tracking plus credential closure planning are done; broader inventory workflows remain future work. Safeory still does not contact providers, process subscription payments, cancel subscriptions, or close accounts automatically.
 8. Email import, browser capture, mobile scanner, private-AI modes (local-first per spec).
 9. Version-history restore/rollback and richer audit metadata; bounded encrypted browse-only history is implemented locally (20 prior revisions/item), but restoring an old snapshot is intentionally deferred because historical attachment references may no longer have live attachment data. Family space and secure links remain future work.
 

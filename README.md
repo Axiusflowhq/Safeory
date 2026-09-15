@@ -85,8 +85,9 @@ Implemented now:
   item listing, credential revision plumbing, and stale-edit rejection,
 - portable Rust item-size bounds before encryption/persistence, with regression
   tests proving oversized creates/updates fail without replacing valid data,
-- Ownership Wallet: encrypted `vehicle`/`possession` records with masked list
-  projections and narrow secret reveal, dedicated encrypted `receipt` records
+- Ownership Wallet: encrypted `vehicle`/`possession` records, including optional
+  possession category/location metadata for local organization, with masked list
+  projections for registration/VIN/serial and narrow secret reveal; dedicated encrypted `receipt` records
   with masked references and return/refund Today tracking, plus encrypted
   cross-item `links` (receipt <-> possession, policy <-> vehicle) with title
   resolution, jump navigation, and stale-edit-safe link management,

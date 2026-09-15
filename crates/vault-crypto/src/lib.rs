@@ -19,7 +19,8 @@ const LEGACY_ITEM_PAYLOAD_SCHEMA_VERSION: u16 = 1;
 const LIFECYCLE_ITEM_PAYLOAD_SCHEMA_VERSION: u16 = 2;
 const ATTACHMENT_ITEM_PAYLOAD_SCHEMA_VERSION: u16 = 3;
 const LEGACY_DISPOSITION_ITEM_PAYLOAD_SCHEMA_VERSION: u16 = 4;
-const ITEM_PAYLOAD_SCHEMA_VERSION: u16 = 5;
+const ACCOUNT_CLOSURE_ITEM_PAYLOAD_SCHEMA_VERSION: u16 = 5;
+const ITEM_PAYLOAD_SCHEMA_VERSION: u16 = 6;
 const ATTACHMENT_PAYLOAD_SCHEMA_VERSION: u16 = 1;
 const ALGORITHM: &str = "xchacha20poly1305";
 const ITEM_WRAP_INFO: &[u8] = b"lifevault:v1:item-wrap";
@@ -743,6 +744,7 @@ pub fn decrypt_item_state(
 ) -> Result<VaultItemState, CryptoError> {
     ensure_supported(encrypted.format_version, &encrypted.algorithm)?;
     if encrypted.payload_schema_version != ITEM_PAYLOAD_SCHEMA_VERSION
+        && encrypted.payload_schema_version != ACCOUNT_CLOSURE_ITEM_PAYLOAD_SCHEMA_VERSION
         && encrypted.payload_schema_version != LEGACY_DISPOSITION_ITEM_PAYLOAD_SCHEMA_VERSION
         && encrypted.payload_schema_version != ATTACHMENT_ITEM_PAYLOAD_SCHEMA_VERSION
         && encrypted.payload_schema_version != LIFECYCLE_ITEM_PAYLOAD_SCHEMA_VERSION
@@ -797,7 +799,9 @@ pub fn decrypt_item_state(
         LEGACY_DISPOSITION_ITEM_PAYLOAD_SCHEMA_VERSION => {
             serde_json::from_slice::<PreClosureVaultItemState>(&plaintext)?.into()
         }
-        ITEM_PAYLOAD_SCHEMA_VERSION => serde_json::from_slice(&plaintext)?,
+        ACCOUNT_CLOSURE_ITEM_PAYLOAD_SCHEMA_VERSION | ITEM_PAYLOAD_SCHEMA_VERSION => {
+            serde_json::from_slice(&plaintext)?
+        }
         _ => return Err(CryptoError::UnsupportedFormat),
     };
     if state_object_id(&state) != encrypted.object_id {
@@ -1394,7 +1398,7 @@ mod tests {
     }
 
     #[test]
-    fn new_item_writes_use_account_closure_payload_v5() {
+    fn new_item_writes_use_payload_v6_and_preserve_account_closure_plan() {
         let root = AccountRootKey::generate().expect("root key");
         let mut item =
             VaultItem::password("account plan", "user", "secret", "https://example.test", "");
@@ -1404,13 +1408,13 @@ mod tests {
             instructions: "Export statements, then close manually.".to_owned(),
         };
 
-        let encrypted = encrypt_item(&root, &item, 1).expect("encrypt item payload v5");
+        let encrypted = encrypt_item(&root, &item, 1).expect("encrypt item payload v6");
         assert_eq!(
             encrypted.payload_schema_version,
             ITEM_PAYLOAD_SCHEMA_VERSION
         );
-        assert_eq!(ITEM_PAYLOAD_SCHEMA_VERSION, 5);
-        let restored = decrypt_item(&root, &encrypted).expect("decrypt item payload v5");
+        assert_eq!(ITEM_PAYLOAD_SCHEMA_VERSION, 6);
+        let restored = decrypt_item(&root, &encrypted).expect("decrypt item payload v6");
         assert_eq!(
             restored.legacy_disposition,
             LegacyDisposition::PrivateForever
@@ -1419,7 +1423,7 @@ mod tests {
     }
 
     #[test]
-    fn subscription_uses_existing_strict_payload_v5_shape() {
+    fn account_closure_payload_v5_remains_readable_with_subscription_kind() {
         let root = AccountRootKey::generate().expect("root key");
         let item = VaultItem::subscription(
             "Streaming",
@@ -1432,16 +1436,74 @@ mod tests {
             "local tracking only",
         );
 
-        let encrypted = encrypt_item(&root, &item, 1).expect("encrypt subscription payload");
+        let plaintext = serde_json::to_vec(&VaultItemState::Active { item: item.clone() })
+            .expect("serialize subscription payload v5");
+        let encrypted = encrypt_payload(
+            &root,
+            item.id,
+            &plaintext,
+            1,
+            ACCOUNT_CLOSURE_ITEM_PAYLOAD_SCHEMA_VERSION,
+        )
+        .expect("encrypt subscription payload v5");
+        assert_eq!(ACCOUNT_CLOSURE_ITEM_PAYLOAD_SCHEMA_VERSION, 5);
+        let restored = decrypt_item(&root, &encrypted).expect("decrypt subscription payload v5");
+        assert_eq!(restored.kind, ItemKind::Subscription);
+        assert_eq!(restored.fields, item.fields);
+        assert_eq!(restored.notes, item.notes);
+    }
+
+    #[test]
+    fn possession_inventory_fields_use_v6_and_v5_without_them_remains_readable() {
+        let root = AccountRootKey::generate().expect("root key");
+        let item = VaultItem::possession(
+            "Camera",
+            "Photography",
+            "Display cabinet",
+            "Example",
+            "Rangefinder",
+            "SERIAL-1",
+            "2020-01-01",
+            "500",
+            "Camera shop",
+            "",
+            "inventory metadata",
+        );
+        let encrypted = encrypt_item(&root, &item, 1).expect("encrypt possession payload v6");
         assert_eq!(
             encrypted.payload_schema_version,
             ITEM_PAYLOAD_SCHEMA_VERSION
         );
-        assert_eq!(ITEM_PAYLOAD_SCHEMA_VERSION, 5);
-        let restored = decrypt_item(&root, &encrypted).expect("decrypt subscription payload");
-        assert_eq!(restored.kind, ItemKind::Subscription);
-        assert_eq!(restored.fields, item.fields);
-        assert_eq!(restored.notes, item.notes);
+        assert_eq!(ITEM_PAYLOAD_SCHEMA_VERSION, 6);
+        let restored = decrypt_item(&root, &encrypted).expect("decrypt possession payload v6");
+        assert_eq!(
+            restored.fields.get("category").map(String::as_str),
+            Some("Photography")
+        );
+        assert_eq!(
+            restored.fields.get("location").map(String::as_str),
+            Some("Display cabinet")
+        );
+
+        let mut v5_item = item.clone();
+        v5_item.fields.remove("category");
+        v5_item.fields.remove("location");
+        let plaintext = serde_json::to_vec(&VaultItemState::Active {
+            item: v5_item.clone(),
+        })
+        .expect("serialize old-shaped possession payload v5");
+        let v5 = encrypt_payload(
+            &root,
+            v5_item.id,
+            &plaintext,
+            1,
+            ACCOUNT_CLOSURE_ITEM_PAYLOAD_SCHEMA_VERSION,
+        )
+        .expect("encrypt old-shaped possession payload v5");
+        let restored_v5 = decrypt_item(&root, &v5).expect("decrypt old-shaped possession v5");
+        assert_eq!(restored_v5.kind, ItemKind::Possession);
+        assert!(!restored_v5.fields.contains_key("category"));
+        assert!(!restored_v5.fields.contains_key("location"));
     }
 
     #[test]
@@ -1658,7 +1720,7 @@ mod tests {
     }
 
     #[test]
-    fn item_payload_v5_requires_a_valid_account_closure_plan() {
+    fn item_payload_v5_and_v6_require_a_valid_account_closure_plan() {
         let root = AccountRootKey::generate().expect("root key");
         let object_id = Uuid::new_v4();
         let base_item = serde_json::json!({
@@ -1681,12 +1743,17 @@ mod tests {
             "item": base_item.clone()
         }))
         .expect("serialize missing closure plan payload");
-        let missing = encrypt_payload(&root, object_id, &missing, 1, ITEM_PAYLOAD_SCHEMA_VERSION)
-            .expect("encrypt missing closure plan payload");
-        assert!(matches!(
-            decrypt_item_state(&root, &missing),
-            Err(CryptoError::Serialization(_))
-        ));
+        for schema_version in [
+            ACCOUNT_CLOSURE_ITEM_PAYLOAD_SCHEMA_VERSION,
+            ITEM_PAYLOAD_SCHEMA_VERSION,
+        ] {
+            let missing = encrypt_payload(&root, object_id, &missing, 1, schema_version)
+                .expect("encrypt missing closure plan payload");
+            assert!(matches!(
+                decrypt_item_state(&root, &missing),
+                Err(CryptoError::Serialization(_))
+            ));
+        }
 
         for account_closure_plan in [
             serde_json::json!({
@@ -1708,13 +1775,17 @@ mod tests {
                 "item": item
             }))
             .expect("serialize invalid closure plan payload");
-            let encrypted =
-                encrypt_payload(&root, object_id, &plaintext, 1, ITEM_PAYLOAD_SCHEMA_VERSION)
+            for schema_version in [
+                ACCOUNT_CLOSURE_ITEM_PAYLOAD_SCHEMA_VERSION,
+                ITEM_PAYLOAD_SCHEMA_VERSION,
+            ] {
+                let encrypted = encrypt_payload(&root, object_id, &plaintext, 1, schema_version)
                     .expect("encrypt invalid closure plan payload");
-            assert!(matches!(
-                decrypt_item_state(&root, &encrypted),
-                Err(CryptoError::Serialization(_))
-            ));
+                assert!(matches!(
+                    decrypt_item_state(&root, &encrypted),
+                    Err(CryptoError::Serialization(_))
+                ));
+            }
         }
     }
 

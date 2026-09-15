@@ -326,6 +326,8 @@ impl VaultItem {
     #[allow(clippy::too_many_arguments)]
     pub fn possession(
         title: impl Into<String>,
+        category: impl Into<String>,
+        location: impl Into<String>,
         brand: impl Into<String>,
         model: impl Into<String>,
         serial_number: impl Into<String>,
@@ -336,6 +338,8 @@ impl VaultItem {
         notes: impl Into<String>,
     ) -> Self {
         let mut fields = BTreeMap::new();
+        fields.insert("category".to_owned(), category.into().trim().to_owned());
+        fields.insert("location".to_owned(), location.into().trim().to_owned());
         fields.insert("brand".to_owned(), brand.into());
         fields.insert("model".to_owned(), model.into());
         fields.insert("serial_number".to_owned(), serial_number.into());
@@ -449,6 +453,8 @@ mod tests {
     fn possession_constructor_sets_warranty_fields() {
         let item = VaultItem::possession(
             "MacBook",
+            "  Electronics  ",
+            " Home office ",
             "Apple",
             "Pro 14",
             "SN123",
@@ -459,6 +465,14 @@ mod tests {
             "",
         );
         assert_eq!(item.kind, ItemKind::Possession);
+        assert_eq!(
+            item.fields.get("category").map(String::as_str),
+            Some("Electronics")
+        );
+        assert_eq!(
+            item.fields.get("location").map(String::as_str),
+            Some("Home office")
+        );
         assert_eq!(
             item.fields.get("warranty_expiry").map(String::as_str),
             Some("2027-01-15")

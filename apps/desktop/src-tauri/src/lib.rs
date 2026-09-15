@@ -585,6 +585,8 @@ struct PossessionView {
     id: String,
     revision: u64,
     title: String,
+    category: String,
+    location: String,
     brand: String,
     model: String,
     purchase_date: String,
@@ -601,6 +603,8 @@ struct PossessionDetailView {
     id: String,
     revision: u64,
     title: String,
+    category: String,
+    location: String,
     brand: String,
     model: String,
     serial_number: String,
@@ -741,6 +745,8 @@ enum VaultItemView {
         id: String,
         revision: u64,
         title: String,
+        category: String,
+        location: String,
         brand: String,
         model: String,
         purchase_date: String,
@@ -967,6 +973,8 @@ enum ItemHistoryDetailView {
         id: String,
         revision: u64,
         title: String,
+        category: String,
+        location: String,
         brand: String,
         model: String,
         purchase_date: String,
@@ -1564,6 +1572,8 @@ fn update_vehicle(
 fn create_possession(
     state: State<'_, VaultRuntime>,
     title: String,
+    category: String,
+    location: String,
     brand: String,
     model: String,
     serial_number: String,
@@ -1576,6 +1586,8 @@ fn create_possession(
     create_possession_impl(
         &state,
         title,
+        category,
+        location,
         brand,
         model,
         serial_number,
@@ -1603,6 +1615,8 @@ fn update_possession(
     id: String,
     revision: u64,
     title: String,
+    category: String,
+    location: String,
     brand: String,
     model: String,
     serial_number: String,
@@ -1617,6 +1631,8 @@ fn update_possession(
         id,
         revision,
         title,
+        category,
+        location,
         brand,
         model,
         serial_number,
@@ -2331,6 +2347,8 @@ fn list_vault_items_impl(state: &VaultRuntime) -> Result<Vec<VaultItemView>, Str
                     id: possession.id,
                     revision: possession.revision,
                     title: possession.title,
+                    category: possession.category,
+                    location: possession.location,
                     brand: possession.brand,
                     model: possession.model,
                     purchase_date: possession.purchase_date,
@@ -3351,6 +3369,8 @@ fn update_vehicle_impl(
 fn create_possession_impl(
     state: &VaultRuntime,
     title: String,
+    category: String,
+    location: String,
     brand: String,
     model: String,
     serial_number: String,
@@ -3370,6 +3390,8 @@ fn create_possession_impl(
         .ok_or_else(|| "Unlock the vault before creating a possession record.".to_owned())?;
     let item = VaultItem::possession(
         title,
+        category,
+        location,
         brand,
         model,
         serial_number,
@@ -3416,6 +3438,8 @@ fn update_possession_impl(
     id: String,
     revision: u64,
     title: String,
+    category: String,
+    location: String,
     brand: String,
     model: String,
     serial_number: String,
@@ -3448,7 +3472,9 @@ fn update_possession_impl(
     if existing.kind != ItemKind::Possession {
         return Err("Only possession records can be edited from this view.".to_owned());
     }
-    let mut fields = BTreeMap::new();
+    let mut fields = existing.fields.clone();
+    fields.insert("category".to_owned(), category.trim().to_owned());
+    fields.insert("location".to_owned(), location.trim().to_owned());
     fields.insert("brand".to_owned(), brand);
     fields.insert("model".to_owned(), model);
     fields.insert("serial_number".to_owned(), serial_number);
@@ -5338,6 +5364,8 @@ fn item_history_detail_view(
                 id: view.id,
                 revision,
                 title: view.title,
+                category: view.category,
+                location: view.location,
                 brand: view.brand,
                 model: view.model,
                 purchase_date: view.purchase_date,
@@ -5890,6 +5918,8 @@ fn vehicle_detail_view(item: VaultItem, revision: u64) -> Result<VehicleDetailVi
 }
 
 fn possession_view(item: VaultItem, revision: u64) -> Result<PossessionView, String> {
+    let category = item.fields.get("category").cloned().unwrap_or_default();
+    let location = item.fields.get("location").cloned().unwrap_or_default();
     let brand =
         item.fields.get("brand").cloned().ok_or_else(|| {
             "The encrypted possession record is missing its brand field.".to_owned()
@@ -5923,6 +5953,8 @@ fn possession_view(item: VaultItem, revision: u64) -> Result<PossessionView, Str
         id: item.id.to_string(),
         revision,
         title: item.title,
+        category,
+        location,
         brand,
         model,
         purchase_date,
@@ -5936,6 +5968,8 @@ fn possession_view(item: VaultItem, revision: u64) -> Result<PossessionView, Str
 }
 
 fn possession_detail_view(item: VaultItem, revision: u64) -> Result<PossessionDetailView, String> {
+    let category = item.fields.get("category").cloned().unwrap_or_default();
+    let location = item.fields.get("location").cloned().unwrap_or_default();
     let brand =
         item.fields.get("brand").cloned().ok_or_else(|| {
             "The encrypted possession record is missing its brand field.".to_owned()
@@ -5964,6 +5998,8 @@ fn possession_detail_view(item: VaultItem, revision: u64) -> Result<PossessionDe
         id: item.id.to_string(),
         revision,
         title: item.title,
+        category,
+        location,
         brand,
         model,
         serial_number,
@@ -6927,6 +6963,8 @@ mod tests {
         let possession = create_possession_impl(
             &runtime,
             "MacBook".to_owned(),
+            "  Electronics  ".to_owned(),
+            " Home office ".to_owned(),
             "Apple".to_owned(),
             "Pro 14".to_owned(),
             "SN123".to_owned(),
@@ -7123,6 +7161,8 @@ mod tests {
                 "Locked".to_owned(),
                 String::new(),
                 String::new(),
+                String::new(),
+                String::new(),
                 "serial".to_owned(),
                 String::new(),
                 String::new(),
@@ -7139,6 +7179,8 @@ mod tests {
                 possession.id,
                 possession.revision,
                 "Locked".to_owned(),
+                String::new(),
+                String::new(),
                 String::new(),
                 String::new(),
                 "serial".to_owned(),
@@ -7525,6 +7567,8 @@ mod tests {
             create_possession_impl(
                 &runtime,
                 String::new(),
+                String::new(),
+                String::new(),
                 "Apple".to_owned(),
                 "Pro 14".to_owned(),
                 "SN123".to_owned(),
@@ -7571,6 +7615,8 @@ mod tests {
         let possession = create_possession_impl(
             &runtime,
             "MacBook".to_owned(),
+            "Electronics".to_owned(),
+            "Home office".to_owned(),
             "Apple".to_owned(),
             "Pro 14".to_owned(),
             "SN123456".to_owned(),
@@ -7583,10 +7629,14 @@ mod tests {
         .expect("create possession");
         assert_eq!(possession.revision, 1);
         assert!(possession.has_serial_number);
+        assert_eq!(possession.category, "Electronics");
+        assert_eq!(possession.location, "Home office");
 
         let empty_possession = create_possession_impl(
             &runtime,
             "Desk".to_owned(),
+            "Furniture".to_owned(),
+            "Study".to_owned(),
             "IKEA".to_owned(),
             "Bekant".to_owned(),
             String::new(),
@@ -7607,6 +7657,8 @@ mod tests {
         assert!(serialized.contains("has_registration_number"));
         assert!(serialized.contains("has_vin"));
         assert!(serialized.contains("has_serial_number"));
+        assert!(serialized.contains("Electronics"));
+        assert!(serialized.contains("Home office"));
         assert!(!serialized.contains("KA01AB1234"));
         assert!(!serialized.contains("VIN1234567890"));
         assert!(!serialized.contains("SN123456"));
@@ -7622,6 +7674,8 @@ mod tests {
             get_possession_impl(&runtime, possession.id.clone(), possession.revision)
                 .expect("get possession detail");
         assert_eq!(possession_detail.serial_number, "SN123456");
+        assert_eq!(possession_detail.category, "Electronics");
+        assert_eq!(possession_detail.location, "Home office");
         assert_eq!(possession_detail.brand, "Apple");
         assert_eq!(possession_detail.notes, "work laptop");
 
@@ -7662,6 +7716,8 @@ mod tests {
                 .expect("load possession for linking");
             assert_eq!(current, 1);
             item.links.push(receipt_id);
+            item.fields
+                .insert("future_marker".to_owned(), "preserve me".to_owned());
             session
                 .update_item(&item, 1)
                 .expect("attach possession link");
@@ -7710,6 +7766,8 @@ mod tests {
             possession.id.clone(),
             2,
             "MacBook".to_owned(),
+            " Computers ".to_owned(),
+            "  Studio  ".to_owned(),
             "Apple".to_owned(),
             "Pro 14".to_owned(),
             "SN654321".to_owned(),
@@ -7722,6 +7780,8 @@ mod tests {
         .expect("update possession");
         assert_eq!(possession.revision, 3);
         assert!(possession.has_serial_number);
+        assert_eq!(possession.category, "Computers");
+        assert_eq!(possession.location, "Studio");
         {
             let session = lock_session(&runtime).expect("lock session");
             let session = session.as_ref().expect("unlocked session");
@@ -7737,11 +7797,28 @@ mod tests {
                 .get_item_with_revision(possession_id)
                 .expect("load updated possession");
             assert_eq!(item.links, vec![receipt_id]);
+            assert_eq!(
+                item.fields.get("future_marker").map(String::as_str),
+                Some("preserve me")
+            );
         }
         let possession_detail =
             get_possession_impl(&runtime, possession.id.clone(), possession.revision)
                 .expect("get updated possession detail");
         assert_eq!(possession_detail.serial_number, "SN654321");
+        assert_eq!(possession_detail.category, "Computers");
+        assert_eq!(possession_detail.location, "Studio");
+        let historical =
+            get_item_history_detail_impl(&runtime, possession.id.clone(), possession.revision, 2)
+                .expect("load prior possession classification");
+        assert!(matches!(
+            historical,
+            ItemHistoryDetailView::Possession {
+                category,
+                location,
+                ..
+            } if category == "Electronics" && location == "Home office"
+        ));
 
         let stale_vehicle = match update_vehicle_impl(
             &runtime,
@@ -7777,6 +7854,8 @@ mod tests {
             possession.id.clone(),
             1,
             "Stale".to_owned(),
+            String::new(),
+            String::new(),
             "Apple".to_owned(),
             "Pro 14".to_owned(),
             "STALE".to_owned(),
@@ -7840,6 +7919,8 @@ mod tests {
                 "Locked".to_owned(),
                 String::new(),
                 String::new(),
+                String::new(),
+                String::new(),
                 "serial".to_owned(),
                 String::new(),
                 String::new(),
@@ -7858,6 +7939,8 @@ mod tests {
                 "Locked".to_owned(),
                 String::new(),
                 String::new(),
+                String::new(),
+                String::new(),
                 "serial".to_owned(),
                 String::new(),
                 String::new(),
@@ -7868,6 +7951,98 @@ mod tests {
             .is_err()
         );
         unlock_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("unlock vault");
+    }
+
+    #[test]
+    fn possession_missing_inventory_fields_default_empty_and_survive_lifecycle() {
+        let (_directory, runtime) = runtime();
+        initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
+        let mut legacy = VaultItem::possession(
+            "Legacy camera",
+            "",
+            "",
+            "Example",
+            "Rangefinder",
+            "SERIAL-LEGACY",
+            "2020-01-01",
+            "500",
+            "Camera shop",
+            "",
+            "legacy possession",
+        );
+        legacy.fields.remove("category");
+        legacy.fields.remove("location");
+        let id = legacy.id;
+        {
+            let session = lock_session(&runtime).expect("lock session");
+            session
+                .as_ref()
+                .expect("unlocked session")
+                .put_item(&legacy, 1)
+                .expect("store old-shaped possession");
+        }
+
+        let listed = list_vault_items_impl(&runtime).expect("list old-shaped possession");
+        assert!(listed.iter().any(|view| matches!(
+            view,
+            VaultItemView::Possession {
+                id: listed_id,
+                category,
+                location,
+                ..
+            } if listed_id == &id.to_string() && category.is_empty() && location.is_empty()
+        )));
+        let detail = get_possession_impl(&runtime, id.to_string(), 1)
+            .expect("read old-shaped possession detail");
+        assert!(detail.category.is_empty());
+        assert!(detail.location.is_empty());
+
+        let updated = update_possession_impl(
+            &runtime,
+            id.to_string(),
+            1,
+            "Legacy camera".to_owned(),
+            "Photography".to_owned(),
+            "Display cabinet".to_owned(),
+            "Example".to_owned(),
+            "Rangefinder".to_owned(),
+            "SERIAL-LEGACY".to_owned(),
+            "2020-01-01".to_owned(),
+            "500".to_owned(),
+            "Camera shop".to_owned(),
+            String::new(),
+            "legacy possession".to_owned(),
+        )
+        .expect("add inventory metadata to old-shaped possession");
+        assert_eq!(updated.revision, 2);
+        assert_eq!(updated.category, "Photography");
+        assert_eq!(updated.location, "Display cabinet");
+
+        let historical = get_item_history_detail_impl(&runtime, id.to_string(), 2, 1)
+            .expect("read pre-inventory history snapshot");
+        assert!(matches!(
+            historical,
+            ItemHistoryDetailView::Possession {
+                category,
+                location,
+                ..
+            } if category.is_empty() && location.is_empty()
+        ));
+
+        let trashed_revision =
+            trash_item_impl(&runtime, id.to_string(), updated.revision).expect("trash possession");
+        let restored_revision =
+            restore_trashed_item_impl(&runtime, id.to_string(), trashed_revision)
+                .expect("restore possession");
+        let restored = get_possession_impl(&runtime, id.to_string(), restored_revision)
+            .expect("read restored possession");
+        assert_eq!(restored.category, "Photography");
+        assert_eq!(restored.location, "Display cabinet");
+        assert_eq!(
+            list_item_history_impl(&runtime, id.to_string(), restored_revision)
+                .expect("history survives possession lifecycle"),
+            vec![1]
+        );
     }
 
     #[test]
@@ -8246,6 +8421,8 @@ mod tests {
             (
                 VaultItem::possession(
                     "Laptop",
+                    "Electronics",
+                    "Home office",
                     "Brand",
                     "Model",
                     "SECRET-SERIAL",
@@ -8646,6 +8823,8 @@ mod tests {
         let possession = create_possession_impl(
             &runtime,
             "Deadline laptop".to_owned(),
+            "Electronics".to_owned(),
+            "Office".to_owned(),
             "Apple".to_owned(),
             "Pro 14".to_owned(),
             String::new(),
@@ -9143,6 +9322,21 @@ mod tests {
             "Export subscription note".to_owned(),
         )
         .expect("create export subscription");
+        create_possession_impl(
+            &runtime,
+            "Export camera".to_owned(),
+            "Photography".to_owned(),
+            "Display cabinet".to_owned(),
+            "Example".to_owned(),
+            "Rangefinder".to_owned(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            "export possession note".to_owned(),
+        )
+        .expect("create export possession");
         update_emergency_card_impl(
             &runtime,
             None,
@@ -9174,6 +9368,8 @@ mod tests {
         assert!(serialized.contains("review_manually"));
         assert!(serialized.contains("EXPORT-SUBSCRIPTION-PROVIDER"));
         assert!(serialized.contains("\"kind\":\"subscription\""));
+        assert!(serialized.contains("Photography"));
+        assert!(serialized.contains("Display cabinet"));
 
         let backup_path = directory
             .path()
@@ -9198,6 +9394,15 @@ mod tests {
                 .expect("list backup items")
                 .iter()
                 .any(|item| item.kind == ItemKind::Subscription)
+        );
+        assert!(
+            backup_session
+                .list_items()
+                .expect("list backup possessions")
+                .iter()
+                .any(|item| item.kind == ItemKind::Possession
+                    && item.fields.get("category").map(String::as_str) == Some("Photography")
+                    && item.fields.get("location").map(String::as_str) == Some("Display cabinet"))
         );
     }
 
@@ -10115,6 +10320,8 @@ mod tests {
         let possession = create_possession_impl(
             &runtime,
             "Pos".to_owned(),
+            String::new(),
+            String::new(),
             "Brand".to_owned(),
             "Model".to_owned(),
             String::new(),
