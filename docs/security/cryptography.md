@@ -105,7 +105,21 @@ Implemented additional domains (Trust Engine foundation):
   secret (fresh 128-bit salt per wrap) unwrapping the AccountRootKey with AAD
   `safeory:recovery-wrap:v1`. Argon2id is deliberately NOT used here: the
   recovery secret is already high-entropy, so a fast HKDF is the correct KDF;
-  Argon2id stays reserved for the low-entropy passphrase path.
+  Argon2id stays reserved for the low-entropy passphrase path. The desktop
+  exposes the generated key only inside the unlocked Settings flow. Save uses a
+  Rust-owned native dialog and writes the canonical 64-lowercase-hex key plus a
+  newline directly to a newly created user-selected file; existing destinations
+  are never overwritten and a partial output is removed on error or stale
+  session generation. Unix creation forces owner-only `0600` mode regardless of
+  the process umask, and Unix success also fsyncs the containing directory after
+  the file itself is synced so creation is durable across power loss. Print is
+  an explicit renderer action using a print-only
+  sheet. Saved files, OS print previews/spoolers, network printers, and PDF
+  printers are outside Safeory's erasure boundary and may retain plaintext.
+  Replacing the recovery key atomically replaces the singleton recovery wrap for
+  the live database. It does not rewrite historical encrypted backups: an older
+  backup retains the recovery wrap captured when that snapshot was created, and
+  restoring such a backup reintroduces that historical recovery configuration.
 - `safeory:v1:share-wrap` — per-envelope wrap key from an ephemeral-static
   X25519 DH shared secret, HKDF salt `SHA256(ephemeral_pub || recipient_pub)`,
   XChaCha20-Poly1305 payload with AAD binding sender/recipient/fingerprint/

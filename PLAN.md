@@ -47,7 +47,7 @@ Rule: cloud integration starts only after the local platform below is stable.
 | 18 | Zero-knowledge server | ⏸️ N/A yet — no server exists; architecture doc'd (`docs/architecture/overview.md`) |
 | 19 | Local encrypted vault | ✅ Done — SQLite ciphertext-only, rollback-journal tested |
 | 20 | E2EE sharing | 🟡 Crypto layer done (`vault-sharing`: X25519 ephemeral-static, fingerprint-bound, purpose-separated); no transport |
-| 21 | Recovery kit | ✅ Done — printable secret, install/confirm, unlock-with-kit, 2-of-3 social recovery crypto + e2e test |
+| 21 | Recovery kit | ✅ Done — save/print, install/confirm, live-key replacement, unlock-with-kit, 2-of-3 social recovery crypto + e2e test |
 | 22 | Device management | 🟡 Partial — auto-lock, lock-on-background, settings; no multi-device, no revoke, no travel mode |
 | 23 | Portable export | ✅ Done — readable JSON + encrypted DB backup to user-chosen paths |
 

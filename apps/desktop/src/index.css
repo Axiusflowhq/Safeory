@@ -93,6 +93,48 @@ button:disabled {
   box-shadow: 0 0 0 3px var(--primary-soft);
 }
 
+.recovery-print-sheet {
+  display: none;
+}
+
+@media print {
+  body * {
+    visibility: hidden !important;
+  }
+
+  .recovery-print-sheet,
+  .recovery-print-sheet * {
+    visibility: visible !important;
+  }
+
+  .recovery-print-sheet {
+    display: block;
+    position: absolute;
+    inset: 0;
+    padding: 32px;
+    background: white;
+    color: black;
+    font-family: ui-sans-serif, system-ui, sans-serif;
+  }
+
+  .recovery-print-sheet h1 {
+    margin: 0 0 24px;
+    font-size: 24px;
+  }
+
+  .recovery-print-sheet p {
+    max-width: 720px;
+    line-height: 1.5;
+  }
+
+  .recovery-print-secret {
+    overflow-wrap: anywhere;
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    font-size: 18px;
+    letter-spacing: 0.04em;
+  }
+}
+
 :focus-visible {
   outline: 2px solid var(--primary);
   outline-offset: 3px;

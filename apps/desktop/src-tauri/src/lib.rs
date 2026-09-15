@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs,
+    io::Write,
     path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex, MutexGuard,
@@ -761,6 +762,25 @@ struct DeadlineView {
 #[derive(serde::Serialize)]
 struct RecoveryStatusView {
     configured: bool,
+}
+
+struct GeneratedRecoverySecretView {
+    secret: Zeroizing<String>,
+    generation: u64,
+}
+
+impl serde::Serialize for GeneratedRecoverySecretView {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        let mut view = serializer.serialize_struct("GeneratedRecoverySecretView", 2)?;
+        view.serialize_field("secret", self.secret.as_str())?;
+        view.serialize_field("generation", &self.generation)?;
+        view.end()
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -1539,13 +1559,46 @@ fn list_deadlines(
 }
 
 #[tauri::command]
-fn generate_recovery_secret(state: State<'_, VaultRuntime>) -> Result<String, String> {
+fn generate_recovery_secret(
+    state: State<'_, VaultRuntime>,
+) -> Result<GeneratedRecoverySecretView, String> {
     generate_recovery_secret_impl(&state)
 }
 
 #[tauri::command]
-fn confirm_recovery_secret(state: State<'_, VaultRuntime>, secret: String) -> Result<(), String> {
-    confirm_recovery_secret_impl(&state, secret)
+fn confirm_recovery_secret(
+    state: State<'_, VaultRuntime>,
+    secret: String,
+    expected_generation: u64,
+) -> Result<(), String> {
+    confirm_recovery_secret_impl(&state, secret, expected_generation)
+}
+
+#[tauri::command]
+async fn save_recovery_secret(
+    app: tauri::AppHandle,
+    state: State<'_, VaultRuntime>,
+    secret: String,
+    expected_generation: u64,
+) -> Result<bool, String> {
+    let secret = Zeroizing::new(secret);
+    require_recovery_generation(&state, expected_generation, "saving the recovery key")?;
+    let selected = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .set_file_name("safeory-recovery-key.txt")
+            .blocking_save_file()
+    })
+    .await
+    .map_err(|_| "Unable to open the recovery-key save dialog.".to_owned())?;
+    let Some(selected) = selected else {
+        return Ok(false);
+    };
+    let destination = selected
+        .into_path()
+        .map_err(|_| "The selected recovery-key destination is unavailable.".to_owned())?;
+    save_recovery_secret_impl_for_generation(&state, &secret, expected_generation, &destination)?;
+    Ok(true)
 }
 
 #[tauri::command]
@@ -3446,28 +3499,136 @@ fn list_deadlines_impl(
         .collect())
 }
 
-fn generate_recovery_secret_impl(state: &VaultRuntime) -> Result<String, String> {
+fn generate_recovery_secret_impl(
+    state: &VaultRuntime,
+) -> Result<GeneratedRecoverySecretView, String> {
     let session = lock_session(state)?;
     if session.is_none() {
         return Err("Unlock the vault before generating a recovery secret.".to_owned());
     }
-    drop(session);
-    Ok(RecoverySecret::generate()
-        .map_err(safe_vault_error)?
-        .to_hex())
+    let generation = capture_session_generation(state);
+    let secret = Zeroizing::new(
+        RecoverySecret::generate()
+            .map_err(safe_vault_error)?
+            .to_hex(),
+    );
+    Ok(GeneratedRecoverySecretView { secret, generation })
 }
 
-fn confirm_recovery_secret_impl(state: &VaultRuntime, secret: String) -> Result<(), String> {
+fn confirm_recovery_secret_impl(
+    state: &VaultRuntime,
+    secret: String,
+    expected_generation: u64,
+) -> Result<(), String> {
+    let secret = Zeroizing::new(secret);
     let session = lock_session(state)?;
     let session = session
         .as_ref()
         .ok_or_else(|| "Unlock the vault before confirming the recovery secret.".to_owned())?;
+    if capture_session_generation(state) != expected_generation {
+        return Err(
+            "The vault session changed after this recovery key was generated. Generate a new recovery key and try again."
+                .to_owned(),
+        );
+    }
     let parsed = RecoverySecret::from_hex(secret.trim()).map_err(|_| {
         "The recovery secret is invalid. Check all 64 characters and try again.".to_owned()
     })?;
     session
         .install_recovery_kit(&parsed)
         .map_err(safe_vault_error)
+}
+
+fn require_recovery_generation(
+    state: &VaultRuntime,
+    expected_generation: u64,
+    action: &str,
+) -> Result<(), String> {
+    let session = lock_session(state)?;
+    if session.is_none() {
+        return Err(format!("Unlock the vault before {action}."));
+    }
+    if capture_session_generation(state) != expected_generation {
+        return Err(
+            "The vault session changed after this recovery key was generated. Generate a new recovery key and try again."
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn save_recovery_secret_impl_for_generation(
+    state: &VaultRuntime,
+    secret: &str,
+    expected_generation: u64,
+    destination: &Path,
+) -> Result<(), String> {
+    require_recovery_generation(state, expected_generation, "saving the recovery key")?;
+    let parsed = RecoverySecret::from_hex(secret.trim()).map_err(|_| {
+        "The recovery secret is invalid. Generate a new recovery key and try again.".to_owned()
+    })?;
+    let canonical = Zeroizing::new(parsed.to_hex());
+    const SESSION_CHANGED: &str = "The vault session changed while saving the recovery key. Generate a new recovery key and try again.";
+    if !is_session_generation_current(state, expected_generation) {
+        return Err(SESSION_CHANGED.to_owned());
+    }
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(destination)
+        .map_err(|_| {
+            "Unable to create the recovery-key file. Choose a new filename in a trusted location and try again."
+                .to_owned()
+        })?;
+    let write_result = (|| -> Result<(), std::io::Error> {
+        file.write_all(canonical.as_bytes())?;
+        file.write_all(b"\n")?;
+        file.sync_all()
+    })();
+    if write_result.is_err() {
+        let _ = fs::remove_file(destination);
+        let _ = sync_recovery_secret_parent(destination);
+        return Err(
+            "Unable to create the recovery-key file. Choose a new filename in a trusted location and try again."
+                .to_owned(),
+        );
+    }
+    if let Err(error) = sync_recovery_secret_parent(destination) {
+        let _ = fs::remove_file(destination);
+        let _ = sync_recovery_secret_parent(destination);
+        return Err(error);
+    }
+    if !is_session_generation_current(state, expected_generation) {
+        let _ = fs::remove_file(destination);
+        let _ = sync_recovery_secret_parent(destination);
+        return Err(SESSION_CHANGED.to_owned());
+    }
+    Ok(())
+}
+
+fn sync_recovery_secret_parent(destination: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        let parent = destination.parent().ok_or_else(|| {
+            "Unable to durably save the recovery-key file in this location.".to_owned()
+        })?;
+        fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|_| {
+                "Unable to durably save the recovery-key file in this location.".to_owned()
+            })
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = destination;
+        Ok(())
+    }
 }
 
 fn get_recovery_status_impl(state: &VaultRuntime) -> Result<RecoveryStatusView, String> {
@@ -4796,6 +4957,7 @@ pub fn run() {
             list_deadlines,
             generate_recovery_secret,
             confirm_recovery_secret,
+            save_recovery_secret,
             get_recovery_status,
             unlock_vault_with_recovery_kit,
             export_human_readable,
@@ -5162,9 +5324,10 @@ mod tests {
         let trashed = create_note_impl(&first, "Restart trash".to_owned(), "trash body".to_owned())
             .expect("create trash record");
         trash_item_impl(&first, trashed.id.clone(), trashed.revision).expect("trash record");
-        let recovery_secret =
-            generate_recovery_secret_impl(&first).expect("generate recovery secret");
-        confirm_recovery_secret_impl(&first, recovery_secret.clone()).expect("confirm recovery");
+        let recovery = generate_recovery_secret_impl(&first).expect("generate recovery secret");
+        confirm_recovery_secret_impl(&first, recovery.secret.to_string(), recovery.generation)
+            .expect("confirm recovery");
+        let recovery_secret = recovery.secret.to_string();
         update_device_settings_impl(&first, 30, false).expect("persist device settings");
         lock_vault_impl(&first).expect("lock before restart");
         drop(first);
@@ -6903,29 +7066,37 @@ mod tests {
         let status = get_recovery_status_impl(&runtime).expect("initial status");
         assert!(!status.configured);
 
-        let secret = generate_recovery_secret_impl(&runtime).expect("generate secret");
-        assert_eq!(secret.len(), 64);
-        assert!(secret.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        let generated = generate_recovery_secret_impl(&runtime).expect("generate secret");
+        assert_eq!(generated.secret.len(), 64);
+        assert!(
+            generated
+                .secret
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        );
         let still_empty = get_recovery_status_impl(&runtime).expect("status after generate");
         assert!(!still_empty.configured);
 
-        let bad = confirm_recovery_secret_impl(&runtime, "not-a-secret".to_owned())
-            .expect_err("bad secret must fail");
+        let bad =
+            confirm_recovery_secret_impl(&runtime, "not-a-secret".to_owned(), generated.generation)
+                .expect_err("bad secret must fail");
         assert_eq!(
             bad,
             "The recovery secret is invalid. Check all 64 characters and try again."
         );
 
-        confirm_recovery_secret_impl(&runtime, secret.clone()).expect("confirm secret");
+        confirm_recovery_secret_impl(&runtime, generated.secret.to_string(), generated.generation)
+            .expect("confirm secret");
         let configured = get_recovery_status_impl(&runtime).expect("configured status");
         assert!(configured.configured);
 
         lock_vault_impl(&runtime).expect("lock vault");
-        unlock_vault_with_recovery_kit_impl(&runtime, secret.clone()).expect("unlock with kit");
+        unlock_vault_with_recovery_kit_impl(&runtime, generated.secret.to_string())
+            .expect("unlock with kit");
         assert!(vault_status_impl(&runtime).expect("status").unlocked);
 
         lock_vault_impl(&runtime).expect("lock again");
-        let mut wrong_bytes = secret.clone();
+        let mut wrong_bytes = generated.secret.to_string();
         let first = wrong_bytes.remove(0);
         let flipped = if first == 'a' { 'b' } else { 'a' };
         wrong_bytes.insert(0, flipped);
@@ -6938,6 +7109,77 @@ mod tests {
             "Unable to unlock with this recovery kit. Check the secret and try again."
         );
         assert!(!vault_status_impl(&runtime).expect("locked status").unlocked);
+    }
+
+    #[test]
+    fn recovery_key_save_is_exact_and_stale_generation_cannot_publish() {
+        let (directory, runtime) = runtime();
+        initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
+        let generated = generate_recovery_secret_impl(&runtime).expect("generate secret");
+        let destination = directory.path().join("recovery-key.txt");
+
+        save_recovery_secret_impl_for_generation(
+            &runtime,
+            &generated.secret,
+            generated.generation,
+            &destination,
+        )
+        .expect("save recovery key");
+        assert_eq!(
+            fs::read_to_string(&destination).expect("read recovery key"),
+            format!("{}\n", generated.secret.as_str())
+        );
+
+        let existing = directory.path().join("existing-recovery-key.txt");
+        fs::write(&existing, b"existing recovery file\n").expect("seed existing file");
+        assert!(
+            save_recovery_secret_impl_for_generation(
+                &runtime,
+                &generated.secret,
+                generated.generation,
+                &existing,
+            )
+            .is_err()
+        );
+        assert_eq!(
+            fs::read_to_string(&existing).expect("existing destination survives"),
+            "existing recovery file\n"
+        );
+
+        lock_vault_impl(&runtime).expect("lock vault");
+        unlock_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("unlock vault");
+        let stale_destination = directory.path().join("stale-recovery-key.txt");
+        let error = save_recovery_secret_impl_for_generation(
+            &runtime,
+            &generated.secret,
+            generated.generation,
+            &stale_destination,
+        )
+        .expect_err("stale recovery key publication must fail");
+        assert!(error.contains("session changed"));
+        assert!(!stale_destination.exists());
+    }
+
+    #[test]
+    fn stale_generated_recovery_key_cannot_be_confirmed_after_reunlock() {
+        let (_directory, runtime) = runtime();
+        initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
+        let generated = generate_recovery_secret_impl(&runtime).expect("generate secret");
+
+        lock_vault_impl(&runtime).expect("lock vault");
+        unlock_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("unlock vault");
+        let error = confirm_recovery_secret_impl(
+            &runtime,
+            generated.secret.to_string(),
+            generated.generation,
+        )
+        .expect_err("stale generated key must fail");
+        assert!(error.contains("session changed"));
+        assert!(
+            !get_recovery_status_impl(&runtime)
+                .expect("recovery status")
+                .configured
+        );
     }
 
     #[test]
@@ -7088,10 +7330,10 @@ mod tests {
         let tombstone_revision =
             purge_trashed_item_impl(&source, purged.id.clone(), purge_trash_revision)
                 .expect("purge record into tombstone");
-        let recovery_secret =
-            generate_recovery_secret_impl(&source).expect("generate recovery secret");
-        confirm_recovery_secret_impl(&source, recovery_secret.clone())
+        let recovery = generate_recovery_secret_impl(&source).expect("generate recovery secret");
+        confirm_recovery_secret_impl(&source, recovery.secret.to_string(), recovery.generation)
             .expect("install recovery secret");
+        let recovery_secret = recovery.secret.to_string();
 
         let backup_path = source_directory.path().join("restore-source.sqlite3");
         backup_database_copy_impl(&source, backup_path.to_string_lossy().to_string())
@@ -7348,7 +7590,16 @@ mod tests {
         assert!(set_item_links_impl(&runtime, note.id.clone(), note.revision, Vec::new()).is_err());
         assert!(list_deadlines_impl(&runtime, 2026, 9, 15).is_err());
         assert!(generate_recovery_secret_impl(&runtime).is_err());
-        assert!(confirm_recovery_secret_impl(&runtime, "secret".to_owned()).is_err());
+        assert!(confirm_recovery_secret_impl(&runtime, "secret".to_owned(), 0).is_err());
+        assert!(
+            save_recovery_secret_impl_for_generation(
+                &runtime,
+                "00",
+                0,
+                &directory.path().join("locked-recovery-key.txt"),
+            )
+            .is_err()
+        );
         assert!(get_recovery_status_impl(&runtime).is_err());
         assert!(export_human_readable_impl(&runtime, "export.json".to_owned()).is_err());
         assert!(backup_database_copy_impl(&runtime, "backup.sqlite3".to_owned()).is_err());

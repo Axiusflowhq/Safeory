@@ -2291,6 +2291,38 @@ mod tests {
     }
 
     #[test]
+    fn recovery_kit_rotation_replaces_current_wrap_but_not_historical_backup() {
+        let dir = tempdir().expect("temp directory");
+        let database = dir.path().join("vault.sqlite3");
+        let historical_backup = dir.path().join("historical.sqlite3");
+        let session = VaultSession::create(&database, TEST_PASSPHRASE).expect("create vault");
+        let old_secret = RecoverySecret::generate().expect("old recovery secret");
+        session
+            .install_recovery_kit(&old_secret)
+            .expect("install old recovery kit");
+        session
+            .backup_database_to(&historical_backup)
+            .expect("create historical backup");
+
+        let new_secret = RecoverySecret::generate().expect("new recovery secret");
+        session
+            .install_recovery_kit(&new_secret)
+            .expect("replace recovery kit");
+        drop(session);
+
+        assert!(VaultSession::unlock_with_recovery_kit(&database, &old_secret).is_err());
+        drop(
+            VaultSession::unlock_with_recovery_kit(&database, &new_secret)
+                .expect("new recovery key unlocks current vault"),
+        );
+        drop(
+            VaultSession::unlock_with_recovery_kit(&historical_backup, &old_secret)
+                .expect("old recovery key still unlocks historical backup"),
+        );
+        assert!(VaultSession::unlock_with_recovery_kit(&historical_backup, &new_secret).is_err());
+    }
+
+    #[test]
     fn recovery_kit_missing_unlock_fails_with_not_initialized() {
         let dir = tempdir().expect("temp directory");
         let database = dir.path().join("vault.sqlite3");

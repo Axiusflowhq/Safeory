@@ -44,6 +44,11 @@ type DeviceSettings = {
   lock_on_background: boolean;
 };
 
+type GeneratedRecoverySecret = {
+  secret: string;
+  generation: number;
+};
+
 type NoteView = {
   id: string;
   revision: number;
@@ -1935,7 +1940,9 @@ function SettingsPanel({
   const [recoveryStatus, setRecoveryStatus] = useState<{
     configured: boolean;
   } | null>(null);
-  const [generatedSecret, setGeneratedSecret] = useState<string | null>(null);
+  const [generatedRecovery, setGeneratedRecovery] = useState<
+    (GeneratedRecoverySecret & { replacing: boolean }) | null
+  >(null);
   const [recoveryConfirm, setRecoveryConfirm] = useState("");
   const [recoveryBusy, setRecoveryBusy] = useState(false);
   const [backupBusy, setBackupBusy] = useState(false);
@@ -1957,20 +1964,22 @@ function SettingsPanel({
     return () => {
       active = false;
       // The recovery secret lives only in this panel's local state.
-      setGeneratedSecret(null);
+      setGeneratedRecovery(null);
       setRecoveryConfirm("");
     };
   }, [generation, isGenerationCurrent]);
 
-  async function generateRecoverySecret() {
+  async function generateRecoverySecret(replacing: boolean) {
     if (recoveryBusy) return;
     setRecoveryBusy(true);
     setPanelError(null);
     setStatus(null);
     try {
-      const secret = await invoke<string>("generate_recovery_secret");
+      const generated = await invoke<GeneratedRecoverySecret>(
+        "generate_recovery_secret",
+      );
       if (!isGenerationCurrent(generation)) return;
-      setGeneratedSecret(secret);
+      setGeneratedRecovery({ ...generated, replacing });
       setRecoveryConfirm("");
     } catch (reason) {
       if (isGenerationCurrent(generation)) setPanelError(readError(reason));
@@ -1981,8 +1990,8 @@ function SettingsPanel({
 
   async function confirmRecoverySecret(event: FormEvent) {
     event.preventDefault();
-    if (recoveryBusy || !generatedSecret) return;
-    if (recoveryConfirm !== generatedSecret) {
+    if (recoveryBusy || !generatedRecovery) return;
+    if (recoveryConfirm !== generatedRecovery.secret) {
       setPanelError(
         "The re-entered secret does not match the generated secret. Copy it carefully and try again.",
       );
@@ -1992,21 +2001,59 @@ function SettingsPanel({
     setPanelError(null);
     setStatus(null);
     try {
-      await invoke("confirm_recovery_secret", { secret: generatedSecret });
+      await invoke("confirm_recovery_secret", {
+        secret: generatedRecovery.secret,
+        expectedGeneration: generatedRecovery.generation,
+      });
       if (!isGenerationCurrent(generation)) return;
-      setGeneratedSecret(null);
+      const wasReplacement = generatedRecovery.replacing;
+      setGeneratedRecovery(null);
       setRecoveryConfirm("");
       const refreshed = await invoke<{ configured: boolean }>(
         "get_recovery_status",
       );
       if (!isGenerationCurrent(generation)) return;
       setRecoveryStatus(refreshed);
-      setStatus("Recovery kit confirmed and installed on this device.");
+      setStatus(
+        wasReplacement
+          ? "Recovery key replaced for the current vault. Older backup files may still accept the key they were created with."
+          : "Recovery kit confirmed and installed on this device.",
+      );
     } catch (reason) {
       if (isGenerationCurrent(generation)) setPanelError(readError(reason));
     } finally {
       if (isGenerationCurrent(generation)) setRecoveryBusy(false);
     }
+  }
+
+  async function saveRecoverySecret() {
+    if (recoveryBusy || !generatedRecovery) return;
+    setRecoveryBusy(true);
+    setPanelError(null);
+    setStatus(null);
+    try {
+      const saved = await invoke<boolean>("save_recovery_secret", {
+        secret: generatedRecovery.secret,
+        expectedGeneration: generatedRecovery.generation,
+      });
+      if (!isGenerationCurrent(generation)) return;
+      if (saved) {
+        setStatus(
+          "Recovery key saved. It becomes active for this vault only after you confirm it below.",
+        );
+      }
+    } catch (reason) {
+      if (isGenerationCurrent(generation)) setPanelError(readError(reason));
+    } finally {
+      if (isGenerationCurrent(generation)) setRecoveryBusy(false);
+    }
+  }
+
+  function cancelRecoverySecret() {
+    setGeneratedRecovery(null);
+    setRecoveryConfirm("");
+    setPanelError(null);
+    setStatus(null);
   }
 
   async function exportReadable() {
@@ -2326,58 +2373,102 @@ function SettingsPanel({
         <div className="mt-9 border-t border-[var(--border)] pt-8">
           <h2 className="text-base font-semibold">Recovery kit</h2>
           <p className="mt-1 text-sm leading-6 text-[var(--text-muted)]">
-            A printed recovery secret unlocks this vault when the master
+            A saved or printed recovery key unlocks this vault when the master
             passphrase is lost.
           </p>
           {recoveryStatus === null ? (
             <p className="mt-4 text-sm text-[var(--text-muted)]">
               Checking recovery status…
             </p>
-          ) : recoveryStatus.configured ? (
-            <div className="mt-4 rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] p-4">
-              <p className="text-sm font-medium">
-                Recovery kit is installed on this device.
-              </p>
-              <p className="mt-1 text-xs leading-5 text-[var(--text-muted)]">
-                The printed secret is the only way back if the master passphrase
-                is forgotten. Keep it somewhere safe and separate from this
-                device.
-              </p>
-            </div>
-          ) : generatedSecret === null ? (
-            <div className="mt-4">
-              <button
-                type="button"
-                onClick={() => void generateRecoverySecret()}
-                disabled={recoveryBusy}
-                className="rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] px-4 py-2.5 text-sm font-medium text-[var(--text-primary)] transition hover:bg-[var(--selected)] disabled:cursor-not-allowed disabled:opacity-55"
-              >
-                {recoveryBusy ? "Generating…" : "Generate recovery secret"}
-              </button>
-            </div>
-          ) : (
+          ) : generatedRecovery !== null ? (
             <form onSubmit={confirmRecoverySecret} className="mt-4 space-y-4">
               <div className="rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] p-4">
                 <div className="text-xs font-medium uppercase tracking-[0.12em] text-[var(--text-muted)]">
-                  Your recovery secret
+                  {generatedRecovery.replacing
+                    ? "Replacement recovery key"
+                    : "Your recovery key"}
                 </div>
                 <div className="mt-2 break-all font-mono text-sm leading-6 text-[var(--text-primary)]">
-                  {generatedSecret}
+                  {generatedRecovery.secret}
                 </div>
                 <p className="mt-2 text-xs leading-5 text-[var(--danger)]">
-                  Write this down now and keep it somewhere safe. It will not be
-                  shown again, and it is the only way back if the master
-                  passphrase is forgotten.
+                  Save or print this key before confirming it. It becomes active
+                  only after confirmation and will not be shown again afterward.
                 </p>
+                {generatedRecovery.replacing ? (
+                  <p className="mt-2 text-xs leading-5 text-[var(--text-muted)]">
+                    Your existing recovery key remains active until
+                    confirmation. Replacing it changes the current vault and
+                    future backups; historical backup files may still be
+                    unlockable with their old recovery key, and restoring one
+                    can restore that old recovery configuration.
+                  </p>
+                ) : null}
+                <p className="mt-2 text-xs leading-5 text-[var(--text-muted)]">
+                  Saved key files are plaintext bearer secrets. Cloud-synced
+                  folders may replicate them, and print previews, spoolers,
+                  network printers, or PDF printers may retain copies. Use a
+                  trusted offline location or printer when possible.
+                </p>
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void saveRecoverySecret()}
+                    disabled={recoveryBusy}
+                    className="flex items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm font-medium text-[var(--text-primary)] transition hover:bg-[var(--selected)] disabled:cursor-not-allowed disabled:opacity-55"
+                  >
+                    <HugeiconsIcon
+                      icon={Download01Icon}
+                      className="size-4"
+                      aria-hidden="true"
+                    />
+                    Save recovery key
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => window.print()}
+                    disabled={recoveryBusy}
+                    className="rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm font-medium text-[var(--text-primary)] transition hover:bg-[var(--selected)] disabled:cursor-not-allowed disabled:opacity-55"
+                  >
+                    Print recovery key
+                  </button>
+                  <button
+                    type="button"
+                    onClick={cancelRecoverySecret}
+                    disabled={recoveryBusy}
+                    className="rounded-xl border border-[var(--border)] px-3 py-2 text-sm font-medium text-[var(--text-muted)] transition hover:bg-[var(--selected)] disabled:cursor-not-allowed disabled:opacity-55"
+                  >
+                    Cancel
+                  </button>
+                </div>
               </div>
-              <Field label="Re-enter the secret to confirm">
+              <div className="recovery-print-sheet" aria-hidden="true">
+                <h1>Safeory recovery key</h1>
+                <p className="recovery-print-secret">
+                  {generatedRecovery.secret}
+                </p>
+                <p>
+                  Keep this key offline and separate from the device that stores
+                  your vault. This key becomes active only after you return to
+                  Safeory and confirm it.
+                </p>
+                {generatedRecovery.replacing ? (
+                  <p>
+                    This is a replacement key. Historical Safeory backup files
+                    may still accept the recovery key captured when they were
+                    created, and restoring one restores that historical recovery
+                    configuration.
+                  </p>
+                ) : null}
+              </div>
+              <Field label="Re-enter the key to confirm">
                 <input
                   value={recoveryConfirm}
                   autoComplete="off"
                   spellCheck={false}
                   onChange={(event) => setRecoveryConfirm(event.target.value)}
                   className="field-input font-mono"
-                  placeholder="Paste or type the secret again"
+                  placeholder="Type the recovery key again"
                 />
               </Field>
               <div className="flex justify-end">
@@ -2386,10 +2477,46 @@ function SettingsPanel({
                   disabled={recoveryBusy || !recoveryConfirm}
                   className="rounded-xl bg-[var(--primary)] px-4 py-2.5 text-sm font-medium text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-55"
                 >
-                  {recoveryBusy ? "Confirming…" : "Confirm recovery secret"}
+                  {recoveryBusy
+                    ? "Confirming…"
+                    : generatedRecovery.replacing
+                      ? "Replace recovery key"
+                      : "Confirm recovery key"}
                 </button>
               </div>
             </form>
+          ) : recoveryStatus.configured ? (
+            <div className="mt-4 rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] p-4">
+              <p className="text-sm font-medium">
+                Recovery kit is installed on this device.
+              </p>
+              <p className="mt-1 text-xs leading-5 text-[var(--text-muted)]">
+                The saved or printed key is the only way back if the master
+                passphrase is forgotten. Keep it somewhere safe and separate
+                from this device.
+              </p>
+              <div className="mt-4">
+                <button
+                  type="button"
+                  onClick={() => void generateRecoverySecret(true)}
+                  disabled={recoveryBusy}
+                  className="rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm font-medium text-[var(--text-primary)] transition hover:bg-[var(--selected)] disabled:cursor-not-allowed disabled:opacity-55"
+                >
+                  {recoveryBusy ? "Generating…" : "Replace recovery key"}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="mt-4">
+              <button
+                type="button"
+                onClick={() => void generateRecoverySecret(false)}
+                disabled={recoveryBusy}
+                className="rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] px-4 py-2.5 text-sm font-medium text-[var(--text-primary)] transition hover:bg-[var(--selected)] disabled:cursor-not-allowed disabled:opacity-55"
+              >
+                {recoveryBusy ? "Generating…" : "Generate recovery key"}
+              </button>
+            </div>
           )}
         </div>
 

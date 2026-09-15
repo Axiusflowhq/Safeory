@@ -36,8 +36,9 @@ Implemented now:
 - encrypted Emergency Card: selected records, emergency contacts, and
   instructions in one singleton record, hidden from lists, with stale-edit
   protection and graceful handling of trashed references,
-- no-backdoor recovery kit: printable high-entropy secret, install/confirm
-  flow, unlock-with-kit while locked, and threshold (2-of-3 style) social
+- no-backdoor recovery kit: high-entropy key with dedicated plaintext Save and
+  print workflows, explicit install/confirm, safe replacement for the live
+  vault, unlock-with-kit while locked, and threshold (2-of-3 style) social
   recovery plus sealed recovery-share envelopes at the crypto layer,
 - Trust Engine core: conditional access policies with fail-closed local
   evaluation (destruction/deny wins, private-forever, multi-approval,
