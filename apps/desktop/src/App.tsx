@@ -1,10 +1,12 @@
 import {
   Add01Icon,
+  Attachment01Icon,
   ArrowLeft01Icon,
   BankIcon,
   Building03Icon,
   Car01Icon,
   Contact01Icon,
+  DatabaseRestoreIcon,
   Delete02Icon,
   DocumentValidationIcon,
   Download01Icon,
@@ -26,7 +28,7 @@ import {
 import { HugeiconsIcon } from "@hugeicons/react";
 import { ShieldKeyholeBoldIcon } from "@solar-icons/react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
-import { save } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { SessionFence } from "./sessionFence";
 
@@ -285,6 +287,18 @@ type DeadlineRow = {
   days_until: number;
 };
 
+type AttachmentSummary = {
+  id: string;
+  revision: number;
+  filename: string;
+  plaintext_size: number;
+};
+
+type AttachmentAddResult = {
+  attachment: AttachmentSummary;
+  item_revision: number;
+};
+
 type LinkedSectionProps = {
   linkedTitles: ItemTitle[];
   allItems: VaultItem[];
@@ -398,8 +412,7 @@ export default function App() {
       });
   }, [screen, sessionFence]);
 
-  const selectedForLinks =
-    items.find((item) => item.id === selectedId) ?? null;
+  const selectedForLinks = items.find((item) => item.id === selectedId) ?? null;
   // Stable effect key carrying both the selected id and its link ids, so the
   // titles request is keyed by selected.id and never reads a stale closure.
   const selectedLinksKey = selectedForLinks
@@ -824,6 +837,12 @@ export default function App() {
           isGenerationCurrent={isSessionGenerationCurrent}
           onClose={() => setSettingsOpen(false)}
           onSettingsSaved={setDeviceSettings}
+          onVaultRestored={() => {
+            sessionFence.invalidate();
+            clearPlaintextUi();
+            setError(null);
+            setScreen("locked");
+          }}
           onError={setError}
         />
       ) : null}
@@ -1749,6 +1768,7 @@ function SettingsPanel({
   isGenerationCurrent,
   onClose,
   onSettingsSaved,
+  onVaultRestored,
   onError,
 }: {
   settings: DeviceSettings;
@@ -1756,6 +1776,7 @@ function SettingsPanel({
   isGenerationCurrent: (generation: number) => boolean;
   onClose: () => void;
   onSettingsSaved: (settings: DeviceSettings) => void;
+  onVaultRestored: () => void;
   onError: (message: string | null) => void;
 }) {
   const [autoLockMinutes, setAutoLockMinutes] = useState(
@@ -1778,6 +1799,9 @@ function SettingsPanel({
   const [recoveryConfirm, setRecoveryConfirm] = useState("");
   const [recoveryBusy, setRecoveryBusy] = useState(false);
   const [backupBusy, setBackupBusy] = useState(false);
+  const [restorePath, setRestorePath] = useState<string | null>(null);
+  const [restorePassphrase, setRestorePassphrase] = useState("");
+  const [restoreBusy, setRestoreBusy] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -1884,6 +1908,59 @@ function SettingsPanel({
       if (isGenerationCurrent(generation)) setPanelError(readError(reason));
     } finally {
       if (isGenerationCurrent(generation)) setBackupBusy(false);
+    }
+  }
+
+  async function chooseRestoreBackup() {
+    if (restoreBusy) return;
+    setPanelError(null);
+    const selected = await open({
+      multiple: false,
+      filters: [
+        {
+          name: "Safeory encrypted backup",
+          extensions: ["sqlite3", "db"],
+        },
+      ],
+    });
+    if (typeof selected === "string") {
+      setRestorePath(selected);
+      setRestorePassphrase("");
+      setStatus(null);
+    }
+  }
+
+  async function restoreDatabase(event: FormEvent) {
+    event.preventDefault();
+    if (restoreBusy || restorePath === null || !restorePassphrase) return;
+    if (
+      !window.confirm(
+        "Replace the current local vault with this encrypted backup? Current records not present in the backup will be removed.",
+      )
+    ) {
+      return;
+    }
+    setRestoreBusy(true);
+    setPanelError(null);
+    setStatus(null);
+    try {
+      const status = await invoke<VaultStatus>("restore_database_backup", {
+        path: restorePath,
+        passphrase: restorePassphrase,
+      });
+      if (!isGenerationCurrent(generation)) return;
+      if (!status.initialized || status.unlocked) {
+        throw new Error(
+          "The restored vault did not enter the expected locked state.",
+        );
+      }
+      setRestorePassphrase("");
+      setRestorePath(null);
+      onVaultRestored();
+    } catch (reason) {
+      if (isGenerationCurrent(generation)) setPanelError(readError(reason));
+    } finally {
+      if (isGenerationCurrent(generation)) setRestoreBusy(false);
     }
   }
 
@@ -2122,9 +2199,9 @@ function SettingsPanel({
                 Recovery kit is installed on this device.
               </p>
               <p className="mt-1 text-xs leading-5 text-[var(--text-muted)]">
-                The printed secret is the only way back if the master
-                passphrase is forgotten. Keep it somewhere safe and separate
-                from this device.
+                The printed secret is the only way back if the master passphrase
+                is forgotten. Keep it somewhere safe and separate from this
+                device.
               </p>
             </div>
           ) : generatedSecret === null ? (
@@ -2148,8 +2225,8 @@ function SettingsPanel({
                   {generatedSecret}
                 </div>
                 <p className="mt-2 text-xs leading-5 text-[var(--danger)]">
-                  Write this down now and keep it somewhere safe. It will not
-                  be shown again, and it is the only way back if the master
+                  Write this down now and keep it somewhere safe. It will not be
+                  shown again, and it is the only way back if the master
                   passphrase is forgotten.
                 </p>
               </div>
@@ -2179,8 +2256,10 @@ function SettingsPanel({
         <div className="mt-9 border-t border-[var(--border)] pt-8">
           <h2 className="text-base font-semibold">Backup &amp; export</h2>
           <p className="mt-1 text-sm leading-6 text-[var(--text-muted)]">
-            Export a readable copy of the vault or back up the encrypted
-            database file.
+            Readable JSON contains decrypted active records, excludes Trash, and
+            does not include attachment files. The encrypted backup preserves
+            the complete local vault, including attachments, Trash, tombstones,
+            and recovery configuration.
           </p>
           <div className="mt-4 flex flex-wrap gap-2">
             <button
@@ -2210,6 +2289,64 @@ function SettingsPanel({
               {backupBusy ? "Working…" : "Backup encrypted database"}
             </button>
           </div>
+
+          <form
+            onSubmit={restoreDatabase}
+            className="mt-6 rounded-2xl border border-[var(--danger-border)] bg-[var(--danger-soft)] p-4"
+          >
+            <div className="flex items-start gap-3">
+              <HugeiconsIcon
+                icon={DatabaseRestoreIcon}
+                className="mt-0.5 size-5 shrink-0 text-[var(--danger)]"
+                aria-hidden="true"
+              />
+              <div>
+                <div className="text-sm font-semibold">
+                  Restore encrypted backup
+                </div>
+                <p className="mt-1 text-xs leading-5 text-[var(--text-muted)]">
+                  Safeory validates the selected backup before atomically
+                  replacing encrypted vault data. Device-only lock settings are
+                  kept. A successful restore ends locked.
+                </p>
+              </div>
+            </div>
+            <div className="mt-4 space-y-4">
+              <button
+                type="button"
+                onClick={() => void chooseRestoreBackup()}
+                disabled={restoreBusy}
+                className="w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-4 py-2.5 text-left text-sm text-[var(--text-primary)] transition hover:bg-[var(--selected)] disabled:cursor-not-allowed disabled:opacity-55"
+              >
+                {restorePath ?? "Choose encrypted backup…"}
+              </button>
+              {restorePath !== null ? (
+                <Field label="Backup master passphrase">
+                  <input
+                    type="password"
+                    autoComplete="off"
+                    value={restorePassphrase}
+                    onChange={(event) =>
+                      setRestorePassphrase(event.target.value)
+                    }
+                    className="field-input"
+                    placeholder="Passphrase used by this backup"
+                  />
+                </Field>
+              ) : null}
+            </div>
+            <div className="mt-4 flex justify-end">
+              <button
+                type="submit"
+                disabled={
+                  restoreBusy || restorePath === null || !restorePassphrase
+                }
+                className="rounded-xl bg-[var(--danger)] px-4 py-2.5 text-sm font-medium text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-55"
+              >
+                {restoreBusy ? "Validating…" : "Validate and restore"}
+              </button>
+            </div>
+          </form>
         </div>
       </section>
     </div>
@@ -2232,12 +2369,16 @@ function AccessScreen({
   const [busy, setBusy] = useState(false);
   const [recoveryMode, setRecoveryMode] = useState(false);
   const [recoverySecret, setRecoverySecret] = useState("");
+  const [restoreMode, setRestoreMode] = useState(false);
+  const [restorePath, setRestorePath] = useState<string | null>(null);
+  const [restorePassphrase, setRestorePassphrase] = useState("");
   const creating = mode === "setup";
 
   useEffect(() => {
     return () => {
       // The recovery secret lives only in this screen's local state.
       setRecoverySecret("");
+      setRestorePassphrase("");
     };
   }, []);
 
@@ -2286,6 +2427,49 @@ function AccessScreen({
     }
   }
 
+  async function chooseInitialRestoreBackup() {
+    onError(null);
+    const selected = await open({
+      multiple: false,
+      filters: [
+        {
+          name: "Safeory encrypted backup",
+          extensions: ["sqlite3", "db"],
+        },
+      ],
+    });
+    if (typeof selected === "string") {
+      setRestorePath(selected);
+      setRestorePassphrase("");
+    }
+  }
+
+  async function submitInitialRestore(event: FormEvent) {
+    event.preventDefault();
+    onError(null);
+    if (restorePath === null || !restorePassphrase) return;
+    setBusy(true);
+    try {
+      const status = await invoke<VaultStatus>("restore_database_backup", {
+        path: restorePath,
+        passphrase: restorePassphrase,
+      });
+      if (!status.initialized) {
+        throw new Error("The selected backup was not installed.");
+      }
+      await invoke<VaultStatus>("unlock_vault", {
+        passphrase: restorePassphrase,
+      });
+      setRestorePassphrase("");
+      setRestorePath(null);
+      onauccess();
+    } catch (reason) {
+      onError(readError(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <main className="grid min-h-screen place-items-center bg-[var(--surface)] px-6 text-[var(--text-primary)]">
       <div className="w-full max-w-[420px]">
@@ -2301,7 +2485,71 @@ function AccessScreen({
             : "Enter your master passphrase to decrypt the local vault on this device."}
         </p>
 
-        {recoveryMode && !creating ? (
+        {creating && restoreMode ? (
+          <form className="mt-8 space-y-4" onSubmit={submitInitialRestore}>
+            <div className="rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] p-4">
+              <div className="flex items-start gap-3">
+                <HugeiconsIcon
+                  icon={DatabaseRestoreIcon}
+                  className="mt-0.5 size-5 shrink-0 text-[var(--primary)]"
+                  aria-hidden="true"
+                />
+                <div>
+                  <div className="text-sm font-semibold">
+                    Restore an encrypted Safeory backup
+                  </div>
+                  <p className="mt-1 text-xs leading-5 text-[var(--text-muted)]">
+                    The backup is validated on a staged copy before it becomes
+                    this device&apos;s local vault.
+                  </p>
+                </div>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => void chooseInitialRestoreBackup()}
+              disabled={busy}
+              className="w-full rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] px-4 py-3 text-left text-sm text-[var(--text-primary)] transition hover:bg-[var(--selected)] disabled:cursor-not-allowed disabled:opacity-55"
+            >
+              {restorePath ?? "Choose encrypted backup…"}
+            </button>
+            {restorePath !== null ? (
+              <Field label="Backup master passphrase">
+                <input
+                  autoFocus
+                  type="password"
+                  autoComplete="off"
+                  value={restorePassphrase}
+                  onChange={(event) => setRestorePassphrase(event.target.value)}
+                  className="field-input"
+                  placeholder="Passphrase used by this backup"
+                />
+              </Field>
+            ) : null}
+
+            {error ? (
+              <div
+                role="alert"
+                className="rounded-xl border border-[var(--danger-border)] bg-[var(--danger-soft)] px-4 py-3 text-sm text-[var(--danger)]"
+              >
+                {error}
+              </div>
+            ) : null}
+
+            <button
+              type="submit"
+              disabled={busy || restorePath === null || !restorePassphrase}
+              className="mt-2 flex w-full items-center justify-center gap-2 rounded-xl bg-[var(--primary)] px-4 py-3 text-sm font-medium text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-55"
+            >
+              <HugeiconsIcon
+                icon={DatabaseRestoreIcon}
+                className="size-4"
+                aria-hidden="true"
+              />
+              {busy ? "Validating…" : "Restore backup"}
+            </button>
+          </form>
+        ) : recoveryMode && !creating ? (
           <form className="mt-8 space-y-4" onSubmit={submitRecovery}>
             <Field label="Recovery secret">
               <input
@@ -2390,7 +2638,24 @@ function AccessScreen({
           </form>
         )}
 
-        {!creating ? (
+        {creating ? (
+          <button
+            type="button"
+            onClick={() => {
+              setRestoreMode((current) => !current);
+              setRestorePath(null);
+              setRestorePassphrase("");
+              setPassphrase("");
+              setConfirmation("");
+              onError(null);
+            }}
+            className="mt-4 text-sm text-[var(--text-muted)] underline-offset-4 transition hover:text-[var(--text-primary)] hover:underline"
+          >
+            {restoreMode
+              ? "Create a new vault instead"
+              : "Restore an encrypted backup instead"}
+          </button>
+        ) : (
           <button
             type="button"
             onClick={() => {
@@ -2403,11 +2668,11 @@ function AccessScreen({
               ? "Use your passphrase instead"
               : "Use a recovery kit instead"}
           </button>
-        ) : null}
+        )}
 
         <p className="mt-6 text-xs leading-5 text-[var(--text-muted)]">
-          Recovery, cloud sync, trusted people, and emergency access are not
-          enabled in this phase.
+          Local encrypted backup and recovery-kit unlock are available. Cloud
+          sync, trusted people, and emergency access are not enabled yet.
         </p>
       </div>
     </main>
@@ -3383,11 +3648,7 @@ function VehicleComposer({
   generation: number;
   isGenerationCurrent: (generation: number) => boolean;
   onCancel: () => void;
-  onSaved: (
-    vehicle: VehicleView,
-    created: boolean,
-    generation: number,
-  ) => void;
+  onSaved: (vehicle: VehicleView, created: boolean, generation: number) => void;
   onError: (message: string | null) => void;
 }) {
   const [title, setTitle] = useState(vehicle?.title ?? "");
@@ -3868,7 +4129,11 @@ function LinkedRecordsSection({
     <div className="mt-8">
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-[0.12em] text-[var(--text-muted)]">
-          <HugeiconsIcon icon={Link01Icon} className="size-4" aria-hidden="true" />
+          <HugeiconsIcon
+            icon={Link01Icon}
+            className="size-4"
+            aria-hidden="true"
+          />
           Linked records
         </div>
         <button
@@ -3983,6 +4248,225 @@ function LinkedRecordsSection({
   );
 }
 
+function formatAttachmentSize(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB"];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value >= 10 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
+}
+
+function AttachmentsSection({
+  ownerItemId,
+  revision,
+  generation,
+  isGenerationCurrent,
+  onAttachmentsChanged,
+  onError,
+}: {
+  ownerItemId: string;
+  revision: number;
+  generation: number;
+  isGenerationCurrent: (generation: number) => boolean;
+  onAttachmentsChanged: () => void;
+  onError: (message: string | null) => void;
+}) {
+  const [attachments, setAttachments] = useState<AttachmentSummary[]>([]);
+  const [itemRevision, setItemRevision] = useState(revision);
+  const [loading, setLoading] = useState(true);
+  const [adding, setAdding] = useState(false);
+  const [activeAction, setActiveAction] = useState<string | null>(null);
+
+  useEffect(() => {
+    setItemRevision(revision);
+  }, [revision]);
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    void invoke<AttachmentSummary[]>("list_attachments", {
+      ownerItemId,
+    })
+      .then((loaded) => {
+        if (!active || !isGenerationCurrent(generation)) return;
+        setAttachments(loaded);
+      })
+      .catch((reason: unknown) => {
+        if (active && isGenerationCurrent(generation)) {
+          onError(readError(reason));
+        }
+      })
+      .finally(() => {
+        if (active && isGenerationCurrent(generation)) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [generation, isGenerationCurrent, onError, ownerItemId]);
+
+  async function addAttachment() {
+    if (adding || activeAction !== null || attachments.length >= 16) return;
+    setAdding(true);
+    onError(null);
+    try {
+      const result = await invoke<AttachmentAddResult | null>(
+        "add_attachment",
+        {
+          ownerItemId,
+          expectedItemRevision: itemRevision,
+        },
+      );
+      if (!isGenerationCurrent(generation)) return;
+      if (result === null) return;
+      setAttachments((current) => [...current, result.attachment]);
+      setItemRevision(result.item_revision);
+      onAttachmentsChanged();
+    } catch (reason) {
+      if (isGenerationCurrent(generation)) onError(readError(reason));
+    } finally {
+      if (isGenerationCurrent(generation)) setAdding(false);
+    }
+  }
+
+  async function exportAttachment(attachment: AttachmentSummary) {
+    if (adding || activeAction !== null) return;
+    setActiveAction(`export:${attachment.id}`);
+    onError(null);
+    try {
+      await invoke<boolean>("export_attachment", {
+        ownerItemId,
+        attachmentId: attachment.id,
+      });
+      if (!isGenerationCurrent(generation)) return;
+    } catch (reason) {
+      if (isGenerationCurrent(generation)) onError(readError(reason));
+    } finally {
+      if (isGenerationCurrent(generation)) setActiveAction(null);
+    }
+  }
+
+  async function deleteAttachment(attachment: AttachmentSummary) {
+    if (adding || activeAction !== null) return;
+    if (!window.confirm(`Delete ${attachment.filename} permanently?`)) return;
+    setActiveAction(`delete:${attachment.id}`);
+    onError(null);
+    try {
+      const nextRevision = await invoke<number>("delete_attachment", {
+        ownerItemId,
+        attachmentId: attachment.id,
+        expectedItemRevision: itemRevision,
+        expectedAttachmentRevision: attachment.revision,
+      });
+      if (!isGenerationCurrent(generation)) return;
+      setAttachments((current) =>
+        current.filter((candidate) => candidate.id !== attachment.id),
+      );
+      setItemRevision(nextRevision);
+      onAttachmentsChanged();
+    } catch (reason) {
+      if (isGenerationCurrent(generation)) onError(readError(reason));
+    } finally {
+      if (isGenerationCurrent(generation)) setActiveAction(null);
+    }
+  }
+
+  const busy = adding || activeAction !== null;
+
+  return (
+    <div className="mt-8">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-[0.12em] text-[var(--text-muted)]">
+          <HugeiconsIcon
+            icon={Attachment01Icon}
+            className="size-4"
+            aria-hidden="true"
+          />
+          Attachments
+        </div>
+        <button
+          type="button"
+          onClick={() => void addAttachment()}
+          disabled={busy || loading || attachments.length >= 16}
+          className="flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs text-[var(--text-muted)] transition hover:bg-[var(--selected)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-55"
+        >
+          <HugeiconsIcon
+            icon={Add01Icon}
+            className="size-4"
+            aria-hidden="true"
+          />
+          {adding
+            ? "Adding…"
+            : attachments.length >= 16
+              ? "Attachment limit reached"
+              : "Add attachment"}
+        </button>
+      </div>
+      {loading ? (
+        <p className="mt-3 text-sm text-[var(--text-muted)]">
+          Loading attachments…
+        </p>
+      ) : attachments.length === 0 ? (
+        <p className="mt-3 text-sm text-[var(--text-muted)]">
+          No attachments yet.
+        </p>
+      ) : (
+        <div className="mt-3 overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface-secondary)]">
+          {attachments.map((attachment) => {
+            const exporting = activeAction === `export:${attachment.id}`;
+            const deleting = activeAction === `delete:${attachment.id}`;
+            return (
+              <div
+                key={attachment.id}
+                className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-4 px-5 py-4 [&+&]:border-t [&+&]:border-[var(--border)]"
+              >
+                <div className="min-w-0">
+                  <div className="truncate text-sm font-medium text-[var(--text-primary)]">
+                    {attachment.filename}
+                  </div>
+                  <div className="mt-0.5 text-xs text-[var(--text-muted)]">
+                    {formatAttachmentSize(attachment.plaintext_size)}
+                  </div>
+                </div>
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => void exportAttachment(attachment)}
+                    disabled={busy}
+                    className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs text-[var(--text-muted)] transition hover:bg-[var(--selected)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-55"
+                  >
+                    <HugeiconsIcon
+                      icon={Download01Icon}
+                      className="size-4"
+                      aria-hidden="true"
+                    />
+                    {exporting ? "Saving…" : "Save"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void deleteAttachment(attachment)}
+                    disabled={busy}
+                    className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs text-[var(--danger)] transition hover:bg-[var(--danger-soft)] disabled:cursor-not-allowed disabled:opacity-55"
+                  >
+                    <HugeiconsIcon
+                      icon={Delete02Icon}
+                      className="size-4"
+                      aria-hidden="true"
+                    />
+                    {deleting ? "Deleting…" : "Delete"}
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
 function NoteReader({
   note,
   generation,
@@ -4011,6 +4495,15 @@ function NoteReader({
           <span className="text-[var(--text-muted)]">This note is empty.</span>
         )}
       </div>
+      <AttachmentsSection
+        key={note.id}
+        ownerItemId={note.id}
+        revision={note.revision}
+        generation={generation}
+        isGenerationCurrent={isGenerationCurrent}
+        onAttachmentsChanged={onLinksChanged}
+        onError={onError}
+      />
       <LinkedRecordsSection
         itemId={note.id}
         revision={note.revision}
@@ -4134,6 +4627,15 @@ function CredentialReader({
         Clipboard actions are intentionally unavailable until timed clipboard
         clearing is implemented.
       </p>
+      <AttachmentsSection
+        key={credential.id}
+        ownerItemId={credential.id}
+        revision={credential.revision}
+        generation={generation}
+        isGenerationCurrent={isGenerationCurrent}
+        onAttachmentsChanged={onLinksChanged}
+        onError={onError}
+      />
       <LinkedRecordsSection
         itemId={credential.id}
         revision={credential.revision}
@@ -4253,10 +4755,15 @@ function DocumentReader({
           </div>
         </div>
       ) : null}
-      <p className="mt-8 text-xs leading-5 text-[var(--text-muted)]">
-        Attachments are intentionally not enabled in this phase. This record
-        stores encrypted document metadata only.
-      </p>
+      <AttachmentsSection
+        key={document.id}
+        ownerItemId={document.id}
+        revision={document.revision}
+        generation={generation}
+        isGenerationCurrent={isGenerationCurrent}
+        onAttachmentsChanged={onLinksChanged}
+        onError={onError}
+      />
       <LinkedRecordsSection
         itemId={document.id}
         revision={document.revision}
@@ -4377,6 +4884,15 @@ function InsuranceReader({
           </div>
         </div>
       ) : null}
+      <AttachmentsSection
+        key={insurance.id}
+        ownerItemId={insurance.id}
+        revision={insurance.revision}
+        generation={generation}
+        isGenerationCurrent={isGenerationCurrent}
+        onAttachmentsChanged={onLinksChanged}
+        onError={onError}
+      />
       <LinkedRecordsSection
         itemId={insurance.id}
         revision={insurance.revision}
@@ -4494,6 +5010,15 @@ function FinancialReader({
         Account numbers are excluded from list and search state and are fetched
         only when you reveal them.
       </p>
+      <AttachmentsSection
+        key={financial.id}
+        ownerItemId={financial.id}
+        revision={financial.revision}
+        generation={generation}
+        isGenerationCurrent={isGenerationCurrent}
+        onAttachmentsChanged={onLinksChanged}
+        onError={onError}
+      />
       <LinkedRecordsSection
         itemId={financial.id}
         revision={financial.revision}
@@ -4670,6 +5195,15 @@ function PropertyReader({
         Addresses and property references stay out of list and search state and
         are fetched only on explicit reveal.
       </p>
+      <AttachmentsSection
+        key={property.id}
+        ownerItemId={property.id}
+        revision={property.revision}
+        generation={generation}
+        isGenerationCurrent={isGenerationCurrent}
+        onAttachmentsChanged={onLinksChanged}
+        onError={onError}
+      />
       <LinkedRecordsSection
         itemId={property.id}
         revision={property.revision}
@@ -4852,6 +5386,15 @@ function VehicleReader({
           </div>
         </div>
       ) : null}
+      <AttachmentsSection
+        key={vehicle.id}
+        ownerItemId={vehicle.id}
+        revision={vehicle.revision}
+        generation={generation}
+        isGenerationCurrent={isGenerationCurrent}
+        onAttachmentsChanged={onLinksChanged}
+        onError={onError}
+      />
       <LinkedRecordsSection
         itemId={vehicle.id}
         revision={vehicle.revision}
@@ -4978,6 +5521,15 @@ function PossessionReader({
           </div>
         </div>
       ) : null}
+      <AttachmentsSection
+        key={possession.id}
+        ownerItemId={possession.id}
+        revision={possession.revision}
+        generation={generation}
+        isGenerationCurrent={isGenerationCurrent}
+        onAttachmentsChanged={onLinksChanged}
+        onError={onError}
+      />
       <LinkedRecordsSection
         itemId={possession.id}
         revision={possession.revision}
@@ -5281,7 +5833,7 @@ function TrashCollection({
     <div>
       <div>
         <div className="text-[11px] font-medium uppercase tracking-[0.12em] text-[var(--text-muted)]">
-          Trash · {sectionLabel(section)}
+          Trash Â· {sectionLabel(section)}
         </div>
         <h1 className="mt-1 text-2xl font-semibold tracking-[-0.03em]">
           Deleted records

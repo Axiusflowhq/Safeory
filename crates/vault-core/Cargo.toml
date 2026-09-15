@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 getrandom.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 vault-crypto = { path = "../vault-crypto", version = "=0.1.0" }

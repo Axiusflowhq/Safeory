@@ -25,6 +25,8 @@ pub struct VaultItem {
     pub title: String,
     #[serde(default)]
     pub links: Vec<Uuid>,
+    #[serde(default)]
+    pub attachments: Vec<Uuid>,
     pub fields: BTreeMap<String, String>,
     pub notes: Option<String>,
 }
@@ -76,6 +78,7 @@ impl VaultItem {
             kind: ItemKind::SecureNote,
             title: title.into(),
             links: Vec::new(),
+            attachments: Vec::new(),
             fields,
             notes: None,
         }
@@ -98,6 +101,7 @@ impl VaultItem {
             kind: ItemKind::Password,
             title: title.into(),
             links: Vec::new(),
+            attachments: Vec::new(),
             fields,
             notes: (!notes.is_empty()).then_some(notes),
         }
@@ -120,6 +124,7 @@ impl VaultItem {
             kind: ItemKind::Document,
             title: title.into(),
             links: Vec::new(),
+            attachments: Vec::new(),
             fields,
             notes: (!notes.is_empty()).then_some(notes),
         }
@@ -144,6 +149,7 @@ impl VaultItem {
             kind: ItemKind::Insurance,
             title: title.into(),
             links: Vec::new(),
+            attachments: Vec::new(),
             fields,
             notes: (!notes.is_empty()).then_some(notes),
         }
@@ -168,6 +174,7 @@ impl VaultItem {
             kind: ItemKind::Financial,
             title: title.into(),
             links: Vec::new(),
+            attachments: Vec::new(),
             fields,
             notes: (!notes.is_empty()).then_some(notes),
         }
@@ -192,6 +199,7 @@ impl VaultItem {
             kind: ItemKind::Property,
             title: title.into(),
             links: Vec::new(),
+            attachments: Vec::new(),
             fields,
             notes: (!notes.is_empty()).then_some(notes),
         }
@@ -221,6 +229,7 @@ impl VaultItem {
             kind: ItemKind::Vehicle,
             title: title.into(),
             links: Vec::new(),
+            attachments: Vec::new(),
             fields,
             notes: (!notes.is_empty()).then_some(notes),
         }
@@ -252,6 +261,7 @@ impl VaultItem {
             kind: ItemKind::Possession,
             title: title.into(),
             links: Vec::new(),
+            attachments: Vec::new(),
             fields,
             notes: (!notes.is_empty()).then_some(notes),
         }
@@ -268,6 +278,7 @@ impl VaultItem {
             kind: ItemKind::EmergencyInstruction,
             title: "Emergency Card".to_owned(),
             links: Vec::new(),
+            attachments: Vec::new(),
             fields,
             notes: None,
         }
@@ -342,7 +353,24 @@ mod tests {
         let item: VaultItem =
             serde_json::from_value(legacy).expect("legacy payload without links decodes");
         assert!(item.links.is_empty());
+        assert!(item.attachments.is_empty());
         assert_eq!(item.title, "legacy");
+    }
+
+    #[test]
+    fn pre_attachments_payload_still_decodes_with_empty_attachments() {
+        let legacy = serde_json::json!({
+            "id": Uuid::new_v4(),
+            "kind": "secure_note",
+            "title": "legacy links",
+            "links": [Uuid::new_v4()],
+            "fields": {"body": "hello"},
+            "notes": null
+        });
+        let item: VaultItem =
+            serde_json::from_value(legacy).expect("payload without attachments decodes");
+        assert_eq!(item.links.len(), 1);
+        assert!(item.attachments.is_empty());
     }
 
     #[test]

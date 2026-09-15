@@ -90,10 +90,10 @@ Authenticated metadata is serialized deterministically by the Rust core rather t
 
 HKDF-SHA-256 derives context keys from the AccountRootKey. Phase 0 reserves:
 
-> Compatibility note: the implemented v1 item/root encryption domains retain the historical `lifevault:*` prefix as immutable wire-format labels so existing encrypted vaults remain decryptable after the Safeory product rename. New, not-yet-implemented domains use the `safeory:*` prefix.
+> Compatibility note: the implemented v1 item/root encryption domains retain the historical `lifevault:*` prefix as immutable wire-format labels so existing encrypted vaults remain decryptable after the Safeory product rename. New domains use the `safeory:*` prefix.
 
 - `lifevault:v1:item-wrap`
-- `safeory:v1:attachment-wrap` (future)
+- `safeory:v1:attachment-wrap`
 - `safeory:v1:sync-auth` (future)
 - `safeory:v1:emergency-wrap` (future)
 
@@ -131,9 +131,15 @@ rejected so a single share can never reconstruct a secret; at most 255 shares
 are supported. Reconstruction rejects malformed or duplicate shares. No
 custom threshold cryptography is implemented.
 
-## Attachment nonce construction (future)
+## Attachment encryption and nonce construction
 
-Large attachments will use a random per-file key. Chunk nonces will be derived from a per-file random nonce prefix plus a monotonically increasing chunk index, with the index authenticated as metadata. This makes nonce uniqueness under one file key structural rather than relying on a fresh random nonce for every chunk. Exact framing will be specified before attachment code is written.
+Each attachment is immutable in V1 and receives a fresh random 256-bit file key. A key derived from the AccountRootKey with HKDF-SHA256 domain `safeory:v1:attachment-wrap` wraps that file key with XChaCha20-Poly1305. The wrap AAD binds the attachment ID, file-key ID, and attachment revision. Replacing a file creates a new attachment object rather than reusing a file key or nonce space.
+
+The encrypted attachment manifest is authenticated under the file key and contains either an Active state (`attachment_id`, encrypted owner item ID, filename, plaintext size, fixed chunk size, chunk count) or a Tombstone state (`attachment_id`, owner item ID, deletion time). The manifest AAD binds the attachment ID, revision, and payload schema version. No plaintext owner mapping or filename is stored in the SQLite attachment tables.
+
+Active files are split into fixed 1 MiB plaintext chunks. One random 16-byte nonce prefix is generated per attachment key and each 24-byte XChaCha nonce is constructed as `prefix || u64_be(slot)`: data chunk `i` uses slot `i`, while the manifest uses slot `u64::MAX`. The chunk AAD binds attachment ID, attachment revision, owner item ID, chunk index, chunk count, and total plaintext size. This makes nonce uniqueness structural and prevents chunk transplant, reorder, truncation, count, and size changes from authenticating under the same envelope.
+
+Deletion creates a fresh authenticated tombstone envelope with a fresh file key/wrap, removes the attachment reference from the encrypted parent item, and deletes all old chunk rows in the same SQLite transaction. The old file key is therefore not retained in the tombstone. Moving an item to Trash retains its attachments so restore remains lossless; permanent item purge tombstones its attachments and removes their chunks atomically.
 
 ## Memory handling
 
@@ -150,22 +156,24 @@ Rust/zeroization cannot guarantee erasure of copies made by the compiler, OS, sw
 - The master passphrase necessarily exists in the password field and Tauri IPC argument while creating or unlocking a vault. The Rust command moves the received `String` into a zeroizing buffer immediately, but renderer/IPC copies cannot be guaranteed erased.
 - Decrypted note content and non-password credential metadata are returned to the renderer only while the vault is unlocked because the UI must display them. Credential list/search responses never contain password values.
 - A credential password crosses IPC only after an explicit Reveal or Edit action through the narrow `get_credential` command. Passwords are masked by default; secret-bearing edit detail is held only in the mounted credential editor's local state rather than top-level application state. Hide/unmount drops the current React password-state reference, but JavaScript/WebView/OS memory erasure cannot be guaranteed. A renderer compromise during an unlocked reveal/edit remains inside the plaintext trust boundary.
-- Document list/search responses omit the encrypted document-number value and expose only the record title, issuer, expiry, notes, and a presence flag. The document number crosses IPC only for an explicit Reveal or Edit through `get_document`, using the same revision and renderer-generation fences as credential secret access. Secret-bearing edit detail remains editor-local rather than entering top-level application state. Phase 0 document records are metadata only; no file attachment bytes are stored or exposed.
+- Document list/search responses omit the encrypted document-number value and expose only the record title, issuer, expiry, notes, and a presence flag. The document number crosses IPC only for an explicit Reveal or Edit through `get_document`, using the same revision and renderer-generation fences as credential secret access. Secret-bearing edit detail remains editor-local rather than entering top-level application state.
 - Insurance list/search responses omit policy-number values and expose only title, provider, policy type, renewal date, notes, and a presence flag. Policy numbers cross IPC only for explicit Reveal or Edit through `get_insurance`, with expected-revision checks and renderer-generation fencing identical to other reveal-only secrets. Secret-bearing edit detail remains editor-local rather than entering top-level application state.
 - Financial list/search responses expose only title, institution, account type, currency, and an account-number presence flag. Account numbers and freeform financial notes are excluded from top-level renderer list/search state. Account-number reveal uses a narrow command that returns only that value; full financial detail is fetched only inside the keyed editor and is generation-fenced.
 - Property list/search responses expose only title, property type, constrained ownership status, and presence flags. Address, property reference, and freeform property notes are excluded from top-level renderer list/search state. Address and property-reference reveals use separate narrow commands; full property detail is fetched only inside the keyed editor. Ownership is restricted to a reviewed categorical set before it may enter summary state.
-- Manual lock and the 10-minute renderer inactivity timer invalidate the renderer session generation before invoking the Rust lock command, immediately clearing decrypted item/editor state. Responses from the prior generation are discarded so delayed list/save/reveal work cannot repopulate plaintext after lock. Rust lock then drops the `VaultSession` and root key.
+- Manual lock, configurable inactivity lock, and optional lock-on-background invalidate the renderer session generation before invoking the Rust lock command, immediately clearing decrypted item/editor state. Rust independently enforces the inactivity timeout and drops the `VaultSession`/root key even if the WebView stops responding. Responses from the prior renderer generation are discarded so delayed list/save/reveal work cannot repopulate plaintext after lock.
+- Encrypted backup restore is backend-owned. The selected backup path and its passphrase cross IPC, but backup file bytes do not. Safeory validates a staged copy, including SQLite integrity and authenticated decryption of every persisted lifecycle state, then transactionally copies encrypted tables into the live database. Restore preserves the wrapped root key and encrypted record bytes/revisions rather than decrypting and reserializing the vault.
+- Attachment file bytes and attachment source/destination paths never cross renderer IPC. The narrow Tauri attachment commands own their native open/save dialogs, so the WebView can request an attach/export action but cannot nominate an arbitrary filesystem path. Rust reads the user-selected source, encrypts/decrypts one bounded chunk at a time, and returns only attachment ID, revision, filename, and plaintext size to the keyed record-detail component. Attachment filenames are not added to the global record list/search model. Renderer callbacks and backend attachment work are generation-fenced so a lock/session replacement cancels stale work instead of letting it repopulate or continue under the previous session.
 - Credential editor inputs opt out of WebView login-autofill semantics so stored third-party credentials are not deliberately offered to the host credential manager as Safeory login fields.
 - Credential generation uses the OS CSPRNG through `getrandom`. The portable Rust core uses rejection sampling rather than modulo-biased byte reduction, guarantees at least one lowercase letter, uppercase letter, digit, and symbol, excludes visually ambiguous alphanumeric characters, and cryptographically shuffles the result. The desktop command currently requests 20 characters and requires an unlocked vault; the generated value crosses IPC only after the user explicitly chooses Generate.
 - Phase 0 does not expose credential clipboard-copy actions. Clipboard support requires a reviewed timed-clear design before it is added.
 
 ### Plaintext item bounds
 
-Before item encryption, the portable Rust core rejects records that exceed the supported local limits: titles are bounded to 256 Unicode scalar values, an item may contain at most 32 fields, field names are bounded to 64 characters, each field value to 100,000 characters, and notes to 100,000 characters. These are resource-abuse bounds, not cryptographic limits. They are enforced for both create and update before ciphertext generation or storage mutation.
+Before item encryption, the portable Rust core rejects records that exceed the supported local limits: titles are bounded to 256 Unicode scalar values, an item may contain at most 32 fields, at most 64 item links, and at most 16 attachment references; field names are bounded to 64 characters, each field value to 100,000 characters, and notes to 100,000 characters. Attachments are currently bounded to 64 MiB plaintext per file, 16 per item, 16,384 attachment objects (including tombstones) per vault, and 1 GiB of encrypted attachment storage per vault; filenames are bounded to 255 Unicode scalar values. Restore/read paths enforce the object/count and BLOB bounds before materializing attacker-controlled attachment collections. These are resource-abuse bounds, not cryptographic limits.
 
 ## Versioning and migration
 
-Root wraps and item envelopes carry independent format versions and algorithms. Readers reject unknown mandatory algorithms/versions rather than guessing. Future migrations read with the old format and write a new authenticated format without silently deleting records that fail migration.
+Root wraps, item envelopes, and attachment envelopes carry independent format/payload versions. Item payload schema v3 introduces encrypted attachment references; readers retain v1/v2 compatibility, while new writes use v3 so an older binary that does not understand attachment references cannot safely rewrite a new record as an older payload. Readers reject unknown mandatory algorithms/versions rather than guessing. Future migrations read with the old format and write a new authenticated format without silently deleting records that fail migration.
 
 The encrypted item envelope also carries a payload schema version. Readers reject
 newer payload schemas before deserialization, preventing an older binary from

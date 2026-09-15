@@ -40,9 +40,15 @@ Implemented now:
 - Trust Engine core: conditional access policies with fail-closed local
   evaluation (destruction/deny wins, private-forever, multi-approval,
   waiting periods as documented server-enforced policy, not time-lock crypto),
-- portable export: human-readable decrypted JSON plus an encrypted
-  database-file backup, both to user-chosen locations via save dialogs,
-- local database schema migration (v1 to v2) preserving existing vaults,
+- portable export and recovery: human-readable active-record JSON plus a
+  validated encrypted SQLite snapshot, both written atomically to user-chosen
+  locations; encrypted backups can be restored transactionally from Settings
+  or during first-run setup without overwriting device-only preferences,
+- encrypted local file attachments with per-file keys, authenticated 1 MiB
+  chunks, metadata-only renderer IPC, Trash/restore lifecycle preservation,
+  tombstone-based permanent deletion, and attachment-complete encrypted
+  backup/restore,
+- local database schema migration (v1/v2 to v3) preserving existing vaults,
 - focused Tauri adapter tests for locked-state gating, redacted unlock failure,
   item listing, credential revision plumbing, and stale-edit rejection,
 - portable Rust item-size bounds before encryption/persistence, with regression
@@ -60,7 +66,7 @@ Implemented now:
 
 Not implemented yet: grant persistence inside item payloads, trusted-person
 grant UX, Emergency Access timed-release coordination, account/passkey flows,
-Cloudflare sync, attachments, clipboard copy. Cloud integration starts only
+Cloudflare sync, clipboard copy. Cloud integration starts only
 after this local platform is stable.
 
 ## Validation

@@ -15,12 +15,27 @@ use zeroize::Zeroizing;
 
 const FORMAT_VERSION: u16 = 1;
 const LEGACY_ITEM_PAYLOAD_SCHEMA_VERSION: u16 = 1;
-const ITEM_PAYLOAD_SCHEMA_VERSION: u16 = 2;
+const LIFECYCLE_ITEM_PAYLOAD_SCHEMA_VERSION: u16 = 2;
+const ITEM_PAYLOAD_SCHEMA_VERSION: u16 = 3;
+const ATTACHMENT_PAYLOAD_SCHEMA_VERSION: u16 = 1;
 const ALGORITHM: &str = "xchacha20poly1305";
 const ITEM_WRAP_INFO: &[u8] = b"lifevault:v1:item-wrap";
+const ATTACHMENT_WRAP_INFO: &[u8] = b"safeory:v1:attachment-wrap";
 const ROOT_WRAP_AAD: &[u8] = b"lifevault:root-wrap:v1";
 const RECOVERY_WRAP_INFO: &[u8] = b"safeory:v1:recovery-wrap";
 const RECOVERY_WRAP_AAD: &[u8] = b"safeory:recovery-wrap:v1";
+
+pub const ATTACHMENT_CHUNK_SIZE: u64 = 1024 * 1024;
+pub const ATTACHMENT_MAX_CHUNKS: u64 = 64;
+/// Global V1 object ceiling: enough for 1,024 items at the current 16 attachments per item.
+pub const ATTACHMENT_MAX_OBJECTS: u64 = 16 * 1024;
+pub const ATTACHMENT_MAX_FILENAME_CHARS: usize = 255;
+pub const ATTACHMENT_MAX_PLAINTEXT_BYTES: u64 = 64 * 1024 * 1024;
+pub const ATTACHMENT_MAX_MANIFEST_PLAINTEXT_BYTES: usize = 4 * 1024;
+pub const ATTACHMENT_MAX_MANIFEST_CIPHERTEXT_BYTES: usize =
+    ATTACHMENT_MAX_MANIFEST_PLAINTEXT_BYTES + 16;
+pub const ATTACHMENT_MAX_CHUNK_CIPHERTEXT_BYTES: usize = 1024 * 1024 + 16;
+pub const ATTACHMENT_MAX_ENCRYPTED_RECORD_BYTES: usize = 32 * 1024;
 
 pub const ARGON2_MEMORY_KIB: u32 = 65_536;
 pub const ARGON2_ITERATIONS: u32 = 3;
@@ -170,6 +185,127 @@ pub struct EncryptedItemV1 {
     pub wrapped_item_key: Vec<u8>,
     pub payload_nonce: [u8; 24],
     pub ciphertext: Vec<u8>,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum AttachmentManifestV1 {
+    Active {
+        attachment_id: Uuid,
+        owner_item_id: Uuid,
+        filename: String,
+        plaintext_size: u64,
+        chunk_size: u64,
+        chunk_count: u64,
+    },
+    Tombstone {
+        attachment_id: Uuid,
+        owner_item_id: Uuid,
+        deleted_at_ms: u64,
+    },
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct EncryptedAttachmentV1 {
+    pub format_version: u16,
+    pub payload_schema_version: u16,
+    pub algorithm: String,
+    pub attachment_id: Uuid,
+    pub key_id: Uuid,
+    pub revision: u64,
+    pub key_nonce: [u8; 24],
+    pub wrapped_file_key: Vec<u8>,
+    pub nonce_prefix: [u8; 16],
+    pub manifest_ciphertext: Vec<u8>,
+}
+
+pub struct AttachmentCipherContext {
+    file_key: Zeroizing<[u8; 32]>,
+    nonce_prefix: [u8; 16],
+    attachment_id: Uuid,
+    owner_item_id: Uuid,
+    revision: u64,
+    plaintext_size: u64,
+    chunk_size: u64,
+    chunk_count: u64,
+}
+
+impl AttachmentCipherContext {
+    pub fn encrypt_chunk(&self, index: u64, plaintext: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        let expected = self.expected_chunk_len(index)?;
+        if plaintext.len() != expected {
+            return Err(CryptoError::InconsistentRecord);
+        }
+        let cipher = XChaCha20Poly1305::new((&*self.file_key).into());
+        let nonce = attachment_nonce(&self.nonce_prefix, index);
+        let aad = attachment_chunk_aad(
+            self.attachment_id,
+            self.revision,
+            self.owner_item_id,
+            index,
+            self.chunk_count,
+            self.plaintext_size,
+        );
+        cipher
+            .encrypt(
+                nonce_ref(&nonce)?,
+                Payload {
+                    msg: plaintext,
+                    aad: &aad,
+                },
+            )
+            .map_err(|_| CryptoError::Encryption)
+    }
+
+    pub fn decrypt_chunk(&self, index: u64, ciphertext: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        let expected = self.expected_chunk_len(index)?;
+        let expected_ciphertext = expected
+            .checked_add(16)
+            .ok_or(CryptoError::InconsistentRecord)?;
+        if ciphertext.len() != expected_ciphertext
+            || ciphertext.len() > ATTACHMENT_MAX_CHUNK_CIPHERTEXT_BYTES
+        {
+            return Err(CryptoError::InconsistentRecord);
+        }
+        let cipher = XChaCha20Poly1305::new((&*self.file_key).into());
+        let nonce = attachment_nonce(&self.nonce_prefix, index);
+        let aad = attachment_chunk_aad(
+            self.attachment_id,
+            self.revision,
+            self.owner_item_id,
+            index,
+            self.chunk_count,
+            self.plaintext_size,
+        );
+        let plaintext = cipher
+            .decrypt(
+                nonce_ref(&nonce)?,
+                Payload {
+                    msg: ciphertext,
+                    aad: &aad,
+                },
+            )
+            .map_err(|_| CryptoError::Authentication)?;
+        if plaintext.len() != expected {
+            return Err(CryptoError::InconsistentRecord);
+        }
+        Ok(plaintext)
+    }
+
+    fn expected_chunk_len(&self, index: u64) -> Result<usize, CryptoError> {
+        if index >= self.chunk_count || self.chunk_count == 0 {
+            return Err(CryptoError::InconsistentRecord);
+        }
+        let start = index
+            .checked_mul(self.chunk_size)
+            .ok_or(CryptoError::InconsistentRecord)?;
+        let remaining = self
+            .plaintext_size
+            .checked_sub(start)
+            .ok_or(CryptoError::InconsistentRecord)?;
+        let len = remaining.min(self.chunk_size);
+        usize::try_from(len).map_err(|_| CryptoError::InconsistentRecord)
+    }
 }
 
 pub fn wrap_root_key(
@@ -421,6 +557,7 @@ pub fn decrypt_item_state(
 ) -> Result<VaultItemState, CryptoError> {
     ensure_supported(encrypted.format_version, &encrypted.algorithm)?;
     if encrypted.payload_schema_version != ITEM_PAYLOAD_SCHEMA_VERSION
+        && encrypted.payload_schema_version != LIFECYCLE_ITEM_PAYLOAD_SCHEMA_VERSION
         && encrypted.payload_schema_version != LEGACY_ITEM_PAYLOAD_SCHEMA_VERSION
     {
         return Err(CryptoError::UnsupportedFormat);
@@ -475,6 +612,177 @@ pub fn decrypt_item_state(
     Ok(state)
 }
 
+pub fn seal_attachment_manifest(
+    root_key: &AccountRootKey,
+    manifest: &AttachmentManifestV1,
+    revision: u64,
+) -> Result<(EncryptedAttachmentV1, Option<AttachmentCipherContext>), CryptoError> {
+    validate_attachment_manifest(manifest)?;
+    let attachment_id = attachment_manifest_id(manifest);
+    let owner_item_id = attachment_manifest_owner(manifest);
+    let key_id = Uuid::new_v4();
+    let mut file_key = Zeroizing::new([0u8; 32]);
+    let mut key_nonce = [0u8; 24];
+    let mut nonce_prefix = [0u8; 16];
+    getrandom::fill(file_key.as_mut()).map_err(|_| CryptoError::Random)?;
+    getrandom::fill(&mut key_nonce).map_err(|_| CryptoError::Random)?;
+    getrandom::fill(&mut nonce_prefix).map_err(|_| CryptoError::Random)?;
+
+    let wrap_key = derive_attachment_wrap_key(root_key)?;
+    let wrap_cipher = XChaCha20Poly1305::new((&*wrap_key).into());
+    let key_aad = attachment_key_aad(attachment_id, key_id, revision);
+    let wrapped_file_key = wrap_cipher
+        .encrypt(
+            nonce_ref(&key_nonce)?,
+            Payload {
+                msg: &*file_key,
+                aad: &key_aad,
+            },
+        )
+        .map_err(|_| CryptoError::Encryption)?;
+
+    let manifest_plaintext = Zeroizing::new(serde_json::to_vec(manifest)?);
+    if manifest_plaintext.len() > ATTACHMENT_MAX_MANIFEST_PLAINTEXT_BYTES {
+        return Err(CryptoError::InconsistentRecord);
+    }
+    let manifest_cipher = XChaCha20Poly1305::new((&*file_key).into());
+    let manifest_nonce = attachment_nonce(&nonce_prefix, u64::MAX);
+    let manifest_aad =
+        attachment_manifest_aad(attachment_id, revision, ATTACHMENT_PAYLOAD_SCHEMA_VERSION);
+    let manifest_ciphertext = manifest_cipher
+        .encrypt(
+            nonce_ref(&manifest_nonce)?,
+            Payload {
+                msg: &manifest_plaintext,
+                aad: &manifest_aad,
+            },
+        )
+        .map_err(|_| CryptoError::Encryption)?;
+
+    let context = match manifest {
+        AttachmentManifestV1::Active {
+            plaintext_size,
+            chunk_size,
+            chunk_count,
+            ..
+        } => Some(AttachmentCipherContext {
+            file_key,
+            nonce_prefix,
+            attachment_id,
+            owner_item_id,
+            revision,
+            plaintext_size: *plaintext_size,
+            chunk_size: *chunk_size,
+            chunk_count: *chunk_count,
+        }),
+        AttachmentManifestV1::Tombstone { .. } => None,
+    };
+
+    Ok((
+        EncryptedAttachmentV1 {
+            format_version: FORMAT_VERSION,
+            payload_schema_version: ATTACHMENT_PAYLOAD_SCHEMA_VERSION,
+            algorithm: ALGORITHM.to_owned(),
+            attachment_id,
+            key_id,
+            revision,
+            key_nonce,
+            wrapped_file_key,
+            nonce_prefix,
+            manifest_ciphertext,
+        },
+        context,
+    ))
+}
+
+pub fn open_attachment_manifest(
+    root_key: &AccountRootKey,
+    encrypted: &EncryptedAttachmentV1,
+) -> Result<(AttachmentManifestV1, Option<AttachmentCipherContext>), CryptoError> {
+    ensure_supported(encrypted.format_version, &encrypted.algorithm)?;
+    if encrypted.payload_schema_version != ATTACHMENT_PAYLOAD_SCHEMA_VERSION {
+        return Err(CryptoError::UnsupportedFormat);
+    }
+    if encrypted.wrapped_file_key.len() != 48
+        || encrypted.manifest_ciphertext.len() < 16
+        || encrypted.manifest_ciphertext.len() > ATTACHMENT_MAX_MANIFEST_CIPHERTEXT_BYTES
+    {
+        return Err(CryptoError::InconsistentRecord);
+    }
+
+    let wrap_key = derive_attachment_wrap_key(root_key)?;
+    let wrap_cipher = XChaCha20Poly1305::new((&*wrap_key).into());
+    let key_aad = attachment_key_aad(
+        encrypted.attachment_id,
+        encrypted.key_id,
+        encrypted.revision,
+    );
+    let unwrapped = Zeroizing::new(
+        wrap_cipher
+            .decrypt(
+                nonce_ref(&encrypted.key_nonce)?,
+                Payload {
+                    msg: &encrypted.wrapped_file_key,
+                    aad: &key_aad,
+                },
+            )
+            .map_err(|_| CryptoError::Authentication)?,
+    );
+    if unwrapped.len() != 32 {
+        return Err(CryptoError::InconsistentRecord);
+    }
+    let mut file_key = Zeroizing::new([0u8; 32]);
+    file_key.copy_from_slice(&unwrapped);
+
+    let manifest_cipher = XChaCha20Poly1305::new((&*file_key).into());
+    let manifest_nonce = attachment_nonce(&encrypted.nonce_prefix, u64::MAX);
+    let manifest_aad = attachment_manifest_aad(
+        encrypted.attachment_id,
+        encrypted.revision,
+        encrypted.payload_schema_version,
+    );
+    let plaintext = Zeroizing::new(
+        manifest_cipher
+            .decrypt(
+                nonce_ref(&manifest_nonce)?,
+                Payload {
+                    msg: &encrypted.manifest_ciphertext,
+                    aad: &manifest_aad,
+                },
+            )
+            .map_err(|_| CryptoError::Authentication)?,
+    );
+    if plaintext.len() > ATTACHMENT_MAX_MANIFEST_PLAINTEXT_BYTES {
+        return Err(CryptoError::InconsistentRecord);
+    }
+    let manifest: AttachmentManifestV1 = serde_json::from_slice(&plaintext)?;
+    validate_attachment_manifest(&manifest)?;
+    if attachment_manifest_id(&manifest) != encrypted.attachment_id {
+        return Err(CryptoError::InconsistentRecord);
+    }
+
+    let owner_item_id = attachment_manifest_owner(&manifest);
+    let context = match &manifest {
+        AttachmentManifestV1::Active {
+            plaintext_size,
+            chunk_size,
+            chunk_count,
+            ..
+        } => Some(AttachmentCipherContext {
+            file_key,
+            nonce_prefix: encrypted.nonce_prefix,
+            attachment_id: encrypted.attachment_id,
+            owner_item_id,
+            revision: encrypted.revision,
+            plaintext_size: *plaintext_size,
+            chunk_size: *chunk_size,
+            chunk_count: *chunk_count,
+        }),
+        AttachmentManifestV1::Tombstone { .. } => None,
+    };
+    Ok((manifest, context))
+}
+
 fn state_object_id(state: &VaultItemState) -> Uuid {
     match state {
         VaultItemState::Active { item } | VaultItemState::Trashed { item, .. } => item.id,
@@ -513,6 +821,16 @@ fn derive_item_wrap_key(root_key: &AccountRootKey) -> Result<Zeroizing<[u8; 32]>
     Ok(output)
 }
 
+fn derive_attachment_wrap_key(
+    root_key: &AccountRootKey,
+) -> Result<Zeroizing<[u8; 32]>, CryptoError> {
+    let hk = Hkdf::<Sha256>::new(None, root_key.as_bytes());
+    let mut output = Zeroizing::new([0u8; 32]);
+    hk.expand(ATTACHMENT_WRAP_INFO, output.as_mut())
+        .map_err(|_| CryptoError::KeyDerivation)?;
+    Ok(output)
+}
+
 fn derive_recovery_kek(
     secret: &RecoverySecret,
     salt: &[u8; 16],
@@ -544,6 +862,82 @@ fn item_key_aad(object_id: Uuid, key_id: Uuid, revision: u64) -> Vec<u8> {
 
 fn item_payload_aad(object_id: Uuid, revision: u64, schema_version: u16) -> Vec<u8> {
     format!("lifevault:item-payload:v1:{schema_version}:{object_id}:{revision}").into_bytes()
+}
+
+fn attachment_key_aad(attachment_id: Uuid, key_id: Uuid, revision: u64) -> Vec<u8> {
+    format!("safeory:attachment-key:v1:{attachment_id}:{key_id}:{revision}").into_bytes()
+}
+
+fn attachment_manifest_aad(attachment_id: Uuid, revision: u64, schema_version: u16) -> Vec<u8> {
+    format!("safeory:attachment-manifest:v1:{schema_version}:{attachment_id}:{revision}")
+        .into_bytes()
+}
+
+fn attachment_chunk_aad(
+    attachment_id: Uuid,
+    revision: u64,
+    owner_item_id: Uuid,
+    chunk_index: u64,
+    chunk_count: u64,
+    plaintext_size: u64,
+) -> Vec<u8> {
+    format!(
+        "safeory:attachment-chunk:v1:{attachment_id}:{revision}:{owner_item_id}:{chunk_index}:{chunk_count}:{plaintext_size}"
+    )
+    .into_bytes()
+}
+
+fn attachment_nonce(prefix: &[u8; 16], slot: u64) -> [u8; 24] {
+    let mut nonce = [0u8; 24];
+    nonce[..16].copy_from_slice(prefix);
+    nonce[16..].copy_from_slice(&slot.to_be_bytes());
+    nonce
+}
+
+fn attachment_manifest_id(manifest: &AttachmentManifestV1) -> Uuid {
+    match manifest {
+        AttachmentManifestV1::Active { attachment_id, .. }
+        | AttachmentManifestV1::Tombstone { attachment_id, .. } => *attachment_id,
+    }
+}
+
+fn attachment_manifest_owner(manifest: &AttachmentManifestV1) -> Uuid {
+    match manifest {
+        AttachmentManifestV1::Active { owner_item_id, .. }
+        | AttachmentManifestV1::Tombstone { owner_item_id, .. } => *owner_item_id,
+    }
+}
+
+fn validate_attachment_manifest(manifest: &AttachmentManifestV1) -> Result<(), CryptoError> {
+    if let AttachmentManifestV1::Active {
+        filename,
+        plaintext_size,
+        chunk_size,
+        chunk_count,
+        ..
+    } = manifest
+    {
+        if filename.is_empty()
+            || filename.chars().count() > ATTACHMENT_MAX_FILENAME_CHARS
+            || *plaintext_size > ATTACHMENT_MAX_PLAINTEXT_BYTES
+            || *chunk_size != ATTACHMENT_CHUNK_SIZE
+            || *chunk_count > ATTACHMENT_MAX_CHUNKS
+        {
+            return Err(CryptoError::InconsistentRecord);
+        }
+        let expected_count = if *plaintext_size == 0 {
+            0
+        } else {
+            plaintext_size
+                .checked_add(chunk_size - 1)
+                .ok_or(CryptoError::InconsistentRecord)?
+                / chunk_size
+        };
+        if *chunk_count != expected_count {
+            return Err(CryptoError::InconsistentRecord);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -611,6 +1005,334 @@ mod tests {
             VaultItemState::Active { item: restored }
                 if restored.id == item.id && restored.title == "legacy"
         ));
+    }
+
+    #[test]
+    fn lifecycle_v2_item_payload_decodes_with_empty_attachments() {
+        let root = AccountRootKey::generate().expect("root key");
+        let object_id = Uuid::new_v4();
+        let plaintext = serde_json::to_vec(&serde_json::json!({
+            "state": "active",
+            "item": {
+                "id": object_id,
+                "kind": "secure_note",
+                "title": "pre-attachment",
+                "links": [],
+                "fields": {"body": "still readable"},
+                "notes": null
+            }
+        }))
+        .expect("serialize lifecycle v2 payload");
+        let encrypted = encrypt_payload(
+            &root,
+            object_id,
+            &plaintext,
+            4,
+            LIFECYCLE_ITEM_PAYLOAD_SCHEMA_VERSION,
+        )
+        .expect("encrypt lifecycle v2 payload");
+
+        let state = decrypt_item_state(&root, &encrypted).expect("decode lifecycle v2 payload");
+        assert!(matches!(
+            state,
+            VaultItemState::Active { item }
+                if item.id == object_id && item.attachments.is_empty()
+        ));
+    }
+
+    fn active_attachment_manifest(
+        attachment_id: Uuid,
+        owner_item_id: Uuid,
+        plaintext_size: u64,
+    ) -> AttachmentManifestV1 {
+        let chunk_count = if plaintext_size == 0 {
+            0
+        } else {
+            plaintext_size.div_ceil(ATTACHMENT_CHUNK_SIZE)
+        };
+        AttachmentManifestV1::Active {
+            attachment_id,
+            owner_item_id,
+            filename: "evidence.pdf".to_owned(),
+            plaintext_size,
+            chunk_size: ATTACHMENT_CHUNK_SIZE,
+            chunk_count,
+        }
+    }
+
+    fn replace_manifest_ciphertext_unchecked(
+        root: &AccountRootKey,
+        encrypted: &mut EncryptedAttachmentV1,
+        manifest: &AttachmentManifestV1,
+    ) {
+        let wrap_key = derive_attachment_wrap_key(root).expect("derive attachment wrap key");
+        let wrap_cipher = XChaCha20Poly1305::new((&*wrap_key).into());
+        let key_aad = attachment_key_aad(
+            encrypted.attachment_id,
+            encrypted.key_id,
+            encrypted.revision,
+        );
+        let file_key = wrap_cipher
+            .decrypt(
+                nonce_ref(&encrypted.key_nonce).expect("key nonce"),
+                Payload {
+                    msg: &encrypted.wrapped_file_key,
+                    aad: &key_aad,
+                },
+            )
+            .expect("unwrap file key");
+        let mut file_key_bytes = Zeroizing::new([0u8; 32]);
+        file_key_bytes.copy_from_slice(&file_key);
+        let cipher = XChaCha20Poly1305::new((&*file_key_bytes).into());
+        let nonce = attachment_nonce(&encrypted.nonce_prefix, u64::MAX);
+        let aad = attachment_manifest_aad(
+            encrypted.attachment_id,
+            encrypted.revision,
+            encrypted.payload_schema_version,
+        );
+        let plaintext = serde_json::to_vec(manifest).expect("serialize unchecked manifest");
+        encrypted.manifest_ciphertext = cipher
+            .encrypt(
+                nonce_ref(&nonce).expect("manifest nonce"),
+                Payload {
+                    msg: &plaintext,
+                    aad: &aad,
+                },
+            )
+            .expect("encrypt unchecked manifest");
+    }
+
+    fn round_trip_attachment_bytes(bytes: &[u8]) {
+        let root = AccountRootKey::generate().expect("root key");
+        let attachment_id = Uuid::new_v4();
+        let owner_item_id = Uuid::new_v4();
+        let manifest = active_attachment_manifest(
+            attachment_id,
+            owner_item_id,
+            u64::try_from(bytes.len()).expect("test size fits u64"),
+        );
+        let (encrypted, encryptor) =
+            seal_attachment_manifest(&root, &manifest, 1).expect("seal manifest");
+        let encryptor = encryptor.expect("active encryptor");
+        let mut ciphertexts = Vec::new();
+        for (index, chunk) in bytes.chunks(ATTACHMENT_CHUNK_SIZE as usize).enumerate() {
+            ciphertexts.push(
+                encryptor
+                    .encrypt_chunk(index as u64, chunk)
+                    .expect("encrypt chunk"),
+            );
+        }
+
+        let (opened, decryptor) =
+            open_attachment_manifest(&root, &encrypted).expect("open manifest");
+        assert!(opened == manifest);
+        let decryptor = decryptor.expect("active decryptor");
+        let mut restored = Vec::new();
+        for (index, ciphertext) in ciphertexts.iter().enumerate() {
+            restored.extend(
+                decryptor
+                    .decrypt_chunk(index as u64, ciphertext)
+                    .expect("decrypt chunk"),
+            );
+        }
+        assert_eq!(restored, bytes);
+    }
+
+    #[test]
+    fn attachment_round_trips_zero_one_boundary_and_multiple_chunks() {
+        round_trip_attachment_bytes(&[]);
+        round_trip_attachment_bytes(&[0x42]);
+        round_trip_attachment_bytes(&vec![0xA5; ATTACHMENT_CHUNK_SIZE as usize]);
+        round_trip_attachment_bytes(&vec![0x5A; ATTACHMENT_CHUNK_SIZE as usize + 17]);
+    }
+
+    #[test]
+    fn attachment_chunk_tampering_and_reordering_fail_authentication() {
+        let root = AccountRootKey::generate().expect("root key");
+        let manifest =
+            active_attachment_manifest(Uuid::new_v4(), Uuid::new_v4(), ATTACHMENT_CHUNK_SIZE + 8);
+        let (encrypted, encryptor) =
+            seal_attachment_manifest(&root, &manifest, 9).expect("seal manifest");
+        let encryptor = encryptor.expect("active encryptor");
+        let first_plain = vec![0x11; ATTACHMENT_CHUNK_SIZE as usize];
+        let second_plain = vec![0x22; 8];
+        let first = encryptor
+            .encrypt_chunk(0, &first_plain)
+            .expect("encrypt first");
+        let mut second = encryptor
+            .encrypt_chunk(1, &second_plain)
+            .expect("encrypt second");
+        second[0] ^= 1;
+
+        let (_, decryptor) = open_attachment_manifest(&root, &encrypted).expect("open manifest");
+        let decryptor = decryptor.expect("active decryptor");
+        assert!(decryptor.decrypt_chunk(1, &second).is_err());
+        assert!(decryptor.decrypt_chunk(1, &first).is_err());
+        assert!(decryptor.decrypt_chunk(2, &first).is_err());
+    }
+
+    #[test]
+    fn attachment_manifest_tampering_and_wrong_root_fail() {
+        let root = AccountRootKey::generate().expect("root key");
+        let wrong_root = AccountRootKey::generate().expect("wrong root key");
+        let manifest = active_attachment_manifest(Uuid::new_v4(), Uuid::new_v4(), 12);
+        let (mut encrypted, _) =
+            seal_attachment_manifest(&root, &manifest, 2).expect("seal manifest");
+
+        assert!(open_attachment_manifest(&wrong_root, &encrypted).is_err());
+        encrypted.manifest_ciphertext[0] ^= 1;
+        assert!(open_attachment_manifest(&root, &encrypted).is_err());
+    }
+
+    #[test]
+    fn attachment_open_rejects_authenticated_manifest_resource_violations() {
+        let root = AccountRootKey::generate().expect("root key");
+        let attachment_id = Uuid::new_v4();
+        let owner_item_id = Uuid::new_v4();
+        let valid = active_attachment_manifest(attachment_id, owner_item_id, 1);
+        let (base, _) = seal_attachment_manifest(&root, &valid, 1).expect("seal valid manifest");
+
+        let oversized_filename = AttachmentManifestV1::Active {
+            attachment_id,
+            owner_item_id,
+            filename: "x".repeat(ATTACHMENT_MAX_FILENAME_CHARS + 1),
+            plaintext_size: 1,
+            chunk_size: ATTACHMENT_CHUNK_SIZE,
+            chunk_count: 1,
+        };
+        let mut encrypted = base.clone();
+        replace_manifest_ciphertext_unchecked(&root, &mut encrypted, &oversized_filename);
+        assert!(matches!(
+            open_attachment_manifest(&root, &encrypted),
+            Err(CryptoError::InconsistentRecord)
+        ));
+
+        let oversized_plaintext = AttachmentManifestV1::Active {
+            attachment_id,
+            owner_item_id,
+            filename: "evidence.bin".to_owned(),
+            plaintext_size: ATTACHMENT_MAX_PLAINTEXT_BYTES + 1,
+            chunk_size: ATTACHMENT_CHUNK_SIZE,
+            chunk_count: ATTACHMENT_MAX_CHUNKS + 1,
+        };
+        let mut encrypted = base.clone();
+        replace_manifest_ciphertext_unchecked(&root, &mut encrypted, &oversized_plaintext);
+        assert!(matches!(
+            open_attachment_manifest(&root, &encrypted),
+            Err(CryptoError::InconsistentRecord)
+        ));
+
+        let oversized_count = AttachmentManifestV1::Active {
+            attachment_id,
+            owner_item_id,
+            filename: "evidence.bin".to_owned(),
+            plaintext_size: ATTACHMENT_MAX_PLAINTEXT_BYTES,
+            chunk_size: ATTACHMENT_CHUNK_SIZE,
+            chunk_count: ATTACHMENT_MAX_CHUNKS + 1,
+        };
+        let mut encrypted = base;
+        replace_manifest_ciphertext_unchecked(&root, &mut encrypted, &oversized_count);
+        assert!(matches!(
+            open_attachment_manifest(&root, &encrypted),
+            Err(CryptoError::InconsistentRecord)
+        ));
+    }
+
+    #[test]
+    fn attachment_open_and_chunk_decrypt_reject_oversized_ciphertexts() {
+        let root = AccountRootKey::generate().expect("root key");
+        let manifest = active_attachment_manifest(Uuid::new_v4(), Uuid::new_v4(), 1);
+        let (mut encrypted, _) =
+            seal_attachment_manifest(&root, &manifest, 1).expect("seal manifest");
+        encrypted.manifest_ciphertext = vec![0; ATTACHMENT_MAX_MANIFEST_CIPHERTEXT_BYTES + 1];
+        assert!(matches!(
+            open_attachment_manifest(&root, &encrypted),
+            Err(CryptoError::InconsistentRecord)
+        ));
+
+        let (encrypted, _) =
+            seal_attachment_manifest(&root, &manifest, 1).expect("seal manifest again");
+        let (_, decryptor) =
+            open_attachment_manifest(&root, &encrypted).expect("open valid manifest");
+        let decryptor = decryptor.expect("active decryptor");
+        let oversized_chunk = vec![0; ATTACHMENT_MAX_CHUNK_CIPHERTEXT_BYTES + 1];
+        assert!(matches!(
+            decryptor.decrypt_chunk(0, &oversized_chunk),
+            Err(CryptoError::InconsistentRecord)
+        ));
+    }
+
+    #[test]
+    fn maximum_v1_manifest_fits_bounded_encrypted_record() {
+        let root = AccountRootKey::generate().expect("root key");
+        let manifest = AttachmentManifestV1::Active {
+            attachment_id: Uuid::new_v4(),
+            owner_item_id: Uuid::new_v4(),
+            filename: "\u{1}".repeat(ATTACHMENT_MAX_FILENAME_CHARS),
+            plaintext_size: ATTACHMENT_MAX_PLAINTEXT_BYTES,
+            chunk_size: ATTACHMENT_CHUNK_SIZE,
+            chunk_count: ATTACHMENT_MAX_CHUNKS,
+        };
+        let (encrypted, _) =
+            seal_attachment_manifest(&root, &manifest, 1).expect("seal maximum manifest");
+        assert!(encrypted.manifest_ciphertext.len() <= ATTACHMENT_MAX_MANIFEST_CIPHERTEXT_BYTES);
+        let encoded = serde_json::to_vec(&encrypted).expect("serialize encrypted attachment");
+        assert!(encoded.len() <= ATTACHMENT_MAX_ENCRYPTED_RECORD_BYTES);
+    }
+
+    #[test]
+    fn attachment_chunk_aad_binds_owner_size_and_count() {
+        let root = AccountRootKey::generate().expect("root key");
+        let attachment_id = Uuid::new_v4();
+        let owner_item_id = Uuid::new_v4();
+        let manifest = active_attachment_manifest(attachment_id, owner_item_id, 4);
+        let (encrypted, encryptor) =
+            seal_attachment_manifest(&root, &manifest, 3).expect("seal manifest");
+        let encryptor = encryptor.expect("active encryptor");
+        let ciphertext = encryptor.encrypt_chunk(0, b"data").expect("encrypt chunk");
+        let (_, decryptor) = open_attachment_manifest(&root, &encrypted).expect("open manifest");
+        let decryptor = decryptor.expect("active decryptor");
+
+        let wrong_owner = AttachmentCipherContext {
+            file_key: Zeroizing::new(*decryptor.file_key),
+            nonce_prefix: decryptor.nonce_prefix,
+            attachment_id,
+            owner_item_id: Uuid::new_v4(),
+            revision: decryptor.revision,
+            plaintext_size: decryptor.plaintext_size,
+            chunk_size: decryptor.chunk_size,
+            chunk_count: decryptor.chunk_count,
+        };
+        assert!(wrong_owner.decrypt_chunk(0, &ciphertext).is_err());
+
+        let wrong_size = AttachmentCipherContext {
+            file_key: Zeroizing::new(*decryptor.file_key),
+            nonce_prefix: decryptor.nonce_prefix,
+            attachment_id,
+            owner_item_id,
+            revision: decryptor.revision,
+            plaintext_size: 3,
+            chunk_size: decryptor.chunk_size,
+            chunk_count: decryptor.chunk_count,
+        };
+        assert!(wrong_size.decrypt_chunk(0, &ciphertext).is_err());
+    }
+
+    #[test]
+    fn attachment_tombstone_has_no_chunk_context() {
+        let root = AccountRootKey::generate().expect("root key");
+        let manifest = AttachmentManifestV1::Tombstone {
+            attachment_id: Uuid::new_v4(),
+            owner_item_id: Uuid::new_v4(),
+            deleted_at_ms: 123,
+        };
+        let (encrypted, context) =
+            seal_attachment_manifest(&root, &manifest, 2).expect("seal tombstone");
+        assert!(context.is_none());
+        let (restored, context) =
+            open_attachment_manifest(&root, &encrypted).expect("open tombstone");
+        assert!(restored == manifest);
+        assert!(context.is_none());
     }
 
     #[test]

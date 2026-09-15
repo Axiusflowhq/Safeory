@@ -2,12 +2,20 @@
 
 pub mod reminders;
 
-use std::path::Path;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs::{self, File, OpenOptions},
+    io::{Read, Write},
+    path::{Path, PathBuf},
+};
 use thiserror::Error;
 use uuid::Uuid;
 use vault_crypto::{
-    AccountRootKey, CryptoError, RecoverySecret, decrypt_item_state, encrypt_item,
-    encrypt_item_state, unwrap_root_key, unwrap_root_key_with_recovery_secret, wrap_root_key,
+    ATTACHMENT_CHUNK_SIZE, ATTACHMENT_MAX_FILENAME_CHARS, ATTACHMENT_MAX_PLAINTEXT_BYTES,
+    AccountRootKey, AttachmentCipherContext, AttachmentManifestV1, CryptoError,
+    EncryptedAttachmentV1, EncryptedItemV1, RecoveryKitWrapV1, RecoverySecret, decrypt_item_state,
+    encrypt_item, encrypt_item_state, open_attachment_manifest, seal_attachment_manifest,
+    unwrap_root_key, unwrap_root_key_with_recovery_secret, wrap_root_key,
     wrap_root_key_with_recovery_secret,
 };
 use vault_models::{EMERGENCY_CARD_ID, EmergencyCard, VaultItem, VaultItemState};
@@ -24,11 +32,303 @@ const PASSWORD_MAX_LENGTH: usize = 128;
 const MAX_ITEM_TITLE_CHARS: usize = 256;
 const MAX_ITEM_FIELDS: usize = 32;
 const MAX_ITEM_LINKS: usize = 64;
+const MAX_ITEM_ATTACHMENTS: usize = 16;
 const MAX_FIELD_NAME_CHARS: usize = 64;
 const MAX_FIELD_VALUE_CHARS: usize = 100_000;
 const MAX_ITEM_NOTES_CHARS: usize = 100_000;
 const MAX_CARD_ITEMS: usize = 128;
 const MAX_CARD_CONTACTS: usize = 32;
+const MAX_ATTACHMENT_STORAGE_BYTES: u64 = 1024 * 1024 * 1024;
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct AttachmentSummary {
+    pub id: Uuid,
+    pub revision: u64,
+    pub filename: String,
+    pub plaintext_size: u64,
+}
+
+pub struct AttachmentImportSource {
+    file: File,
+    filename: String,
+    plaintext_size: u64,
+}
+
+impl AttachmentImportSource {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, VaultError> {
+        let path = path.as_ref();
+        let file = File::open(path)?;
+        let metadata = file.metadata()?;
+        if !metadata.file_type().is_file() {
+            return Err(VaultError::InvalidAttachmentSource);
+        }
+        let plaintext_size = metadata.len();
+        if plaintext_size > ATTACHMENT_MAX_PLAINTEXT_BYTES {
+            return Err(VaultError::AttachmentTooLarge);
+        }
+        let filename = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| {
+                !name.is_empty() && name.chars().count() <= ATTACHMENT_MAX_FILENAME_CHARS
+            })
+            .ok_or(VaultError::InvalidAttachmentSource)?
+            .to_owned();
+        Ok(Self {
+            file,
+            filename,
+            plaintext_size,
+        })
+    }
+
+    fn validate_open_handle(&self) -> Result<(), VaultError> {
+        let metadata = self.file.metadata()?;
+        if !metadata.file_type().is_file() || metadata.len() != self.plaintext_size {
+            return Err(VaultError::InvalidAttachmentSource);
+        }
+        Ok(())
+    }
+}
+
+pub struct AttachmentImportPlan {
+    summary: AttachmentSummary,
+    expected_item_revision: u64,
+    item_revision: u64,
+    encrypted_item: EncryptedItemV1,
+    encrypted_record: Vec<u8>,
+    encryptor: AttachmentCipherContext,
+}
+
+pub struct PreparedAttachmentImport {
+    summary: AttachmentSummary,
+    expected_item_revision: u64,
+    item_revision: u64,
+    encrypted_item: EncryptedItemV1,
+    encrypted_record: Vec<u8>,
+    chunks: Vec<(u32, Vec<u8>)>,
+}
+
+impl AttachmentImportPlan {
+    pub fn encrypt_source<F>(
+        self,
+        mut source: AttachmentImportSource,
+        mut cancelled: F,
+    ) -> Result<PreparedAttachmentImport, VaultError>
+    where
+        F: FnMut() -> bool,
+    {
+        if source.filename != self.summary.filename
+            || source.plaintext_size != self.summary.plaintext_size
+        {
+            return Err(VaultError::InvalidAttachmentSource);
+        }
+        source.validate_open_handle()?;
+        if cancelled() {
+            return Err(VaultError::AttachmentOperationCancelled);
+        }
+
+        let chunk_count = attachment_chunk_count(self.summary.plaintext_size);
+        let mut chunks = Vec::with_capacity(
+            usize::try_from(chunk_count).map_err(|_| VaultError::AttachmentTooLarge)?,
+        );
+        let mut bytes_read = 0u64;
+        for index in 0..chunk_count {
+            if cancelled() {
+                return Err(VaultError::AttachmentOperationCancelled);
+            }
+            let remaining = self
+                .summary
+                .plaintext_size
+                .checked_sub(bytes_read)
+                .ok_or(VaultError::InconsistentAttachment)?;
+            let len = usize::try_from(remaining.min(ATTACHMENT_CHUNK_SIZE))
+                .map_err(|_| VaultError::AttachmentTooLarge)?;
+            let mut plaintext = vec![0u8; len];
+            source.file.read_exact(&mut plaintext).map_err(|error| {
+                if error.kind() == std::io::ErrorKind::UnexpectedEof {
+                    VaultError::InvalidAttachmentSource
+                } else {
+                    VaultError::AttachmentIo(error)
+                }
+            })?;
+            bytes_read = bytes_read
+                .checked_add(u64::try_from(len).map_err(|_| VaultError::AttachmentTooLarge)?)
+                .ok_or(VaultError::AttachmentTooLarge)?;
+            let ciphertext = self.encryptor.encrypt_chunk(index, &plaintext)?;
+            let index = u32::try_from(index).map_err(|_| VaultError::AttachmentTooLarge)?;
+            chunks.push((index, ciphertext));
+            if cancelled() {
+                return Err(VaultError::AttachmentOperationCancelled);
+            }
+        }
+
+        let mut extra = [0u8; 1];
+        if bytes_read != self.summary.plaintext_size || source.file.read(&mut extra)? != 0 {
+            return Err(VaultError::InvalidAttachmentSource);
+        }
+        source.validate_open_handle()?;
+        if cancelled() {
+            return Err(VaultError::AttachmentOperationCancelled);
+        }
+
+        Ok(PreparedAttachmentImport {
+            summary: self.summary,
+            expected_item_revision: self.expected_item_revision,
+            item_revision: self.item_revision,
+            encrypted_item: self.encrypted_item,
+            encrypted_record: self.encrypted_record,
+            chunks,
+        })
+    }
+}
+
+pub struct AttachmentExportPlan {
+    plaintext_size: u64,
+    context: AttachmentCipherContext,
+    chunks: Vec<(u32, Vec<u8>)>,
+}
+
+pub struct VaultBackupPlan {
+    source_path: PathBuf,
+    recovery_secret: RecoverySecret,
+    wrapped_root_key: RecoveryKitWrapV1,
+}
+
+impl VaultBackupPlan {
+    pub fn write_validated_to<F>(
+        self,
+        path: impl AsRef<Path>,
+        mut cancelled: F,
+    ) -> Result<(), VaultError>
+    where
+        F: FnMut() -> bool,
+    {
+        if cancelled() {
+            return Err(VaultError::OperationCancelled);
+        }
+        let source_storage = VaultStorage::open(&self.source_path)?;
+        source_storage.backup_to(&path)?;
+        if cancelled() {
+            return Err(VaultError::OperationCancelled);
+        }
+        let backup_storage = VaultStorage::open(&path)?;
+        backup_storage.validate_integrity()?;
+        if cancelled() {
+            return Err(VaultError::OperationCancelled);
+        }
+        let root_key =
+            unwrap_root_key_with_recovery_secret(&self.recovery_secret, &self.wrapped_root_key)?;
+        validate_storage_contents_with_cancel(&backup_storage, &root_key, &mut cancelled)?;
+        let _ = backup_storage.load_recovery_wrap()?;
+        if cancelled() {
+            return Err(VaultError::OperationCancelled);
+        }
+        Ok(())
+    }
+}
+
+pub struct PreparedVaultRestore {
+    backup_path: PathBuf,
+    root_key: AccountRootKey,
+}
+
+pub struct LockedVaultRestore {
+    backup_path: PathBuf,
+}
+
+impl PreparedVaultRestore {
+    pub fn install_to(self, live_path: impl AsRef<Path>) -> Result<VaultSession, VaultError> {
+        let storage = VaultStorage::open(live_path)?;
+        storage.replace_from_database(&self.backup_path)?;
+        Ok(VaultSession {
+            storage,
+            root_key: self.root_key,
+        })
+    }
+
+    pub fn into_locked_install(self) -> LockedVaultRestore {
+        let Self {
+            backup_path,
+            root_key,
+        } = self;
+        drop(root_key);
+        LockedVaultRestore { backup_path }
+    }
+}
+
+impl LockedVaultRestore {
+    pub fn install_to(self, live_path: impl AsRef<Path>) -> Result<(), VaultError> {
+        let storage = VaultStorage::open(live_path)?;
+        storage.replace_from_database(&self.backup_path)?;
+        Ok(())
+    }
+}
+
+impl AttachmentExportPlan {
+    pub fn write_to_path<F>(
+        self,
+        output_path: impl AsRef<Path>,
+        mut cancelled: F,
+    ) -> Result<(), VaultError>
+    where
+        F: FnMut() -> bool,
+    {
+        if cancelled() {
+            return Err(VaultError::AttachmentOperationCancelled);
+        }
+        let output_path = output_path.as_ref();
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(output_path)
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    VaultError::AttachmentOutputExists
+                } else {
+                    VaultError::AttachmentIo(error)
+                }
+            })?;
+        let export_result = (|| -> Result<(), VaultError> {
+            let mut total_plaintext = 0u64;
+            for (expected_index, (stored_index, ciphertext)) in self.chunks.iter().enumerate() {
+                let expected_index = u32::try_from(expected_index)
+                    .map_err(|_| VaultError::InconsistentAttachment)?;
+                if *stored_index != expected_index {
+                    return Err(VaultError::InconsistentAttachment);
+                }
+                if cancelled() {
+                    return Err(VaultError::AttachmentOperationCancelled);
+                }
+                let plaintext = self
+                    .context
+                    .decrypt_chunk(u64::from(*stored_index), ciphertext)?;
+                if cancelled() {
+                    return Err(VaultError::AttachmentOperationCancelled);
+                }
+                total_plaintext = total_plaintext
+                    .checked_add(
+                        u64::try_from(plaintext.len())
+                            .map_err(|_| VaultError::InconsistentAttachment)?,
+                    )
+                    .ok_or(VaultError::InconsistentAttachment)?;
+                output.write_all(&plaintext)?;
+            }
+            if total_plaintext != self.plaintext_size {
+                return Err(VaultError::InconsistentAttachment);
+            }
+            if cancelled() {
+                return Err(VaultError::AttachmentOperationCancelled);
+            }
+            output.sync_all()?;
+            Ok(())
+        })();
+        drop(output);
+        if export_result.is_err() {
+            let _ = fs::remove_file(output_path);
+        }
+        export_result
+    }
+}
 
 #[derive(Error, Debug)]
 pub enum VaultError {
@@ -50,6 +350,28 @@ pub enum VaultError {
     ItemNotActive,
     #[error("vault item is not in trash")]
     ItemNotTrashed,
+    #[error("attachment references are managed by attachment operations")]
+    AttachmentReferencesManagedSeparately,
+    #[error("attachment source must be a regular file with a valid filename")]
+    InvalidAttachmentSource,
+    #[error("attachment exceeds the supported file-size limit")]
+    AttachmentTooLarge,
+    #[error("item has reached the attachment limit")]
+    AttachmentLimitReached,
+    #[error("vault has reached the attachment storage limit")]
+    AttachmentStorageLimitReached,
+    #[error("attachment is not owned by this active item")]
+    AttachmentNotOwned,
+    #[error("attachment data is inconsistent")]
+    InconsistentAttachment,
+    #[error("attachment output already exists")]
+    AttachmentOutputExists,
+    #[error("attachment operation was cancelled")]
+    AttachmentOperationCancelled,
+    #[error("vault operation was cancelled")]
+    OperationCancelled,
+    #[error("attachment file operation failed")]
+    AttachmentIo(#[from] std::io::Error),
 }
 
 pub fn generate_strong_password(length: usize) -> Result<String, VaultError> {
@@ -139,6 +461,9 @@ impl VaultSession {
     }
 
     pub fn put_item(&self, item: &VaultItem, revision: u64) -> Result<(), VaultError> {
+        if !item.attachments.is_empty() {
+            return Err(VaultError::AttachmentReferencesManagedSeparately);
+        }
         validate_item(item)?;
         let encrypted = encrypt_item(&self.root_key, item, revision)?;
         self.storage.upsert_item(&encrypted)?;
@@ -151,8 +476,11 @@ impl VaultSession {
         if current_revision != expected_revision {
             return Err(VaultError::Storage(StorageError::StaleRevision));
         }
-        if !matches!(state, VaultItemState::Active { .. }) {
+        let VaultItemState::Active { item: current } = state else {
             return Err(VaultError::ItemNotActive);
+        };
+        if item.attachments != current.attachments {
+            return Err(VaultError::AttachmentReferencesManagedSeparately);
         }
         let revision = expected_revision
             .checked_add(1)
@@ -161,6 +489,279 @@ impl VaultSession {
         self.storage
             .update_item_if_revision(&encrypted, expected_revision)?;
         Ok(revision)
+    }
+
+    pub fn add_attachment_from_path(
+        &self,
+        owner_item_id: Uuid,
+        expected_item_revision: u64,
+        path: impl AsRef<Path>,
+    ) -> Result<(AttachmentSummary, u64), VaultError> {
+        let source = AttachmentImportSource::open(path)?;
+        let plan =
+            self.prepare_attachment_import(owner_item_id, expected_item_revision, &source)?;
+        let prepared = plan.encrypt_source(source, || false)?;
+        self.commit_attachment_import(prepared)
+    }
+
+    pub fn prepare_attachment_import(
+        &self,
+        owner_item_id: Uuid,
+        expected_item_revision: u64,
+        source: &AttachmentImportSource,
+    ) -> Result<AttachmentImportPlan, VaultError> {
+        if owner_item_id == EMERGENCY_CARD_ID {
+            return Err(VaultError::AttachmentNotOwned);
+        }
+        let (state, current_revision) = self.get_state_with_revision(owner_item_id)?;
+        if current_revision != expected_item_revision {
+            return Err(VaultError::Storage(StorageError::StaleRevision));
+        }
+        let VaultItemState::Active { mut item } = state else {
+            return Err(VaultError::ItemNotActive);
+        };
+        if item.attachments.len() >= MAX_ITEM_ATTACHMENTS {
+            return Err(VaultError::AttachmentLimitReached);
+        }
+
+        let attachment_id = Uuid::new_v4();
+        let chunk_count = attachment_chunk_count(source.plaintext_size);
+        let manifest = AttachmentManifestV1::Active {
+            attachment_id,
+            owner_item_id,
+            filename: source.filename.clone(),
+            plaintext_size: source.plaintext_size,
+            chunk_size: ATTACHMENT_CHUNK_SIZE,
+            chunk_count,
+        };
+        let (encrypted_attachment, encryptor) =
+            seal_attachment_manifest(&self.root_key, &manifest, 1)?;
+        let encryptor = encryptor.ok_or(VaultError::InconsistentAttachment)?;
+        let encrypted_record =
+            serde_json::to_vec(&encrypted_attachment).map_err(CryptoError::Serialization)?;
+        item.attachments.push(attachment_id);
+        validate_item(&item)?;
+        let item_revision = expected_item_revision
+            .checked_add(1)
+            .ok_or(VaultError::RevisionExhausted)?;
+        let encrypted_item = encrypt_item(&self.root_key, &item, item_revision)?;
+
+        Ok(AttachmentImportPlan {
+            summary: AttachmentSummary {
+                id: attachment_id,
+                revision: 1,
+                filename: source.filename.clone(),
+                plaintext_size: source.plaintext_size,
+            },
+            expected_item_revision,
+            item_revision,
+            encrypted_item,
+            encrypted_record,
+            encryptor,
+        })
+    }
+
+    pub fn commit_attachment_import(
+        &self,
+        prepared: PreparedAttachmentImport,
+    ) -> Result<(AttachmentSummary, u64), VaultError> {
+        let added_bytes = prepared.chunks.iter().try_fold(
+            u64::try_from(prepared.encrypted_record.len())
+                .map_err(|_| VaultError::AttachmentTooLarge)?,
+            |total, (_, chunk)| {
+                total
+                    .checked_add(
+                        u64::try_from(chunk.len()).map_err(|_| VaultError::AttachmentTooLarge)?,
+                    )
+                    .ok_or(VaultError::AttachmentTooLarge)
+            },
+        )?;
+        let total_attachment_storage = self
+            .storage
+            .attachment_storage_bytes()?
+            .checked_add(added_bytes)
+            .ok_or(VaultError::AttachmentStorageLimitReached)?;
+        validate_attachment_storage_bytes(total_attachment_storage)?;
+
+        match self.storage.insert_attachment_and_update_item_if_revision(
+            &prepared.encrypted_item,
+            prepared.expected_item_revision,
+            prepared.summary.id,
+            prepared.summary.revision,
+            &prepared.encrypted_record,
+            &prepared.chunks,
+        ) {
+            Ok(()) => {}
+            Err(StorageError::AttachmentObjectLimitReached) => {
+                return Err(VaultError::AttachmentStorageLimitReached);
+            }
+            Err(error) => return Err(VaultError::Storage(error)),
+        }
+        Ok((prepared.summary, prepared.item_revision))
+    }
+
+    pub fn list_attachments(
+        &self,
+        owner_item_id: Uuid,
+    ) -> Result<Vec<AttachmentSummary>, VaultError> {
+        let (state, _revision) = self.get_state_with_revision(owner_item_id)?;
+        let VaultItemState::Active { item } = state else {
+            return Err(VaultError::ItemNotActive);
+        };
+        let mut summaries = Vec::with_capacity(item.attachments.len());
+        for attachment_id in item.attachments {
+            let (revision, encrypted_record) = self.storage.load_attachment(attachment_id)?;
+            let encrypted = decode_attachment_record(attachment_id, revision, &encrypted_record)?;
+            let (manifest, _context) = open_attachment_manifest(&self.root_key, &encrypted)?;
+            let AttachmentManifestV1::Active {
+                owner_item_id: manifest_owner,
+                filename,
+                plaintext_size,
+                ..
+            } = manifest
+            else {
+                return Err(VaultError::InconsistentAttachment);
+            };
+            if manifest_owner != owner_item_id {
+                return Err(VaultError::AttachmentNotOwned);
+            }
+            summaries.push(AttachmentSummary {
+                id: attachment_id,
+                revision,
+                filename,
+                plaintext_size,
+            });
+        }
+        Ok(summaries)
+    }
+
+    pub fn export_attachment_to(
+        &self,
+        owner_item_id: Uuid,
+        attachment_id: Uuid,
+        output_path: impl AsRef<Path>,
+    ) -> Result<(), VaultError> {
+        let plan = self.prepare_attachment_export(owner_item_id, attachment_id)?;
+        plan.write_to_path(output_path, || false)
+    }
+
+    pub fn prepare_attachment_export(
+        &self,
+        owner_item_id: Uuid,
+        attachment_id: Uuid,
+    ) -> Result<AttachmentExportPlan, VaultError> {
+        let (state, _revision) = self.get_state_with_revision(owner_item_id)?;
+        let VaultItemState::Active { item } = state else {
+            return Err(VaultError::ItemNotActive);
+        };
+        if !item.attachments.contains(&attachment_id) {
+            return Err(VaultError::AttachmentNotOwned);
+        }
+
+        let (revision, encrypted_record) = self.storage.load_attachment(attachment_id)?;
+        let encrypted = decode_attachment_record(attachment_id, revision, &encrypted_record)?;
+        let (manifest, context) = open_attachment_manifest(&self.root_key, &encrypted)?;
+        let AttachmentManifestV1::Active {
+            owner_item_id: manifest_owner,
+            plaintext_size,
+            chunk_count,
+            ..
+        } = manifest
+        else {
+            return Err(VaultError::InconsistentAttachment);
+        };
+        if manifest_owner != owner_item_id {
+            return Err(VaultError::AttachmentNotOwned);
+        }
+        let context = context.ok_or(VaultError::InconsistentAttachment)?;
+        let chunks = self.storage.list_attachment_chunks(attachment_id)?;
+        if chunks.len()
+            != usize::try_from(chunk_count).map_err(|_| VaultError::InconsistentAttachment)?
+        {
+            return Err(VaultError::InconsistentAttachment);
+        }
+        for (expected_index, (stored_index, _)) in chunks.iter().enumerate() {
+            let expected_index =
+                u32::try_from(expected_index).map_err(|_| VaultError::InconsistentAttachment)?;
+            if *stored_index != expected_index {
+                return Err(VaultError::InconsistentAttachment);
+            }
+        }
+        Ok(AttachmentExportPlan {
+            plaintext_size,
+            context,
+            chunks,
+        })
+    }
+
+    pub fn delete_attachment(
+        &self,
+        owner_item_id: Uuid,
+        attachment_id: Uuid,
+        expected_item_revision: u64,
+        expected_attachment_revision: u64,
+        deleted_at_ms: u64,
+    ) -> Result<u64, VaultError> {
+        let (state, current_item_revision) = self.get_state_with_revision(owner_item_id)?;
+        if current_item_revision != expected_item_revision {
+            return Err(VaultError::Storage(StorageError::StaleRevision));
+        }
+        let VaultItemState::Active { mut item } = state else {
+            return Err(VaultError::ItemNotActive);
+        };
+        let Some(position) = item
+            .attachments
+            .iter()
+            .position(|candidate| *candidate == attachment_id)
+        else {
+            return Err(VaultError::AttachmentNotOwned);
+        };
+        let (stored_revision, encrypted_record) = self.storage.load_attachment(attachment_id)?;
+        if stored_revision != expected_attachment_revision {
+            return Err(VaultError::Storage(StorageError::StaleRevision));
+        }
+        let encrypted =
+            decode_attachment_record(attachment_id, stored_revision, &encrypted_record)?;
+        let (manifest, _context) = open_attachment_manifest(&self.root_key, &encrypted)?;
+        if !matches!(
+            manifest,
+            AttachmentManifestV1::Active { owner_item_id: owner, .. } if owner == owner_item_id
+        ) {
+            return Err(VaultError::AttachmentNotOwned);
+        }
+
+        item.attachments.remove(position);
+        let item_revision = expected_item_revision
+            .checked_add(1)
+            .ok_or(VaultError::RevisionExhausted)?;
+        let attachment_revision = expected_attachment_revision
+            .checked_add(1)
+            .ok_or(VaultError::RevisionExhausted)?;
+        let encrypted_item = encrypt_item(&self.root_key, &item, item_revision)?;
+        let tombstone_manifest = AttachmentManifestV1::Tombstone {
+            attachment_id,
+            owner_item_id,
+            deleted_at_ms,
+        };
+        let (tombstone, context) =
+            seal_attachment_manifest(&self.root_key, &tombstone_manifest, attachment_revision)?;
+        if context.is_some() {
+            return Err(VaultError::InconsistentAttachment);
+        }
+        let tombstone_record =
+            serde_json::to_vec(&tombstone).map_err(CryptoError::Serialization)?;
+        self.storage
+            .tombstone_attachments_and_update_item_if_revision(
+                &encrypted_item,
+                expected_item_revision,
+                &[(
+                    attachment_id,
+                    attachment_revision,
+                    expected_attachment_revision,
+                    tombstone_record,
+                )],
+            )?;
+        Ok(item_revision)
     }
 
     pub fn get_item(&self, id: Uuid) -> Result<VaultItem, VaultError> {
@@ -272,7 +873,11 @@ impl VaultSession {
         if current_revision != expected_revision {
             return Err(VaultError::Storage(StorageError::StaleRevision));
         }
-        let VaultItemState::Trashed { deleted_at_ms, .. } = state else {
+        let VaultItemState::Trashed {
+            item,
+            deleted_at_ms,
+        } = state
+        else {
             return Err(VaultError::ItemNotTrashed);
         };
         let revision = expected_revision
@@ -283,8 +888,46 @@ impl VaultSession {
             &VaultItemState::Tombstone { id, deleted_at_ms },
             revision,
         )?;
+        let mut tombstones = Vec::with_capacity(item.attachments.len());
+        for attachment_id in item.attachments {
+            let (attachment_revision, encrypted_record) =
+                self.storage.load_attachment(attachment_id)?;
+            let encrypted_attachment =
+                decode_attachment_record(attachment_id, attachment_revision, &encrypted_record)?;
+            let (manifest, _context) =
+                open_attachment_manifest(&self.root_key, &encrypted_attachment)?;
+            if !matches!(
+                manifest,
+                AttachmentManifestV1::Active { owner_item_id, .. } if owner_item_id == id
+            ) {
+                return Err(VaultError::InconsistentAttachment);
+            }
+            let tombstone_revision = attachment_revision
+                .checked_add(1)
+                .ok_or(VaultError::RevisionExhausted)?;
+            let manifest = AttachmentManifestV1::Tombstone {
+                attachment_id,
+                owner_item_id: id,
+                deleted_at_ms,
+            };
+            let (tombstone, context) =
+                seal_attachment_manifest(&self.root_key, &manifest, tombstone_revision)?;
+            if context.is_some() {
+                return Err(VaultError::InconsistentAttachment);
+            }
+            tombstones.push((
+                attachment_id,
+                tombstone_revision,
+                attachment_revision,
+                serde_json::to_vec(&tombstone).map_err(CryptoError::Serialization)?,
+            ));
+        }
         self.storage
-            .update_item_if_revision(&encrypted, expected_revision)?;
+            .tombstone_attachments_and_update_item_if_revision(
+                &encrypted,
+                expected_revision,
+                &tombstones,
+            )?;
         Ok(revision)
     }
 
@@ -342,6 +985,100 @@ impl VaultSession {
         Ok(self.storage.has_recovery_wrap()?)
     }
 
+    pub fn validate_persisted_state(&self) -> Result<(), VaultError> {
+        self.storage.validate_integrity()?;
+        validate_storage_contents(&self.storage, &self.root_key)?;
+        let _ = self.storage.load_recovery_wrap()?;
+        Ok(())
+    }
+
+    pub fn prepare_database_backup(
+        &self,
+        source_path: impl AsRef<Path>,
+    ) -> Result<VaultBackupPlan, VaultError> {
+        let recovery_secret = RecoverySecret::generate()?;
+        let wrapped_root_key =
+            wrap_root_key_with_recovery_secret(&recovery_secret, &self.root_key)?;
+        Ok(VaultBackupPlan {
+            source_path: source_path.as_ref().to_path_buf(),
+            recovery_secret,
+            wrapped_root_key,
+        })
+    }
+
+    pub fn backup_database_to(&self, path: impl AsRef<Path>) -> Result<(), VaultError> {
+        self.storage.backup_to(&path)?;
+        let backup_storage = VaultStorage::open(&path)?;
+        backup_storage.validate_integrity()?;
+        validate_storage_contents(&backup_storage, &self.root_key)?;
+        let _ = backup_storage.load_recovery_wrap()?;
+        Ok(())
+    }
+
+    pub fn replace_with_backup(
+        &mut self,
+        path: impl AsRef<Path>,
+        passphrase: &str,
+    ) -> Result<(), VaultError> {
+        let prepared = Self::prepare_restore(path, passphrase)?;
+        self.commit_prepared_restore(prepared)
+    }
+
+    pub fn prepare_restore(
+        path: impl AsRef<Path>,
+        passphrase: &str,
+    ) -> Result<PreparedVaultRestore, VaultError> {
+        Self::prepare_restore_with_cancel(path, passphrase, || false)
+    }
+
+    pub fn prepare_restore_with_cancel<F>(
+        path: impl AsRef<Path>,
+        passphrase: &str,
+        mut cancelled: F,
+    ) -> Result<PreparedVaultRestore, VaultError>
+    where
+        F: FnMut() -> bool,
+    {
+        let backup_path = path.as_ref().to_path_buf();
+        let storage = VaultStorage::open(&backup_path)?;
+        storage.validate_integrity()?;
+        if cancelled() {
+            return Err(VaultError::OperationCancelled);
+        }
+        let wrapped = storage.load_root_wrap()?;
+        let root_key = unwrap_root_key(passphrase, &wrapped)?;
+        if cancelled() {
+            return Err(VaultError::OperationCancelled);
+        }
+        validate_storage_contents_with_cancel(&storage, &root_key, &mut cancelled)?;
+        let _ = storage.load_recovery_wrap()?;
+        if cancelled() {
+            return Err(VaultError::OperationCancelled);
+        }
+        drop(storage);
+        Ok(PreparedVaultRestore {
+            backup_path,
+            root_key,
+        })
+    }
+
+    pub fn commit_prepared_restore(
+        &mut self,
+        prepared: PreparedVaultRestore,
+    ) -> Result<(), VaultError> {
+        self.storage.replace_from_database(&prepared.backup_path)?;
+        self.root_key = prepared.root_key;
+        Ok(())
+    }
+
+    pub fn install_backup(
+        live_path: impl AsRef<Path>,
+        backup_path: impl AsRef<Path>,
+        passphrase: &str,
+    ) -> Result<Self, VaultError> {
+        Self::prepare_restore(backup_path, passphrase)?.install_to(live_path)
+    }
+
     pub fn unlock_with_recovery_kit(
         path: impl AsRef<Path>,
         secret: &RecoverySecret,
@@ -361,10 +1098,174 @@ impl VaultSession {
     }
 }
 
+fn validate_storage_contents(
+    storage: &VaultStorage,
+    root_key: &AccountRootKey,
+) -> Result<(), VaultError> {
+    validate_storage_contents_with_cancel(storage, root_key, &mut || false)
+}
+
+fn validate_storage_contents_with_cancel<F>(
+    storage: &VaultStorage,
+    root_key: &AccountRootKey,
+    cancelled: &mut F,
+) -> Result<(), VaultError>
+where
+    F: FnMut() -> bool,
+{
+    if cancelled() {
+        return Err(VaultError::OperationCancelled);
+    }
+    validate_attachment_storage_bytes(storage.attachment_storage_bytes()?)?;
+    let mut referenced_attachments = BTreeMap::<Uuid, Uuid>::new();
+    let mut seen_attachment_refs = BTreeSet::new();
+    for id in storage.list_item_ids()? {
+        if cancelled() {
+            return Err(VaultError::OperationCancelled);
+        }
+        let encrypted = storage.load_item(id)?;
+        let state = decrypt_item_state(root_key, &encrypted)?;
+        if cancelled() {
+            return Err(VaultError::OperationCancelled);
+        }
+        match state {
+            VaultItemState::Active { item } | VaultItemState::Trashed { item, .. } => {
+                validate_item(&item)?;
+                if item.id == EMERGENCY_CARD_ID && item.parse_emergency_card().is_none() {
+                    return Err(VaultError::Storage(StorageError::InconsistentEncryptedRow));
+                }
+                for attachment_id in &item.attachments {
+                    if !seen_attachment_refs.insert(*attachment_id)
+                        || referenced_attachments
+                            .insert(*attachment_id, item.id)
+                            .is_some()
+                    {
+                        return Err(VaultError::InconsistentAttachment);
+                    }
+                }
+            }
+            VaultItemState::Tombstone { .. } => {}
+        }
+    }
+
+    let mut stored_attachment_ids = BTreeSet::new();
+    for attachment_id in storage.list_attachment_ids()? {
+        if cancelled() {
+            return Err(VaultError::OperationCancelled);
+        }
+        if !stored_attachment_ids.insert(attachment_id) {
+            return Err(VaultError::InconsistentAttachment);
+        }
+        let (revision, encrypted_record) = storage.load_attachment(attachment_id)?;
+        let encrypted = decode_attachment_record(attachment_id, revision, &encrypted_record)?;
+        let (manifest, context) = open_attachment_manifest(root_key, &encrypted)?;
+        if cancelled() {
+            return Err(VaultError::OperationCancelled);
+        }
+        let chunk_indexes = storage.list_attachment_chunk_indexes(attachment_id)?;
+        match manifest {
+            AttachmentManifestV1::Active {
+                owner_item_id,
+                plaintext_size,
+                chunk_count,
+                ..
+            } => {
+                if referenced_attachments.get(&attachment_id) != Some(&owner_item_id) {
+                    return Err(VaultError::InconsistentAttachment);
+                }
+                if chunk_indexes.len()
+                    != usize::try_from(chunk_count)
+                        .map_err(|_| VaultError::InconsistentAttachment)?
+                {
+                    return Err(VaultError::InconsistentAttachment);
+                }
+                let context = context.ok_or(VaultError::InconsistentAttachment)?;
+                let mut total_plaintext = 0u64;
+                for (expected_index, stored_index) in chunk_indexes.iter().enumerate() {
+                    if cancelled() {
+                        return Err(VaultError::OperationCancelled);
+                    }
+                    let expected_index = u32::try_from(expected_index)
+                        .map_err(|_| VaultError::InconsistentAttachment)?;
+                    if *stored_index != expected_index {
+                        return Err(VaultError::InconsistentAttachment);
+                    }
+                    let ciphertext = storage
+                        .load_attachment_chunk(attachment_id, *stored_index)?
+                        .ok_or(VaultError::InconsistentAttachment)?;
+                    let plaintext = context.decrypt_chunk(u64::from(*stored_index), &ciphertext)?;
+                    if cancelled() {
+                        return Err(VaultError::OperationCancelled);
+                    }
+                    total_plaintext = total_plaintext
+                        .checked_add(
+                            u64::try_from(plaintext.len())
+                                .map_err(|_| VaultError::InconsistentAttachment)?,
+                        )
+                        .ok_or(VaultError::InconsistentAttachment)?;
+                }
+                if total_plaintext != plaintext_size {
+                    return Err(VaultError::InconsistentAttachment);
+                }
+            }
+            AttachmentManifestV1::Tombstone { .. } => {
+                if referenced_attachments.contains_key(&attachment_id)
+                    || context.is_some()
+                    || !chunk_indexes.is_empty()
+                {
+                    return Err(VaultError::InconsistentAttachment);
+                }
+            }
+        }
+    }
+
+    if referenced_attachments
+        .keys()
+        .any(|id| !stored_attachment_ids.contains(id))
+    {
+        return Err(VaultError::InconsistentAttachment);
+    }
+    if cancelled() {
+        return Err(VaultError::OperationCancelled);
+    }
+    Ok(())
+}
+
+fn validate_attachment_storage_bytes(total: u64) -> Result<(), VaultError> {
+    if total > MAX_ATTACHMENT_STORAGE_BYTES {
+        return Err(VaultError::AttachmentStorageLimitReached);
+    }
+    Ok(())
+}
+
+fn attachment_chunk_count(plaintext_size: u64) -> u64 {
+    if plaintext_size == 0 {
+        0
+    } else {
+        plaintext_size.div_ceil(ATTACHMENT_CHUNK_SIZE)
+    }
+}
+
+fn decode_attachment_record(
+    attachment_id: Uuid,
+    revision: u64,
+    encrypted_record: &[u8],
+) -> Result<EncryptedAttachmentV1, VaultError> {
+    let encrypted: EncryptedAttachmentV1 =
+        serde_json::from_slice(encrypted_record).map_err(CryptoError::Serialization)?;
+    if encrypted.attachment_id != attachment_id || encrypted.revision != revision {
+        return Err(VaultError::InconsistentAttachment);
+    }
+    Ok(encrypted)
+}
+
 fn validate_item(item: &VaultItem) -> Result<(), VaultError> {
+    let unique_attachments = item.attachments.iter().copied().collect::<BTreeSet<_>>();
     if item.title.chars().count() > MAX_ITEM_TITLE_CHARS
         || item.fields.len() > MAX_ITEM_FIELDS
         || item.links.len() > MAX_ITEM_LINKS
+        || item.attachments.len() > MAX_ITEM_ATTACHMENTS
+        || unique_attachments.len() != item.attachments.len()
         || item.fields.iter().any(|(name, value)| {
             name.chars().count() > MAX_FIELD_NAME_CHARS
                 || value.chars().count() > MAX_FIELD_VALUE_CHARS
@@ -401,6 +1302,7 @@ fn validate_emergency_card(card: &EmergencyCard) -> Result<(), VaultError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
     use std::fs;
     use std::process::Command;
     use tempfile::tempdir;
@@ -681,6 +1583,485 @@ mod tests {
         assert_eq!(
             session.get_item(original.id).expect("current item").title,
             "first edit"
+        );
+    }
+
+    #[test]
+    fn attachment_storage_budget_accepts_limit_and_rejects_one_byte_over() {
+        assert!(validate_attachment_storage_bytes(MAX_ATTACHMENT_STORAGE_BYTES).is_ok());
+        assert!(matches!(
+            validate_attachment_storage_bytes(MAX_ATTACHMENT_STORAGE_BYTES + 1),
+            Err(VaultError::AttachmentStorageLimitReached)
+        ));
+    }
+
+    #[test]
+    fn attachment_round_trip_trash_restore_delete_and_export() {
+        let dir = tempdir().expect("temp directory");
+        let database = dir.path().join("vault.sqlite3");
+        let source_path = dir.path().join("evidence.bin");
+        let export_path = dir.path().join("restored-evidence.bin");
+        let bytes = vec![0x5A; ATTACHMENT_CHUNK_SIZE as usize + 37];
+        fs::write(&source_path, &bytes).expect("write source attachment");
+
+        let session = VaultSession::create(&database, TEST_PASSPHRASE).expect("create vault");
+        let item = VaultItem::secure_note("attachment owner", "body");
+        session.put_item(&item, 1).expect("store owner");
+        let (summary, item_revision) = session
+            .add_attachment_from_path(item.id, 1, &source_path)
+            .expect("add attachment");
+        assert_eq!(item_revision, 2);
+        assert_eq!(summary.filename, "evidence.bin");
+        assert_eq!(summary.plaintext_size, bytes.len() as u64);
+        assert_eq!(summary.revision, 1);
+        assert_eq!(
+            session
+                .get_item(item.id)
+                .expect("owner with attachment")
+                .attachments,
+            vec![summary.id]
+        );
+        let listed = session.list_attachments(item.id).expect("list attachment");
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0] == summary);
+
+        session
+            .export_attachment_to(item.id, summary.id, &export_path)
+            .expect("export attachment");
+        assert_eq!(fs::read(&export_path).expect("read export"), bytes);
+        assert!(
+            fs::read_dir(dir.path())
+                .expect("list export directory")
+                .all(|entry| !entry
+                    .expect("directory entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("safeory.tmp"))
+        );
+        assert!(matches!(
+            session.export_attachment_to(item.id, summary.id, &export_path),
+            Err(VaultError::AttachmentOutputExists)
+        ));
+
+        let trashed_revision = session
+            .trash_item(item.id, item_revision, 100)
+            .expect("trash owner");
+        assert!(matches!(
+            session.list_attachments(item.id),
+            Err(VaultError::ItemNotActive)
+        ));
+        let restored_revision = session
+            .restore_item(item.id, trashed_revision)
+            .expect("restore owner");
+        let listed_after_restore = session
+            .list_attachments(item.id)
+            .expect("attachment after restore");
+        assert_eq!(listed_after_restore.len(), 1);
+        assert!(listed_after_restore[0] == summary);
+
+        let deleted_item_revision = session
+            .delete_attachment(
+                item.id,
+                summary.id,
+                restored_revision,
+                summary.revision,
+                200,
+            )
+            .expect("delete attachment");
+        assert_eq!(deleted_item_revision, restored_revision + 1);
+        assert!(
+            session
+                .list_attachments(item.id)
+                .expect("empty attachment list")
+                .is_empty()
+        );
+        let (stored_revision, record) = session
+            .storage
+            .load_attachment(summary.id)
+            .expect("attachment tombstone remains");
+        assert_eq!(stored_revision, 2);
+        let encrypted = decode_attachment_record(summary.id, stored_revision, &record)
+            .expect("decode tombstone");
+        let (manifest, context) =
+            open_attachment_manifest(&session.root_key, &encrypted).expect("open tombstone");
+        assert!(matches!(
+            manifest,
+            AttachmentManifestV1::Tombstone {
+                attachment_id,
+                owner_item_id,
+                deleted_at_ms: 200,
+            } if attachment_id == summary.id && owner_item_id == item.id
+        ));
+        assert!(context.is_none());
+        assert!(
+            session
+                .storage
+                .list_attachment_chunks(summary.id)
+                .expect("chunks removed")
+                .is_empty()
+        );
+        session
+            .validate_persisted_state()
+            .expect("attachment lifecycle state validates");
+    }
+
+    #[test]
+    fn failed_attachment_export_removes_selected_partial_without_temp_sibling() {
+        let dir = tempdir().expect("temp directory");
+        let database = dir.path().join("vault.sqlite3");
+        let source_path = dir.path().join("source.bin");
+        let export_path = dir.path().join("failed-export.bin");
+        fs::write(&source_path, b"payload").expect("write source attachment");
+        let session = VaultSession::create(&database, TEST_PASSPHRASE).expect("create vault");
+        let item = VaultItem::secure_note("attachment owner", "body");
+        session.put_item(&item, 1).expect("store owner");
+        let (summary, _) = session
+            .add_attachment_from_path(item.id, 1, &source_path)
+            .expect("add attachment");
+        let original_chunks = session
+            .storage
+            .list_attachment_chunks(summary.id)
+            .expect("load original chunk");
+        assert_eq!(original_chunks.len(), 1);
+        let ciphertext_len = original_chunks[0].1.len();
+        session
+            .storage
+            .delete_attachment_chunks(summary.id)
+            .expect("remove original chunk");
+        session
+            .storage
+            .insert_attachment_chunk(summary.id, 0, &vec![0; ciphertext_len])
+            .expect("insert same-size invalid ciphertext");
+
+        assert!(
+            session
+                .export_attachment_to(item.id, summary.id, &export_path)
+                .is_err()
+        );
+        assert!(!export_path.exists());
+        assert!(
+            fs::read_dir(dir.path())
+                .expect("list export directory")
+                .all(|entry| !entry
+                    .expect("directory entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("safeory.tmp"))
+        );
+    }
+
+    #[test]
+    fn cancelled_attachment_export_removes_partial_output() {
+        let dir = tempdir().expect("temp directory");
+        let database = dir.path().join("vault.sqlite3");
+        let source_path = dir.path().join("cancel-export-source.bin");
+        let export_path = dir.path().join("cancel-export.bin");
+        fs::write(
+            &source_path,
+            vec![0xA7; ATTACHMENT_CHUNK_SIZE as usize + 17],
+        )
+        .expect("write source attachment");
+        let session = VaultSession::create(&database, TEST_PASSPHRASE).expect("create vault");
+        let item = VaultItem::secure_note("attachment owner", "body");
+        session.put_item(&item, 1).expect("store owner");
+        let (summary, _) = session
+            .add_attachment_from_path(item.id, 1, &source_path)
+            .expect("add attachment");
+        let plan = session
+            .prepare_attachment_export(item.id, summary.id)
+            .expect("prepare export");
+        let checks = Cell::new(0usize);
+
+        let result = plan.write_to_path(&export_path, || {
+            let next = checks.get() + 1;
+            checks.set(next);
+            next >= 4
+        });
+
+        assert!(matches!(
+            result,
+            Err(VaultError::AttachmentOperationCancelled)
+        ));
+        assert!(checks.get() >= 4);
+        assert!(!export_path.exists());
+    }
+
+    #[test]
+    fn normal_item_updates_cannot_add_or_remove_attachment_references() {
+        let dir = tempdir().expect("temp directory");
+        let database = dir.path().join("vault.sqlite3");
+        let source_path = dir.path().join("receipt.txt");
+        fs::write(&source_path, b"receipt").expect("write source");
+        let session = VaultSession::create(&database, TEST_PASSPHRASE).expect("create vault");
+        let item = VaultItem::secure_note("owner", "body");
+        session.put_item(&item, 1).expect("store owner");
+        let (summary, item_revision) = session
+            .add_attachment_from_path(item.id, 1, &source_path)
+            .expect("add attachment");
+
+        let mut editor = session.get_item(item.id).expect("editor item");
+        editor.attachments.clear();
+        assert!(matches!(
+            session.update_item(&editor, item_revision),
+            Err(VaultError::AttachmentReferencesManagedSeparately)
+        ));
+        let mut forged = VaultItem::secure_note("forged", "body");
+        forged.attachments.push(summary.id);
+        assert!(matches!(
+            session.put_item(&forged, 1),
+            Err(VaultError::AttachmentReferencesManagedSeparately)
+        ));
+        assert_eq!(
+            session
+                .get_item(item.id)
+                .expect("unchanged item")
+                .attachments,
+            vec![summary.id]
+        );
+    }
+
+    #[test]
+    fn stale_attachment_add_fails_without_creating_attachment_rows() {
+        let dir = tempdir().expect("temp directory");
+        let database = dir.path().join("vault.sqlite3");
+        let source_path = dir.path().join("small.txt");
+        fs::write(&source_path, b"small").expect("write source");
+        let session = VaultSession::create(&database, TEST_PASSPHRASE).expect("create vault");
+        let item = VaultItem::secure_note("owner", "body");
+        session.put_item(&item, 1).expect("store owner");
+
+        assert!(matches!(
+            session.add_attachment_from_path(item.id, 0, &source_path),
+            Err(VaultError::Storage(StorageError::StaleRevision))
+        ));
+        assert!(
+            session
+                .storage
+                .list_attachment_ids()
+                .expect("no attachment rows")
+                .is_empty()
+        );
+        assert!(
+            session
+                .get_item(item.id)
+                .expect("owner")
+                .attachments
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn cancelled_attachment_import_creates_no_rows() {
+        let dir = tempdir().expect("temp directory");
+        let database = dir.path().join("vault.sqlite3");
+        let source_path = dir.path().join("cancel-import.bin");
+        fs::write(
+            &source_path,
+            vec![0x5C; ATTACHMENT_CHUNK_SIZE as usize + 11],
+        )
+        .expect("write source attachment");
+        let session = VaultSession::create(&database, TEST_PASSPHRASE).expect("create vault");
+        let item = VaultItem::secure_note("owner", "body");
+        session.put_item(&item, 1).expect("store owner");
+        let source = AttachmentImportSource::open(&source_path).expect("open attachment source");
+        let plan = session
+            .prepare_attachment_import(item.id, 1, &source)
+            .expect("prepare attachment import");
+        let checks = Cell::new(0usize);
+
+        let result = plan.encrypt_source(source, || {
+            let next = checks.get() + 1;
+            checks.set(next);
+            next >= 3
+        });
+
+        assert!(matches!(
+            result,
+            Err(VaultError::AttachmentOperationCancelled)
+        ));
+        assert!(
+            session
+                .storage
+                .list_attachment_ids()
+                .expect("no attachment rows")
+                .is_empty()
+        );
+        assert!(
+            session
+                .get_item(item.id)
+                .expect("owner")
+                .attachments
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn attachment_creation_rejects_oversized_sparse_source_before_reading() {
+        let dir = tempdir().expect("temp directory");
+        let database = dir.path().join("vault.sqlite3");
+        let source_path = dir.path().join("oversized.bin");
+        let source = File::create(&source_path).expect("create sparse source");
+        source
+            .set_len(ATTACHMENT_MAX_PLAINTEXT_BYTES + 1)
+            .expect("size sparse source");
+        drop(source);
+        let session = VaultSession::create(&database, TEST_PASSPHRASE).expect("create vault");
+        let item = VaultItem::secure_note("owner", "body");
+        session.put_item(&item, 1).expect("store owner");
+
+        assert!(matches!(
+            session.add_attachment_from_path(item.id, 1, &source_path),
+            Err(VaultError::AttachmentTooLarge)
+        ));
+        assert!(
+            session
+                .storage
+                .list_attachment_ids()
+                .expect("no attachment rows")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn purging_owner_tombstones_attachments_and_removes_chunks() {
+        let dir = tempdir().expect("temp directory");
+        let database = dir.path().join("vault.sqlite3");
+        let source_path = dir.path().join("purge.dat");
+        fs::write(&source_path, vec![0x33; 4096]).expect("write source");
+        let session = VaultSession::create(&database, TEST_PASSPHRASE).expect("create vault");
+        let item = VaultItem::secure_note("owner", "body");
+        session.put_item(&item, 1).expect("store owner");
+        let (summary, item_revision) = session
+            .add_attachment_from_path(item.id, 1, &source_path)
+            .expect("add attachment");
+        let trashed_revision = session
+            .trash_item(item.id, item_revision, 321)
+            .expect("trash owner");
+        session
+            .purge_item(item.id, trashed_revision)
+            .expect("purge owner");
+
+        let (attachment_revision, record) = session
+            .storage
+            .load_attachment(summary.id)
+            .expect("attachment tombstone");
+        assert_eq!(attachment_revision, 2);
+        let encrypted = decode_attachment_record(summary.id, attachment_revision, &record)
+            .expect("decode tombstone");
+        let (manifest, context) =
+            open_attachment_manifest(&session.root_key, &encrypted).expect("open tombstone");
+        assert!(matches!(manifest, AttachmentManifestV1::Tombstone { .. }));
+        assert!(context.is_none());
+        assert!(
+            session
+                .storage
+                .list_attachment_chunks(summary.id)
+                .expect("no chunks")
+                .is_empty()
+        );
+        session
+            .validate_persisted_state()
+            .expect("purged state validates");
+    }
+
+    #[test]
+    fn persisted_state_detects_missing_attachment_chunks() {
+        let dir = tempdir().expect("temp directory");
+        let database = dir.path().join("vault.sqlite3");
+        let source_path = dir.path().join("chunked.dat");
+        fs::write(&source_path, vec![0x44; ATTACHMENT_CHUNK_SIZE as usize + 1])
+            .expect("write source");
+        let session = VaultSession::create(&database, TEST_PASSPHRASE).expect("create vault");
+        let item = VaultItem::secure_note("owner", "body");
+        session.put_item(&item, 1).expect("store owner");
+        let (summary, _) = session
+            .add_attachment_from_path(item.id, 1, &source_path)
+            .expect("add attachment");
+        session
+            .storage
+            .delete_attachment_chunks(summary.id)
+            .expect("tamper chunks");
+
+        assert!(matches!(
+            session.validate_persisted_state(),
+            Err(VaultError::InconsistentAttachment)
+        ));
+    }
+
+    #[test]
+    fn encrypted_backup_restore_preserves_attachment_bytes() {
+        let dir = tempdir().expect("temp directory");
+        let database = dir.path().join("vault.sqlite3");
+        let backup = dir.path().join("backup.sqlite3");
+        let source_path = dir.path().join("backup-source.dat");
+        let export_path = dir.path().join("backup-restored.dat");
+        let bytes = vec![0x77; ATTACHMENT_CHUNK_SIZE as usize + 19];
+        fs::write(&source_path, &bytes).expect("write source");
+        let mut session = VaultSession::create(&database, TEST_PASSPHRASE).expect("create vault");
+        let item = VaultItem::secure_note("owner", "body");
+        session.put_item(&item, 1).expect("store owner");
+        let (summary, item_revision) = session
+            .add_attachment_from_path(item.id, 1, &source_path)
+            .expect("add attachment");
+        session
+            .backup_database_to(&backup)
+            .expect("validated encrypted backup");
+
+        session
+            .delete_attachment(item.id, summary.id, item_revision, summary.revision, 999)
+            .expect("delete live attachment after backup");
+        assert!(
+            session
+                .list_attachments(item.id)
+                .expect("live attachment deleted")
+                .is_empty()
+        );
+        session
+            .replace_with_backup(&backup, TEST_PASSPHRASE)
+            .expect("restore backup");
+        let restored_attachments = session
+            .list_attachments(item.id)
+            .expect("attachment restored");
+        assert_eq!(restored_attachments.len(), 1);
+        assert!(restored_attachments[0] == summary);
+        session
+            .export_attachment_to(item.id, summary.id, &export_path)
+            .expect("export restored attachment");
+        assert_eq!(fs::read(export_path).expect("read restored bytes"), bytes);
+    }
+
+    #[test]
+    fn locked_restore_install_uses_ciphertext_only_capability() {
+        let dir = tempdir().expect("temp directory");
+        let source_database = dir.path().join("locked-restore-source.sqlite3");
+        let target_database = dir.path().join("locked-restore-target.sqlite3");
+        let source =
+            VaultSession::create(&source_database, TEST_PASSPHRASE).expect("create source vault");
+        let item = VaultItem::secure_note("locked install source", "source body");
+        source.put_item(&item, 1).expect("store source item");
+        let target =
+            VaultSession::create(&target_database, TEST_PASSPHRASE).expect("create target vault");
+        target
+            .put_item(&VaultItem::secure_note("target marker", "target body"), 1)
+            .expect("store target marker");
+
+        let prepared = VaultSession::prepare_restore(&source_database, TEST_PASSPHRASE)
+            .expect("prepare restore");
+        let locked_install = prepared.into_locked_install();
+        let _: () = locked_install
+            .install_to(&target_database)
+            .expect("install ciphertext-only restore");
+        drop(target);
+        drop(source);
+
+        let restored =
+            VaultSession::unlock(&target_database, TEST_PASSPHRASE).expect("unlock restored vault");
+        assert_eq!(
+            restored
+                .get_item(item.id)
+                .expect("restored source item")
+                .title,
+            "locked install source"
         );
     }
 

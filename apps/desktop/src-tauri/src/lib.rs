@@ -4,16 +4,22 @@ use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{
+        Arc, Mutex, MutexGuard,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tauri::{Manager, State};
+use tauri_plugin_dialog::DialogExt;
 use vault_core::{
-    VaultSession, generate_strong_password,
+    AttachmentImportSource, AttachmentSummary as CoreAttachmentSummary, PreparedVaultRestore,
+    VaultBackupPlan, VaultError, VaultSession, generate_strong_password,
     reminders::{civil_from_days, collect_deadlines},
 };
 use vault_crypto::RecoverySecret;
 use vault_models::{EMERGENCY_CARD_ID, EmergencyCard, EmergencyContact, ItemKind, VaultItem};
+use vault_storage::StorageError;
 use zeroize::Zeroizing;
 
 const LEGACY_PRE_SAFEORY_APP_IDENTIFIER: &str = "com.lifevault.desktop";
@@ -22,6 +28,8 @@ struct VaultRuntime {
     database_path: PathBuf,
     settings_path: PathBuf,
     session: Arc<Mutex<Option<VaultSession>>>,
+    session_generation: Arc<AtomicU64>,
+    restore_in_progress: Arc<AtomicBool>,
     settings: Arc<Mutex<DeviceSettings>>,
     last_activity: Arc<Mutex<Instant>>,
 }
@@ -387,6 +395,20 @@ struct ExportView {
 #[derive(serde::Serialize)]
 struct PathView {
     path: String,
+}
+
+#[derive(serde::Serialize)]
+struct AttachmentSummaryView {
+    id: String,
+    revision: u64,
+    filename: String,
+    plaintext_size: u64,
+}
+
+#[derive(serde::Serialize)]
+struct AttachmentAddView {
+    attachment: AttachmentSummaryView,
+    item_revision: u64,
 }
 
 #[tauri::command]
@@ -945,6 +967,91 @@ fn set_item_links(
 }
 
 #[tauri::command]
+async fn add_attachment(
+    app: tauri::AppHandle,
+    state: State<'_, VaultRuntime>,
+    owner_item_id: String,
+    expected_item_revision: u64,
+) -> Result<Option<AttachmentAddView>, String> {
+    let generation = capture_unlocked_session_generation(&state)?;
+    let selected =
+        tauri::async_runtime::spawn_blocking(move || app.dialog().file().blocking_pick_file())
+            .await
+            .map_err(|_| "Unable to open the attachment file picker.".to_owned())?;
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    let source_path = selected
+        .into_path()
+        .map_err(|_| "The selected attachment path is unavailable.".to_owned())?;
+    add_attachment_impl_for_generation(
+        &state,
+        owner_item_id,
+        expected_item_revision,
+        source_path,
+        generation,
+    )
+    .map(Some)
+}
+
+#[tauri::command]
+fn list_attachments(
+    state: State<'_, VaultRuntime>,
+    owner_item_id: String,
+) -> Result<Vec<AttachmentSummaryView>, String> {
+    list_attachments_impl(&state, owner_item_id)
+}
+
+#[tauri::command]
+async fn export_attachment(
+    app: tauri::AppHandle,
+    state: State<'_, VaultRuntime>,
+    owner_item_id: String,
+    attachment_id: String,
+) -> Result<bool, String> {
+    let (filename, generation) = attachment_filename_impl(&state, &owner_item_id, &attachment_id)?;
+    let selected = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .set_file_name(filename)
+            .blocking_save_file()
+    })
+    .await
+    .map_err(|_| "Unable to open the attachment save dialog.".to_owned())?;
+    let Some(selected) = selected else {
+        return Ok(false);
+    };
+    let destination_path = selected
+        .into_path()
+        .map_err(|_| "The selected attachment destination is unavailable.".to_owned())?;
+    export_attachment_impl_for_generation(
+        &state,
+        owner_item_id,
+        attachment_id,
+        destination_path,
+        generation,
+    )?;
+    Ok(true)
+}
+
+#[tauri::command]
+fn delete_attachment(
+    state: State<'_, VaultRuntime>,
+    owner_item_id: String,
+    attachment_id: String,
+    expected_item_revision: u64,
+    expected_attachment_revision: u64,
+) -> Result<u64, String> {
+    delete_attachment_impl(
+        &state,
+        owner_item_id,
+        attachment_id,
+        expected_item_revision,
+        expected_attachment_revision,
+    )
+}
+
+#[tauri::command]
 fn list_deadlines(state: State<'_, VaultRuntime>) -> Result<Vec<DeadlineView>, String> {
     list_deadlines_impl(&state)
 }
@@ -985,6 +1092,15 @@ fn backup_database_copy(state: State<'_, VaultRuntime>, path: String) -> Result<
     backup_database_copy_impl(&state, path)
 }
 
+#[tauri::command]
+fn restore_database_backup(
+    state: State<'_, VaultRuntime>,
+    path: String,
+    passphrase: String,
+) -> Result<VaultStatus, String> {
+    restore_database_backup_impl(&state, path, passphrase)
+}
+
 fn vault_status_impl(state: &VaultRuntime) -> Result<VaultStatus, String> {
     let initialized = if state.database_path.exists() {
         VaultSession::is_initialized(&state.database_path).map_err(safe_vault_error)?
@@ -1008,6 +1124,7 @@ fn initialize_vault_impl(state: &VaultRuntime, passphrase: String) -> Result<Vau
     let opened =
         VaultSession::create(&state.database_path, &passphrase).map_err(safe_vault_error)?;
     *session = Some(opened);
+    advance_session_generation(&state.session_generation);
     Ok(VaultStatus {
         initialized: true,
         unlocked: true,
@@ -1020,7 +1137,9 @@ fn unlock_vault_impl(state: &VaultRuntime, passphrase: String) -> Result<VaultSt
     let opened = VaultSession::unlock(&state.database_path, &passphrase).map_err(|_| {
         "Unable to unlock the vault. Check the master passphrase and try again.".to_owned()
     })?;
-    *lock_session(state)? = Some(opened);
+    let mut session = lock_session(state)?;
+    *session = Some(opened);
+    advance_session_generation(&state.session_generation);
     Ok(VaultStatus {
         initialized: true,
         unlocked: true,
@@ -1029,7 +1148,12 @@ fn unlock_vault_impl(state: &VaultRuntime, passphrase: String) -> Result<VaultSt
 }
 
 fn lock_vault_impl(state: &VaultRuntime) -> Result<(), String> {
-    *lock_session(state)? = None;
+    let mut session = state
+        .session
+        .lock()
+        .map_err(|_| "The local vault session is unavailable.".to_owned())?;
+    *session = None;
+    advance_session_generation(&state.session_generation);
     Ok(())
 }
 
@@ -1124,6 +1248,7 @@ fn load_device_settings(path: &Path) -> DeviceSettings {
 
 fn spawn_auto_lock_watchdog(
     session: Arc<Mutex<Option<VaultSession>>>,
+    session_generation: Arc<AtomicU64>,
     settings: Arc<Mutex<DeviceSettings>>,
     last_activity: Arc<Mutex<Instant>>,
 ) {
@@ -1141,8 +1266,10 @@ fn spawn_auto_lock_watchdog(
             if idle_for < Duration::from_secs(auto_lock_minutes.saturating_mul(60)) {
                 continue;
             }
-            if let Ok(mut session) = session.lock() {
-                *session = None;
+            if let Ok(mut session) = session.lock()
+                && session.take().is_some()
+            {
+                advance_session_generation(&session_generation);
             }
         }
     });
@@ -1413,6 +1540,7 @@ fn update_note_impl(
         kind: ItemKind::SecureNote,
         title: title.to_owned(),
         links: existing.links.clone(),
+        attachments: existing.attachments.clone(),
         fields,
         notes: existing.notes,
     };
@@ -1572,6 +1700,7 @@ fn update_document_impl(
         kind: ItemKind::Document,
         title: title.to_owned(),
         links: existing.links.clone(),
+        attachments: existing.attachments.clone(),
         fields,
         notes: (!notes.is_empty()).then_some(notes),
     };
@@ -1680,6 +1809,7 @@ fn update_insurance_impl(
         kind: ItemKind::Insurance,
         title: title.to_owned(),
         links: existing.links.clone(),
+        attachments: existing.attachments.clone(),
         fields,
         notes: (!notes.is_empty()).then_some(notes),
     };
@@ -1797,6 +1927,7 @@ fn update_financial_impl(
         kind: ItemKind::Financial,
         title: title.to_owned(),
         links: existing.links.clone(),
+        attachments: existing.attachments.clone(),
         fields,
         notes: (!notes.is_empty()).then_some(notes),
     };
@@ -1915,6 +2046,7 @@ fn update_property_impl(
         kind: ItemKind::Property,
         title: title.to_owned(),
         links: existing.links.clone(),
+        attachments: existing.attachments.clone(),
         fields,
         notes: (!notes.is_empty()).then_some(notes),
     };
@@ -2039,6 +2171,7 @@ fn update_vehicle_impl(
         kind: ItemKind::Vehicle,
         title: title.to_owned(),
         links: existing.links.clone(),
+        attachments: existing.attachments.clone(),
         fields,
         notes: (!notes.is_empty()).then_some(notes),
     };
@@ -2168,6 +2301,7 @@ fn update_possession_impl(
         kind: ItemKind::Possession,
         title: title.to_owned(),
         links: existing.links.clone(),
+        attachments: existing.attachments.clone(),
         fields,
         notes: (!notes.is_empty()).then_some(notes),
     };
@@ -2329,6 +2463,278 @@ fn set_item_links_impl(
         })
 }
 
+fn attachment_summary_view(summary: CoreAttachmentSummary) -> AttachmentSummaryView {
+    AttachmentSummaryView {
+        id: summary.id.to_string(),
+        revision: summary.revision,
+        filename: summary.filename,
+        plaintext_size: summary.plaintext_size,
+    }
+}
+
+#[cfg(test)]
+fn add_attachment_impl(
+    state: &VaultRuntime,
+    owner_item_id: String,
+    expected_item_revision: u64,
+    source_path: PathBuf,
+) -> Result<AttachmentAddView, String> {
+    add_attachment_impl_inner(
+        state,
+        owner_item_id,
+        expected_item_revision,
+        source_path,
+        None,
+    )
+}
+
+fn add_attachment_impl_for_generation(
+    state: &VaultRuntime,
+    owner_item_id: String,
+    expected_item_revision: u64,
+    source_path: PathBuf,
+    expected_session_generation: u64,
+) -> Result<AttachmentAddView, String> {
+    add_attachment_impl_inner(
+        state,
+        owner_item_id,
+        expected_item_revision,
+        source_path,
+        Some(expected_session_generation),
+    )
+}
+
+fn add_attachment_impl_inner(
+    state: &VaultRuntime,
+    owner_item_id: String,
+    expected_item_revision: u64,
+    source_path: PathBuf,
+    expected_session_generation: Option<u64>,
+) -> Result<AttachmentAddView, String> {
+    let owner_item_id = owner_item_id
+        .parse()
+        .map_err(|_| "The attachment owner identifier is invalid.".to_owned())?;
+    if source_path.as_os_str().is_empty() {
+        return Err("Choose a file to attach.".to_owned());
+    }
+    let generation = match expected_session_generation {
+        Some(generation) => generation,
+        None => capture_unlocked_session_generation(state)?,
+    };
+    if !is_session_generation_current(state, generation) {
+        return Err(attachment_session_changed_error());
+    }
+
+    // Opening/stat'ing and reading the selected file must never hold the vault-session
+    // mutex. The prepared plan contains only per-file crypto context plus ciphertext.
+    let source = AttachmentImportSource::open(source_path).map_err(safe_vault_error)?;
+    if !is_session_generation_current(state, generation) {
+        return Err(attachment_session_changed_error());
+    }
+    let plan = {
+        let session = lock_session(state)?;
+        if !is_session_generation_current(state, generation) {
+            return Err(attachment_session_changed_error());
+        }
+        let session = session
+            .as_ref()
+            .ok_or_else(|| "Unlock the vault before adding an attachment.".to_owned())?;
+        session
+            .prepare_attachment_import(owner_item_id, expected_item_revision, &source)
+            .map_err(map_attachment_import_error)?
+    };
+    let prepared = plan
+        .encrypt_source(source, || !is_session_generation_current(state, generation))
+        .map_err(map_attachment_operation_error)?;
+    let (attachment, item_revision) = {
+        let session = lock_session(state)?;
+        if !is_session_generation_current(state, generation) {
+            return Err(attachment_session_changed_error());
+        }
+        let session = session
+            .as_ref()
+            .ok_or_else(|| "Unlock the vault before adding an attachment.".to_owned())?;
+        session
+            .commit_attachment_import(prepared)
+            .map_err(map_attachment_import_error)?
+    };
+    Ok(AttachmentAddView {
+        attachment: attachment_summary_view(attachment),
+        item_revision,
+    })
+}
+
+fn list_attachments_impl(
+    state: &VaultRuntime,
+    owner_item_id: String,
+) -> Result<Vec<AttachmentSummaryView>, String> {
+    let owner_item_id = owner_item_id
+        .parse()
+        .map_err(|_| "The attachment owner identifier is invalid.".to_owned())?;
+    let session = lock_session(state)?;
+    let session = session
+        .as_ref()
+        .ok_or_else(|| "Unlock the vault before reading attachments.".to_owned())?;
+    session
+        .list_attachments(owner_item_id)
+        .map_err(safe_vault_error)
+        .map(|attachments| {
+            attachments
+                .into_iter()
+                .map(attachment_summary_view)
+                .collect()
+        })
+}
+
+fn attachment_filename_impl(
+    state: &VaultRuntime,
+    owner_item_id: &str,
+    attachment_id: &str,
+) -> Result<(String, u64), String> {
+    let owner_item_id = owner_item_id
+        .parse()
+        .map_err(|_| "The attachment owner identifier is invalid.".to_owned())?;
+    let session = lock_session(state)?;
+    let session = session
+        .as_ref()
+        .ok_or_else(|| "Unlock the vault before exporting an attachment.".to_owned())?;
+    let filename = session
+        .list_attachments(owner_item_id)
+        .map_err(safe_vault_error)?
+        .into_iter()
+        .find(|attachment| attachment.id.to_string() == attachment_id)
+        .ok_or_else(|| "This attachment does not belong to the selected record.".to_owned())?
+        .filename;
+    Ok((filename, capture_session_generation(state)))
+}
+
+#[cfg(test)]
+fn export_attachment_impl(
+    state: &VaultRuntime,
+    owner_item_id: String,
+    attachment_id: String,
+    destination_path: PathBuf,
+) -> Result<(), String> {
+    export_attachment_impl_inner(state, owner_item_id, attachment_id, destination_path, None)
+}
+
+fn export_attachment_impl_for_generation(
+    state: &VaultRuntime,
+    owner_item_id: String,
+    attachment_id: String,
+    destination_path: PathBuf,
+    expected_session_generation: u64,
+) -> Result<(), String> {
+    export_attachment_impl_inner(
+        state,
+        owner_item_id,
+        attachment_id,
+        destination_path,
+        Some(expected_session_generation),
+    )
+}
+
+fn export_attachment_impl_inner(
+    state: &VaultRuntime,
+    owner_item_id: String,
+    attachment_id: String,
+    destination_path: PathBuf,
+    expected_session_generation: Option<u64>,
+) -> Result<(), String> {
+    let owner_item_id = owner_item_id
+        .parse()
+        .map_err(|_| "The attachment owner identifier is invalid.".to_owned())?;
+    let attachment_id = attachment_id
+        .parse()
+        .map_err(|_| "The attachment identifier is invalid.".to_owned())?;
+    if destination_path.as_os_str().is_empty() {
+        return Err("Choose where to save the attachment.".to_owned());
+    }
+    let generation = match expected_session_generation {
+        Some(generation) => generation,
+        None => capture_unlocked_session_generation(state)?,
+    };
+    let plan = {
+        let session = lock_session(state)?;
+        if !is_session_generation_current(state, generation) {
+            return Err(attachment_session_changed_error());
+        }
+        let session = session
+            .as_ref()
+            .ok_or_else(|| "Unlock the vault before exporting an attachment.".to_owned())?;
+        session
+            .prepare_attachment_export(owner_item_id, attachment_id)
+            .map_err(safe_vault_error)?
+    };
+    plan.write_to_path(destination_path, || {
+        !is_session_generation_current(state, generation)
+    })
+    .map_err(map_attachment_operation_error)
+}
+
+fn attachment_session_changed_error() -> String {
+    "The vault session changed during the attachment operation. Try again after unlocking."
+        .to_owned()
+}
+
+fn map_attachment_operation_error(error: VaultError) -> String {
+    match error {
+        VaultError::AttachmentOperationCancelled => attachment_session_changed_error(),
+        other => safe_vault_error(other),
+    }
+}
+
+fn map_attachment_import_error(error: VaultError) -> String {
+    match error {
+        VaultError::Storage(StorageError::StaleRevision) => {
+            "This record changed since you opened it. Reload it before adding an attachment."
+                .to_owned()
+        }
+        VaultError::AttachmentOperationCancelled => attachment_session_changed_error(),
+        other => safe_vault_error(other),
+    }
+}
+
+fn delete_attachment_impl(
+    state: &VaultRuntime,
+    owner_item_id: String,
+    attachment_id: String,
+    expected_item_revision: u64,
+    expected_attachment_revision: u64,
+) -> Result<u64, String> {
+    let owner_item_id = owner_item_id
+        .parse()
+        .map_err(|_| "The attachment owner identifier is invalid.".to_owned())?;
+    let attachment_id = attachment_id
+        .parse()
+        .map_err(|_| "The attachment identifier is invalid.".to_owned())?;
+    let deleted_at_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "The system clock is unavailable.".to_owned())?
+        .as_millis();
+    let deleted_at_ms =
+        u64::try_from(deleted_at_ms).map_err(|_| "The system clock is unavailable.".to_owned())?;
+    let session = lock_session(state)?;
+    let session = session
+        .as_ref()
+        .ok_or_else(|| "Unlock the vault before deleting an attachment.".to_owned())?;
+    session
+        .delete_attachment(
+            owner_item_id,
+            attachment_id,
+            expected_item_revision,
+            expected_attachment_revision,
+            deleted_at_ms,
+        )
+        .map_err(|error| match error {
+            VaultError::Storage(StorageError::StaleRevision) => {
+                "This record or attachment changed since you opened it. Reload before deleting the attachment."
+                    .to_owned()
+            }
+            other => safe_vault_error(other),
+        })
+}
+
 fn list_deadlines_impl(state: &VaultRuntime) -> Result<Vec<DeadlineView>, String> {
     let session = lock_session(state)?;
     let session = session
@@ -2401,7 +2807,9 @@ fn unlock_vault_with_recovery_kit_impl(
         VaultSession::unlock_with_recovery_kit(&state.database_path, &parsed).map_err(|_| {
             "Unable to unlock with this recovery kit. Check the secret and try again.".to_owned()
         })?;
-    *lock_session(state)? = Some(opened);
+    let mut session = lock_session(state)?;
+    *session = Some(opened);
+    advance_session_generation(&state.session_generation);
     Ok(VaultStatus {
         initialized: true,
         unlocked: true,
@@ -2429,6 +2837,9 @@ fn export_human_readable_impl(state: &VaultRuntime, path: String) -> Result<Expo
         u64::try_from(exported_at_ms).map_err(|_| "The system clock is unavailable.".to_owned())?;
     let mut export_items = Vec::with_capacity(items.len());
     for (item, revision) in &items {
+        if item.kind == ItemKind::EmergencyInstruction {
+            continue;
+        }
         export_items.push(serde_json::json!({
             "id": item.id.to_string(),
             "kind": item.kind,
@@ -2448,28 +2859,272 @@ fn export_human_readable_impl(state: &VaultRuntime, path: String) -> Result<Expo
         "app": "safeory",
         "format": 1,
         "exported_at_ms": exported_at_ms,
+        "scope": "active_records_only",
+        "binary_attachments_included": false,
         "items": export_items,
         "emergency_card": emergency_card,
     });
     let encoded = serde_json::to_vec_pretty(&document).map_err(safe_vault_error)?;
-    fs::write(&path, encoded).map_err(|_| {
+    let destination = PathBuf::from(&path);
+    let staged = temporary_sibling_path(&destination, "export")?;
+    fs::write(&staged, encoded).map_err(|_| {
         "Unable to write the export file. Choose a different location and try again.".to_owned()
     })?;
+    install_output_file(&staged, &destination).inspect_err(|_error| {
+        let _ = fs::remove_file(&staged);
+    })?;
     Ok(ExportView {
-        items: u64::try_from(items.len()).map_err(safe_vault_error)?,
+        items: u64::try_from(
+            items
+                .iter()
+                .filter(|(item, _)| item.kind != ItemKind::EmergencyInstruction)
+                .count(),
+        )
+        .map_err(safe_vault_error)?,
         path,
     })
 }
 
 fn backup_database_copy_impl(state: &VaultRuntime, path: String) -> Result<PathView, String> {
-    let session = lock_session(state)?;
-    if session.is_none() {
-        return Err("Unlock the vault before backing up the vault.".to_owned());
+    let destination = PathBuf::from(path.trim());
+    if path.trim().is_empty() {
+        return Err("Choose a location for the encrypted backup.".to_owned());
     }
-    fs::copy(&state.database_path, &path).map_err(|_| {
-        "Unable to write the backup file. Choose a different location and try again.".to_owned()
-    })?;
+    if state.database_path.exists()
+        && destination.exists()
+        && fs::canonicalize(&destination).ok() == fs::canonicalize(&state.database_path).ok()
+    {
+        return Err("Choose a backup path other than the active Safeory database.".to_owned());
+    }
+    let staged = temporary_sibling_path(&destination, "backup")?;
+    let (plan, generation) = capture_database_backup_plan(state)?;
+    if let Err(error) = plan.write_validated_to(&staged, || {
+        !is_session_generation_current(state, generation)
+    }) {
+        let _ = fs::remove_file(&staged);
+        if matches!(error, VaultError::OperationCancelled) {
+            return Err(
+                "The vault session changed while creating the backup. Try again.".to_owned(),
+            );
+        }
+        return Err(format!(
+            "Unable to create a validated encrypted backup: {error}"
+        ));
+    }
+    commit_database_backup_copy(state, generation, &staged, &destination)?;
     Ok(PathView { path })
+}
+
+fn capture_database_backup_plan(state: &VaultRuntime) -> Result<(VaultBackupPlan, u64), String> {
+    let session = lock_session(state)?;
+    let session = session
+        .as_ref()
+        .ok_or_else(|| "Unlock the vault before backing up the vault.".to_owned())?;
+    let generation = capture_session_generation(state);
+    let plan = session
+        .prepare_database_backup(&state.database_path)
+        .map_err(safe_vault_error)?;
+    Ok((plan, generation))
+}
+
+fn commit_database_backup_copy(
+    state: &VaultRuntime,
+    generation: u64,
+    staged: &Path,
+    destination: &Path,
+) -> Result<(), String> {
+    let session = state
+        .session
+        .lock()
+        .map_err(|_| "The local vault session is unavailable.".to_owned())?;
+    if session.is_none() || !is_session_generation_current(state, generation) {
+        drop(session);
+        let _ = fs::remove_file(staged);
+        return Err("The vault session changed while creating the backup. Try again.".to_owned());
+    }
+    install_output_file(staged, destination).inspect_err(|_error| {
+        let _ = fs::remove_file(staged);
+    })
+}
+
+fn restore_database_backup_impl(
+    state: &VaultRuntime,
+    path: String,
+    passphrase: String,
+) -> Result<VaultStatus, String> {
+    let source = PathBuf::from(path.trim());
+    if path.trim().is_empty() || !source.is_file() {
+        return Err("Choose an existing Safeory encrypted backup file.".to_owned());
+    }
+    if state.database_path.exists()
+        && fs::canonicalize(&source).ok() == fs::canonicalize(&state.database_path).ok()
+    {
+        return Err("Choose a backup file other than the active Safeory database.".to_owned());
+    }
+
+    let initialized = if state.database_path.exists() {
+        VaultSession::is_initialized(&state.database_path).map_err(safe_vault_error)?
+    } else {
+        false
+    };
+    let generation = authorize_database_restore(state, initialized)?;
+    let passphrase = Zeroizing::new(passphrase);
+    let preparation = prepare_database_restore_candidate(state, generation, &source, &passphrase);
+    drop(passphrase);
+    let (candidate, prepared) = preparation?;
+    commit_database_restore(state, initialized, generation, &candidate, prepared)
+}
+
+fn authorize_database_restore(state: &VaultRuntime, initialized: bool) -> Result<u64, String> {
+    let live_session = lock_session(state)?;
+    if initialized && live_session.is_none() {
+        return Err("Unlock the current vault before replacing it from a backup.".to_owned());
+    }
+    Ok(capture_session_generation(state))
+}
+
+fn prepare_database_restore_candidate(
+    state: &VaultRuntime,
+    generation: u64,
+    source: &Path,
+    passphrase: &str,
+) -> Result<(PathBuf, PreparedVaultRestore), String> {
+    let parent = state
+        .database_path
+        .parent()
+        .ok_or_else(|| "The Safeory app-data directory is unavailable.".to_owned())?;
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "The system clock is unavailable.".to_owned())?
+        .as_nanos();
+    let candidate = parent.join(format!(
+        ".safeory-restore-candidate-{}-{unique}.sqlite3",
+        std::process::id()
+    ));
+    fs::copy(source, &candidate)
+        .map_err(|_| "Unable to read the selected backup file.".to_owned())?;
+    let prepared = match VaultSession::prepare_restore_with_cancel(&candidate, passphrase, || {
+        !is_session_generation_current(state, generation)
+    }) {
+        Ok(prepared) => prepared,
+        Err(VaultError::OperationCancelled) => {
+            let _ = fs::remove_file(&candidate);
+            return Err(
+                "The vault session changed while validating the restore. Try again.".to_owned(),
+            );
+        }
+        Err(error) => {
+            let _ = fs::remove_file(&candidate);
+            return Err(backup_validation_error(error));
+        }
+    };
+    Ok((candidate, prepared))
+}
+
+fn commit_database_restore(
+    state: &VaultRuntime,
+    initialized: bool,
+    generation: u64,
+    candidate: &Path,
+    prepared: PreparedVaultRestore,
+) -> Result<VaultStatus, String> {
+    let live_session = state
+        .session
+        .lock()
+        .map_err(|_| "The local vault session is unavailable.".to_owned())?;
+    if !is_session_generation_current(state, generation)
+        || (initialized && live_session.is_none())
+        || (!initialized && live_session.is_some())
+    {
+        let _ = fs::remove_file(candidate);
+        return Err("The vault session changed while preparing the restore. Try again.".to_owned());
+    }
+    if state
+        .restore_in_progress
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        drop(live_session);
+        let _ = fs::remove_file(candidate);
+        return Err("Another vault restore is already being finished. Try again.".to_owned());
+    }
+    let locked_install = prepared.into_locked_install();
+    drop(live_session);
+
+    let restore_result = locked_install.install_to(&state.database_path);
+    if let Err(error) = restore_result {
+        state.restore_in_progress.store(false, Ordering::Release);
+        let _ = fs::remove_file(candidate);
+        return Err(backup_validation_error(error));
+    }
+    let mut live_session = state
+        .session
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // A restore changes the vault root key and complete encrypted record set.
+    // Finish locked so renderer plaintext from the previous vault cannot remain
+    // authoritative after the transaction commits.
+    *live_session = None;
+    advance_session_generation(&state.session_generation);
+    state.restore_in_progress.store(false, Ordering::Release);
+    drop(live_session);
+    let _ = fs::remove_file(candidate);
+    if let Ok(mut last_activity) = state.last_activity.lock() {
+        *last_activity = Instant::now();
+    }
+    Ok(VaultStatus {
+        initialized: true,
+        unlocked: false,
+        cloud_sync_enabled: false,
+    })
+}
+
+fn temporary_sibling_path(destination: &Path, label: &str) -> Result<PathBuf, String> {
+    let parent = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let file_name = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("safeory");
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "The system clock is unavailable.".to_owned())?
+        .as_nanos();
+    Ok(parent.join(format!(
+        ".{file_name}.{label}-{}-{unique}.tmp",
+        std::process::id()
+    )))
+}
+
+fn install_output_file(staged: &Path, destination: &Path) -> Result<(), String> {
+    let rollback = temporary_sibling_path(destination, "previous")?;
+    let had_destination = destination.exists();
+    if had_destination && fs::rename(destination, &rollback).is_err() {
+        return Err("Unable to replace the existing output file.".to_owned());
+    }
+    if fs::rename(staged, destination).is_err() {
+        if had_destination {
+            let _ = fs::rename(&rollback, destination);
+        }
+        return Err("Unable to finish writing the selected output file.".to_owned());
+    }
+    if had_destination {
+        let _ = fs::remove_file(&rollback);
+    }
+    Ok(())
+}
+
+fn backup_validation_error(error: VaultError) -> String {
+    match error {
+        VaultError::Storage(StorageError::UnsupportedSchemaVersion(_)) => {
+            "This backup was created by a newer Safeory version and cannot be restored here."
+                .to_owned()
+        }
+        _ => "Unable to validate this backup. Check its master passphrase and make sure the file is a complete Safeory encrypted backup.".to_owned(),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2514,6 +3169,7 @@ fn update_credential_impl(
         kind: ItemKind::Password,
         title: title.to_owned(),
         links: existing.links.clone(),
+        attachments: existing.attachments.clone(),
         fields,
         notes: (!notes.is_empty()).then_some(notes),
     };
@@ -3020,16 +3676,46 @@ fn validate_property_ownership(value: &str) -> Result<(), String> {
     }
 }
 
+fn advance_session_generation(session_generation: &AtomicU64) -> u64 {
+    session_generation
+        .fetch_add(1, Ordering::AcqRel)
+        .wrapping_add(1)
+}
+
+fn capture_session_generation(state: &VaultRuntime) -> u64 {
+    state.session_generation.load(Ordering::Acquire)
+}
+
+fn is_session_generation_current(state: &VaultRuntime, generation: u64) -> bool {
+    capture_session_generation(state) == generation
+}
+
+fn capture_unlocked_session_generation(state: &VaultRuntime) -> Result<u64, String> {
+    let session = lock_session(state)?;
+    if session.is_none() {
+        return Err("Unlock the vault before choosing an attachment.".to_owned());
+    }
+    Ok(capture_session_generation(state))
+}
+
 fn lock_session(state: &VaultRuntime) -> Result<MutexGuard<'_, Option<VaultSession>>, String> {
+    if state.restore_in_progress.load(Ordering::Acquire) {
+        return Err("The vault is finishing a restore. Try again.".to_owned());
+    }
     expire_session_if_needed(state)?;
     *state
         .last_activity
         .lock()
         .map_err(|_| "The local activity tracker is unavailable.".to_owned())? = Instant::now();
-    state
+    let session = state
         .session
         .lock()
-        .map_err(|_| "The local vault session is unavailable.".to_owned())
+        .map_err(|_| "The local vault session is unavailable.".to_owned())?;
+    if state.restore_in_progress.load(Ordering::Acquire) {
+        drop(session);
+        return Err("The vault is finishing a restore. Try again.".to_owned());
+    }
+    Ok(session)
 }
 
 fn expire_session_if_needed(state: &VaultRuntime) -> Result<(), String> {
@@ -3045,10 +3731,13 @@ fn expire_session_if_needed(state: &VaultRuntime) -> Result<(), String> {
         .elapsed()
         >= Duration::from_secs(auto_lock_minutes.saturating_mul(60));
     if expired {
-        *state
+        let mut session = state
             .session
             .lock()
-            .map_err(|_| "The local vault session is unavailable.".to_owned())? = None;
+            .map_err(|_| "The local vault session is unavailable.".to_owned())?;
+        if session.take().is_some() {
+            advance_session_generation(&state.session_generation);
+        }
     }
     Ok(())
 }
@@ -3095,9 +3784,12 @@ pub fn run() {
             let settings_path = directory.join("device-settings.json");
             let settings = Arc::new(Mutex::new(load_device_settings(&settings_path)));
             let session = Arc::new(Mutex::new(None));
+            let session_generation = Arc::new(AtomicU64::new(0));
+            let restore_in_progress = Arc::new(AtomicBool::new(false));
             let last_activity = Arc::new(Mutex::new(Instant::now()));
             spawn_auto_lock_watchdog(
                 Arc::clone(&session),
+                Arc::clone(&session_generation),
                 Arc::clone(&settings),
                 Arc::clone(&last_activity),
             );
@@ -3105,6 +3797,8 @@ pub fn run() {
                 database_path: directory.join("vault.sqlite3"),
                 settings_path,
                 session,
+                session_generation,
+                restore_in_progress,
                 settings,
                 last_activity,
             });
@@ -3155,13 +3849,18 @@ pub fn run() {
             update_emergency_card,
             get_item_titles,
             set_item_links,
+            add_attachment,
+            list_attachments,
+            export_attachment,
+            delete_attachment,
             list_deadlines,
             generate_recovery_secret,
             confirm_recovery_secret,
             get_recovery_status,
             unlock_vault_with_recovery_kit,
             export_human_readable,
-            backup_database_copy
+            backup_database_copy,
+            restore_database_backup
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Safeory desktop shell");
@@ -3181,6 +3880,8 @@ mod tests {
             database_path: directory.path().join("vault.sqlite3"),
             settings_path,
             session: Arc::new(Mutex::new(None)),
+            session_generation: Arc::new(AtomicU64::new(0)),
+            restore_in_progress: Arc::new(AtomicBool::new(false)),
             settings: Arc::new(Mutex::new(DeviceSettings::default())),
             last_activity: Arc::new(Mutex::new(Instant::now())),
         };
@@ -3203,6 +3904,80 @@ mod tests {
             fs::read(safeory.join("vault.sqlite3")).expect("read migrated marker"),
             b"legacy-vault-marker"
         );
+    }
+
+    #[test]
+    fn session_generation_changes_when_vault_is_locked() {
+        let (_directory, runtime) = runtime();
+        initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
+        let generation = capture_session_generation(&runtime);
+        assert!(is_session_generation_current(&runtime, generation));
+
+        lock_vault_impl(&runtime).expect("lock vault");
+
+        assert!(!is_session_generation_current(&runtime, generation));
+        assert!(capture_session_generation(&runtime) > generation);
+    }
+
+    #[test]
+    fn lock_advances_generation_while_restore_gate_is_active() {
+        let (_directory, runtime) = runtime();
+        initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
+        let generation = capture_session_generation(&runtime);
+        runtime.restore_in_progress.store(true, Ordering::Release);
+
+        lock_vault_impl(&runtime).expect("lock while restore gate is active");
+
+        assert!(!is_session_generation_current(&runtime, generation));
+        assert!(runtime.session.lock().expect("session mutex").is_none());
+        runtime.restore_in_progress.store(false, Ordering::Release);
+    }
+
+    #[test]
+    fn stale_attachment_generation_cannot_commit_after_lock_and_reunlock() {
+        let (directory, runtime) = runtime();
+        initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
+        let note = create_note_impl(&runtime, "Generation owner".to_owned(), "Body".to_owned())
+            .expect("create owner");
+        let source_path = directory.path().join("generation-source.txt");
+        fs::write(&source_path, b"generation fenced attachment").expect("write source");
+
+        let stale_add_generation = capture_session_generation(&runtime);
+        lock_vault_impl(&runtime).expect("lock before stale add");
+        unlock_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("unlock after stale add");
+        assert!(
+            add_attachment_impl_for_generation(
+                &runtime,
+                note.id.clone(),
+                note.revision,
+                source_path.clone(),
+                stale_add_generation,
+            )
+            .is_err()
+        );
+        assert!(
+            list_attachments_impl(&runtime, note.id.clone())
+                .expect("list after stale add")
+                .is_empty()
+        );
+
+        let added = add_attachment_impl(&runtime, note.id.clone(), note.revision, source_path)
+            .expect("add under current generation");
+        let stale_export_generation = capture_session_generation(&runtime);
+        lock_vault_impl(&runtime).expect("lock before stale export");
+        unlock_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("unlock after stale export");
+        let destination = directory.path().join("stale-export.txt");
+        assert!(
+            export_attachment_impl_for_generation(
+                &runtime,
+                note.id,
+                added.attachment.id,
+                destination.clone(),
+                stale_export_generation,
+            )
+            .is_err()
+        );
+        assert!(!destination.exists());
     }
 
     #[test]
@@ -4668,14 +5443,320 @@ mod tests {
         assert!(!backup_bytes.is_empty());
         assert!(backup_bytes.len() >= 16);
         assert_eq!(&backup_bytes[..16], b"SQLite format 3\0");
+        let backup_session = VaultSession::unlock(&backup_path, PASSPHRASE)
+            .expect("encrypted backup unlocks with its master passphrase");
+        backup_session
+            .validate_persisted_state()
+            .expect("encrypted backup validates completely");
+    }
+
+    #[test]
+    fn backup_preparation_allows_lock_and_stale_generation_cannot_publish() {
+        let (directory, runtime) = runtime();
+        initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
+        create_note_impl(&runtime, "Backup race marker".to_owned(), "body".to_owned())
+            .expect("create marker");
+        let destination = directory.path().join("race-backup.sqlite3");
+        let staged = temporary_sibling_path(&destination, "backup-race").expect("staged path");
+        let (plan, generation) = capture_database_backup_plan(&runtime).expect("capture plan");
+        let checks = std::cell::Cell::new(0usize);
+
+        let result = plan.write_validated_to(&staged, || {
+            let next = checks.get() + 1;
+            checks.set(next);
+            if next == 2 {
+                lock_vault_impl(&runtime).expect("lock during backup preparation");
+            }
+            !is_session_generation_current(&runtime, generation)
+        });
+
+        assert!(matches!(result, Err(VaultError::OperationCancelled)));
+        assert!(!is_session_generation_current(&runtime, generation));
+        assert!(commit_database_backup_copy(&runtime, generation, &staged, &destination).is_err());
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn encrypted_backup_restore_preserves_lifecycle_recovery_and_revisions() {
+        const TARGET_PASSPHRASE: &str = "a different existing target passphrase";
+        const CHANGED_SOURCE_PASSPHRASE: &str = "a later changed source passphrase";
+
+        let (source_directory, source) = runtime();
+        initialize_vault_impl(&source, PASSPHRASE.to_owned()).expect("initialize source vault");
+        let active = create_note_impl(
+            &source,
+            "Active backup record".to_owned(),
+            "active body".to_owned(),
+        )
+        .expect("create active backup record");
+        let trashed = create_note_impl(
+            &source,
+            "Recoverable trash record".to_owned(),
+            "trash body".to_owned(),
+        )
+        .expect("create trash record");
+        let trashed_revision =
+            trash_item_impl(&source, trashed.id.clone(), trashed.revision).expect("trash record");
+        let purged = create_note_impl(
+            &source,
+            "Purged backup record".to_owned(),
+            "purged body".to_owned(),
+        )
+        .expect("create purge record");
+        let purge_trash_revision = trash_item_impl(&source, purged.id.clone(), purged.revision)
+            .expect("trash purge record");
+        let tombstone_revision =
+            purge_trashed_item_impl(&source, purged.id.clone(), purge_trash_revision)
+                .expect("purge record into tombstone");
+        let recovery_secret =
+            generate_recovery_secret_impl(&source).expect("generate recovery secret");
+        confirm_recovery_secret_impl(&source, recovery_secret.clone())
+            .expect("install recovery secret");
+
+        let backup_path = source_directory.path().join("restore-source.sqlite3");
+        backup_database_copy_impl(&source, backup_path.to_string_lossy().to_string())
+            .expect("create encrypted backup");
+        change_master_passphrase_impl(
+            &source,
+            PASSPHRASE.to_owned(),
+            CHANGED_SOURCE_PASSPHRASE.to_owned(),
+        )
+        .expect("change source passphrase after backup");
+
+        let (_target_directory, target) = runtime();
+        initialize_vault_impl(&target, TARGET_PASSPHRASE.to_owned())
+            .expect("initialize existing target vault");
+        create_note_impl(
+            &target,
+            "Target-only record".to_owned(),
+            "must disappear after restore".to_owned(),
+        )
+        .expect("create target marker");
+
+        let restored = restore_database_backup_impl(
+            &target,
+            backup_path.to_string_lossy().to_string(),
+            PASSPHRASE.to_owned(),
+        )
+        .expect("restore encrypted backup");
+        assert!(restored.initialized);
+        assert!(!restored.unlocked);
+        assert!(list_vault_items_impl(&target).is_err());
+        assert!(unlock_vault_impl(&target, TARGET_PASSPHRASE.to_owned()).is_err());
+        unlock_vault_impl(&target, PASSPHRASE.to_owned()).expect("unlock restored vault");
+
+        let active_items = list_vault_items_impl(&target).expect("list restored active records");
+        let active_json = serde_json::to_string(&active_items).expect("serialize active records");
+        assert!(active_json.contains("Active backup record"));
+        assert!(!active_json.contains("Target-only record"));
+        assert!(!active_json.contains("Recoverable trash record"));
+        assert!(!active_json.contains("Purged backup record"));
+        let restored_active_revision = active_items
+            .iter()
+            .find_map(|item| match item {
+                VaultItemView::SecureNote { id, revision, .. } if id == &active.id => {
+                    Some(*revision)
+                }
+                _ => None,
+            })
+            .expect("restored active note is listed");
+        assert_eq!(restored_active_revision, active.revision);
+
+        let trash = list_trashed_items_impl(&target).expect("list restored trash");
+        let restored_trash = trash
+            .iter()
+            .find(|item| item.id == trashed.id)
+            .expect("recoverable trash preserved");
+        assert_eq!(restored_trash.revision, trashed_revision);
+        assert!(restore_trashed_item_impl(&target, purged.id.clone(), tombstone_revision).is_err());
+
+        lock_vault_impl(&target).expect("lock restored vault");
+        unlock_vault_with_recovery_kit_impl(&target, recovery_secret)
+            .expect("restored recovery wrap remains usable");
+    }
+
+    #[test]
+    fn failed_backup_restore_leaves_current_vault_unchanged() {
+        const TARGET_PASSPHRASE: &str = "a target vault passphrase for restore";
+        let (source_directory, source) = runtime();
+        initialize_vault_impl(&source, PASSPHRASE.to_owned()).expect("initialize source vault");
+        create_note_impl(
+            &source,
+            "Source backup record".to_owned(),
+            "source body".to_owned(),
+        )
+        .expect("create source record");
+        let backup_path = source_directory.path().join("wrong-passphrase.sqlite3");
+        backup_database_copy_impl(&source, backup_path.to_string_lossy().to_string())
+            .expect("create backup");
+
+        let (_target_directory, target) = runtime();
+        initialize_vault_impl(&target, TARGET_PASSPHRASE.to_owned())
+            .expect("initialize target vault");
+        let marker = create_note_impl(
+            &target,
+            "Current target record".to_owned(),
+            "target body".to_owned(),
+        )
+        .expect("create target marker");
+
+        let error = match restore_database_backup_impl(
+            &target,
+            backup_path.to_string_lossy().to_string(),
+            "definitely the wrong backup passphrase".to_owned(),
+        ) {
+            Ok(_) => panic!("wrong backup passphrase unexpectedly replaced current vault"),
+            Err(error) => error,
+        };
+        assert!(error.contains("Unable to validate this backup"));
+        let current_items =
+            list_vault_items_impl(&target).expect("current vault stays unlocked and unchanged");
+        assert!(current_items.iter().any(|item| matches!(
+            item,
+            VaultItemView::SecureNote {
+                id,
+                revision,
+                title,
+                ..
+            } if id == &marker.id && *revision == marker.revision && title == "Current target record"
+        )));
+    }
+
+    #[test]
+    fn stale_restore_generation_cannot_commit_after_preparation() {
+        const TARGET_PASSPHRASE: &str = "a target passphrase for stale restore";
+        let (source_directory, source) = runtime();
+        initialize_vault_impl(&source, PASSPHRASE.to_owned()).expect("initialize source vault");
+        create_note_impl(
+            &source,
+            "Source restore marker".to_owned(),
+            "source".to_owned(),
+        )
+        .expect("create source marker");
+        let backup_path = source_directory.path().join("stale-restore-source.sqlite3");
+        backup_database_copy_impl(&source, backup_path.to_string_lossy().to_string())
+            .expect("create source backup");
+
+        let (_target_directory, target) = runtime();
+        initialize_vault_impl(&target, TARGET_PASSPHRASE.to_owned()).expect("initialize target");
+        let marker = create_note_impl(
+            &target,
+            "Target restore marker".to_owned(),
+            "target".to_owned(),
+        )
+        .expect("create target marker");
+        let generation = authorize_database_restore(&target, true).expect("authorize restore");
+        let passphrase = Zeroizing::new(PASSPHRASE.to_owned());
+        let (candidate, prepared) =
+            prepare_database_restore_candidate(&target, generation, &backup_path, &passphrase)
+                .expect("prepare restore candidate");
+        drop(passphrase);
+        lock_vault_impl(&target).expect("lock after restore preparation");
+
+        let result = commit_database_restore(&target, true, generation, &candidate, prepared);
+        assert!(result.is_err());
+        assert!(!candidate.exists());
+        unlock_vault_impl(&target, TARGET_PASSPHRASE.to_owned()).expect("unlock unchanged target");
+        let items = list_vault_items_impl(&target).expect("list unchanged target");
+        assert!(items.iter().any(|item| matches!(
+            item,
+            VaultItemView::SecureNote { id, title, .. }
+                if id == &marker.id && title == "Target restore marker"
+        )));
+    }
+
+    #[test]
+    fn lock_during_candidate_validation_cancels_after_root_auth() {
+        const TARGET_PASSPHRASE: &str = "a target passphrase for validation cancellation";
+        let (source_directory, source) = runtime();
+        initialize_vault_impl(&source, PASSPHRASE.to_owned()).expect("initialize source vault");
+        create_note_impl(
+            &source,
+            "Validation cancellation source".to_owned(),
+            "source".to_owned(),
+        )
+        .expect("create source marker");
+        let backup_path = source_directory
+            .path()
+            .join("validation-cancel-source.sqlite3");
+        backup_database_copy_impl(&source, backup_path.to_string_lossy().to_string())
+            .expect("create source backup");
+
+        let (_target_directory, target) = runtime();
+        initialize_vault_impl(&target, TARGET_PASSPHRASE.to_owned()).expect("initialize target");
+        let marker = create_note_impl(
+            &target,
+            "Validation cancellation target".to_owned(),
+            "target".to_owned(),
+        )
+        .expect("create target marker");
+        let generation = authorize_database_restore(&target, true).expect("authorize restore");
+        let mut cancellation_checks = 0usize;
+
+        let result = VaultSession::prepare_restore_with_cancel(&backup_path, PASSPHRASE, || {
+            cancellation_checks += 1;
+            if cancellation_checks == 3 {
+                lock_vault_impl(&target).expect("lock during authenticated candidate validation");
+            }
+            !is_session_generation_current(&target, generation)
+        });
+
+        assert!(matches!(result, Err(VaultError::OperationCancelled)));
+        assert!(cancellation_checks >= 3);
+        assert!(
+            !vault_status_impl(&target)
+                .expect("locked target status")
+                .unlocked
+        );
+        unlock_vault_impl(&target, TARGET_PASSPHRASE.to_owned()).expect("unlock unchanged target");
+        let items = list_vault_items_impl(&target).expect("list unchanged target");
+        assert!(items.iter().any(|item| matches!(
+            item,
+            VaultItemView::SecureNote { id, title, .. }
+                if id == &marker.id && title == "Validation cancellation target"
+        )));
+    }
+
+    #[test]
+    fn first_run_restore_still_finishes_initialized_and_locked() {
+        let (source_directory, source) = runtime();
+        initialize_vault_impl(&source, PASSPHRASE.to_owned()).expect("initialize source vault");
+        create_note_impl(
+            &source,
+            "First-run restore marker".to_owned(),
+            "body".to_owned(),
+        )
+        .expect("create source marker");
+        let backup_path = source_directory.path().join("first-run-restore.sqlite3");
+        backup_database_copy_impl(&source, backup_path.to_string_lossy().to_string())
+            .expect("create source backup");
+
+        let (_target_directory, target) = runtime();
+        let restored = restore_database_backup_impl(
+            &target,
+            backup_path.to_string_lossy().to_string(),
+            PASSPHRASE.to_owned(),
+        )
+        .expect("restore into first-run target");
+        assert!(restored.initialized);
+        assert!(!restored.unlocked);
+        unlock_vault_impl(&target, PASSPHRASE.to_owned()).expect("unlock restored target");
+        let items = list_vault_items_impl(&target).expect("list restored target");
+        assert!(items.iter().any(|item| matches!(
+            item,
+            VaultItemView::SecureNote { title, .. } if title == "First-run restore marker"
+        )));
     }
 
     #[test]
     fn new_commands_require_unlocked() {
-        let (_directory, runtime) = runtime();
+        let (directory, runtime) = runtime();
         initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
         let note = create_note_impl(&runtime, "Locked gate".to_owned(), "Body".to_owned())
             .expect("create note");
+        let source_path = directory.path().join("locked-attachment.txt");
+        fs::write(&source_path, b"locked attachment bytes").expect("write locked attachment");
+        let destination_path = directory.path().join("locked-export.txt");
         lock_vault_impl(&runtime).expect("lock vault");
 
         assert!(get_emergency_card_impl(&runtime).is_err());
@@ -4692,9 +5773,99 @@ mod tests {
         assert!(export_human_readable_impl(&runtime, "export.json".to_owned()).is_err());
         assert!(backup_database_copy_impl(&runtime, "backup.sqlite3".to_owned()).is_err());
         assert!(export_human_readable_impl(&runtime, String::new()).is_err());
+        assert!(
+            add_attachment_impl(&runtime, note.id.clone(), note.revision, source_path,).is_err()
+        );
+        assert!(list_attachments_impl(&runtime, note.id.clone()).is_err());
+        assert!(
+            export_attachment_impl(&runtime, note.id.clone(), note.id.clone(), destination_path,)
+                .is_err()
+        );
+        assert!(
+            delete_attachment_impl(&runtime, note.id.clone(), note.id.clone(), note.revision, 1,)
+                .is_err()
+        );
 
         unlock_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("unlock vault");
         assert!(get_emergency_card_impl(&runtime).is_ok());
+    }
+
+    #[test]
+    fn attachment_commands_round_trip_paths_and_metadata_only() {
+        let (directory, runtime) = runtime();
+        initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
+        let note = create_note_impl(
+            &runtime,
+            "Attachment owner".to_owned(),
+            "Owner body".to_owned(),
+        )
+        .expect("create attachment owner");
+        let source_path = directory.path().join("private-receipt.txt");
+        let plaintext = b"private attachment payload 7A41";
+        fs::write(&source_path, plaintext).expect("write attachment source");
+
+        let added = add_attachment_impl(&runtime, note.id.clone(), note.revision, source_path)
+            .expect("add attachment");
+        assert_eq!(added.item_revision, 2);
+        assert_eq!(added.attachment.revision, 1);
+        assert_eq!(added.attachment.filename, "private-receipt.txt");
+        assert_eq!(
+            added.attachment.plaintext_size,
+            u64::try_from(plaintext.len()).expect("plaintext length")
+        );
+
+        let listed = list_attachments_impl(&runtime, note.id.clone()).expect("list attachments");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, added.attachment.id);
+        assert_eq!(listed[0].revision, added.attachment.revision);
+        assert_eq!(listed[0].filename, added.attachment.filename);
+        assert_eq!(listed[0].plaintext_size, added.attachment.plaintext_size);
+        let metadata = serde_json::to_value(&listed[0]).expect("serialize attachment metadata");
+        let metadata = metadata.as_object().expect("attachment metadata object");
+        assert_eq!(metadata.len(), 4);
+        assert!(metadata.contains_key("id"));
+        assert!(metadata.contains_key("revision"));
+        assert!(metadata.contains_key("filename"));
+        assert!(metadata.contains_key("plaintext_size"));
+        assert!(
+            !serde_json::to_string(metadata)
+                .expect("serialize attachment metadata object")
+                .contains("private attachment payload")
+        );
+
+        let destination_path = directory.path().join("exported-receipt.txt");
+        export_attachment_impl(
+            &runtime,
+            note.id.clone(),
+            added.attachment.id.clone(),
+            destination_path.clone(),
+        )
+        .expect("export attachment");
+        assert_eq!(fs::read(&destination_path).expect("read export"), plaintext);
+
+        let item_revision = delete_attachment_impl(
+            &runtime,
+            note.id.clone(),
+            added.attachment.id.clone(),
+            added.item_revision,
+            added.attachment.revision,
+        )
+        .expect("delete attachment");
+        assert_eq!(item_revision, 3);
+        assert!(
+            list_attachments_impl(&runtime, note.id.clone())
+                .expect("list after delete")
+                .is_empty()
+        );
+        assert!(
+            export_attachment_impl(
+                &runtime,
+                note.id,
+                added.attachment.id,
+                directory.path().join("deleted-export.txt"),
+            )
+            .is_err()
+        );
     }
 
     #[test]
