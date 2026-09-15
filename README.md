@@ -40,6 +40,9 @@ Implemented now:
   print workflows, explicit install/confirm, safe replacement for the live
   vault, unlock-with-kit while locked, and threshold (2-of-3 style) social
   recovery plus sealed recovery-share envelopes at the crypto layer,
+- local Plan Test: metadata-only readiness checks for Emergency Card records,
+  contacts, instructions, and recovery configuration, plus a read-only recovery
+  key self-test against the exact currently open vault root,
 - Trust Engine core: conditional access policies with fail-closed local
   evaluation (destruction/deny wins, private-forever, multi-approval,
   waiting periods as documented server-enforced policy, not time-lock crypto),

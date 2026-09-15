@@ -8,7 +8,9 @@ fail-closed local evaluation, plus Shamir 2-of-3 style threshold sharing and
 sealed recovery-share envelopes, is implemented and tested in
 `vault-emergency` (pure core, no IPC yet). Grant persistence inside item
 payloads, trusted-person UX, and the timed-release state machine are still
-pending — no UI or server path can release anything today.
+pending — no UI or server path can release anything today. The desktop Plan
+Test now checks only locally enforceable preparedness (Emergency Card
+completeness and recovery-key verification); it is not a release simulation.
 
 ## Non-goals for V1
 

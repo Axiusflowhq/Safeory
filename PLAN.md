@@ -38,7 +38,7 @@ Rule: cloud integration starts only after the local platform below is stable.
 | 13 | Waiting periods | 🟡 Policy core only — 1h/24h/7d/custom evaluated locally; no enforcement timer, no server coordinator |
 | 14 | Selected legacy access | ❌ Left — destruction/private-forever exist as policy; no per-asset legacy rules UX |
 | 15 | "If something happens to me" | 🟡 Partial — card + instructions + kit cover the single-device case |
-| 16 | Plan test | ❌ Left — no simulation mode |
+| 16 | Plan test | ✅ Done (local) — checks Emergency Card completeness + verifies the saved recovery key against the current vault; does not simulate trusted-person/timed-release flows |
 
 ### PRIVACY
 | # | Item | Status |

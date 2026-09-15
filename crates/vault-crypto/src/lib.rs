@@ -136,13 +136,13 @@ impl RecoverySecret {
         if bytes.len() != 64 {
             return Err(CryptoError::InvalidEncoding);
         }
-        let mut out = [0u8; 32];
+        let mut out = Zeroizing::new([0u8; 32]);
         for (index, slot) in out.iter_mut().enumerate() {
             let hi = nibble(bytes[index * 2])?;
             let lo = nibble(bytes[index * 2 + 1])?;
             *slot = (hi << 4) | lo;
         }
-        Ok(Self(Zeroizing::new(out)))
+        Ok(Self(out))
     }
 }
 
@@ -455,6 +455,21 @@ pub fn unwrap_root_key_with_recovery_secret(
     let mut bytes = Zeroizing::new([0u8; 32]);
     bytes.copy_from_slice(&plaintext);
     Ok(AccountRootKey(bytes))
+}
+
+/// Verifies that `secret` opens `wrapped` to the exact expected account root.
+/// Authentication failure is a normal mismatch; malformed or unsupported
+/// recovery envelopes remain errors so corrupt stored state fails closed.
+pub fn recovery_secret_matches_root_key(
+    secret: &RecoverySecret,
+    wrapped: &RecoveryKitWrapV1,
+    expected_root: &AccountRootKey,
+) -> Result<bool, CryptoError> {
+    match unwrap_root_key_with_recovery_secret(secret, wrapped) {
+        Ok(candidate) => Ok(candidate.as_bytes() == expected_root.as_bytes()),
+        Err(CryptoError::Authentication) => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 pub fn encrypt_item(
@@ -949,6 +964,35 @@ mod tests {
         let root = AccountRootKey::generate().expect("root key");
         let wrapped = wrap_root_key("correct passphrase", &root).expect("wrap");
         assert!(unwrap_root_key("wrong", &wrapped).is_err());
+    }
+
+    #[test]
+    fn recovery_secret_verification_requires_the_expected_root() {
+        let root = AccountRootKey::generate().expect("root key");
+        let other_root = AccountRootKey::generate().expect("other root key");
+        let secret = RecoverySecret::generate().expect("recovery secret");
+        let wrong_secret = RecoverySecret::generate().expect("wrong recovery secret");
+        let wrapped = wrap_root_key_with_recovery_secret(&secret, &root).expect("wrap root");
+
+        assert!(
+            recovery_secret_matches_root_key(&secret, &wrapped, &root)
+                .expect("matching recovery key")
+        );
+        assert!(
+            !recovery_secret_matches_root_key(&wrong_secret, &wrapped, &root)
+                .expect("wrong recovery key")
+        );
+        assert!(
+            !recovery_secret_matches_root_key(&secret, &wrapped, &other_root)
+                .expect("transplanted recovery wrap")
+        );
+
+        let mut malformed = wrapped;
+        malformed.format_version += 1;
+        assert!(matches!(
+            recovery_secret_matches_root_key(&secret, &malformed, &root),
+            Err(CryptoError::UnsupportedFormat)
+        ));
     }
 
     #[test]

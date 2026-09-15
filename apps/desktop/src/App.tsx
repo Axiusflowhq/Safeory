@@ -326,6 +326,14 @@ type DeadlineRow = {
   days_until: number;
 };
 
+type PlanReadiness = {
+  recovery_configured: boolean;
+  has_selected_records: boolean;
+  has_contacts: boolean;
+  has_instructions: boolean;
+  has_stale_selected_records: boolean;
+};
+
 type AttachmentSummary = {
   id: string;
   revision: number;
@@ -372,6 +380,8 @@ export default function App() {
   );
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [cardOpen, setCardOpen] = useState(false);
+  const [planOpen, setPlanOpen] = useState(false);
+  const closePlanTest = useCallback(() => setPlanOpen(false), []);
   const [deadlines, setDeadlines] = useState<TodayEntry[] | null>(null);
   const [linkedTitles, setLinkedTitles] = useState<ItemTitle[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -431,6 +441,7 @@ export default function App() {
     setTrashItems([]);
     setSettingsOpen(false);
     setCardOpen(false);
+    setPlanOpen(false);
     setDeadlines(null);
     setLinkedTitles([]);
   }, []);
@@ -901,6 +912,7 @@ export default function App() {
                   onClick={() => {
                     setCardOpen((current) => !current);
                     setSettingsOpen(false);
+                    setPlanOpen(false);
                     setError(null);
                   }}
                   className="flex items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] px-3 py-2 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--selected)]"
@@ -914,9 +926,28 @@ export default function App() {
                 </button>
                 <button
                   type="button"
+                  aria-label="Plan Test"
+                  onClick={() => {
+                    setPlanOpen(true);
+                    setCardOpen(false);
+                    setSettingsOpen(false);
+                    setError(null);
+                  }}
+                  className="flex items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] px-3 py-2 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--selected)]"
+                >
+                  <HugeiconsIcon
+                    icon={ShieldCheckIcon}
+                    className="size-4"
+                    aria-hidden="true"
+                  />
+                  <span className="hidden sm:inline">Plan Test</span>
+                </button>
+                <button
+                  type="button"
                   onClick={() => {
                     setSettingsOpen(true);
                     setCardOpen(false);
+                    setPlanOpen(false);
                     setError(null);
                   }}
                   className="flex items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] px-3 py-2 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--selected)]"
@@ -960,6 +991,14 @@ export default function App() {
             setScreen("locked");
           }}
           onError={setError}
+        />
+      ) : null}
+
+      {planOpen ? (
+        <PlanTestPanel
+          generation={sessionFence.token()}
+          isGenerationCurrent={isSessionGenerationCurrent}
+          onClose={closePlanTest}
         />
       ) : null}
 
@@ -1407,6 +1446,309 @@ export default function App() {
         </div>
       </section>
     </main>
+  );
+}
+
+function PlanTestPanel({
+  generation,
+  isGenerationCurrent,
+  onClose,
+}: {
+  generation: number;
+  isGenerationCurrent: (generation: number) => boolean;
+  onClose: () => void;
+}) {
+  const [readiness, setReadiness] = useState<PlanReadiness | null>(null);
+  const [recoveryKey, setRecoveryKey] = useState("");
+  const [verification, setVerification] = useState<
+    "idle" | "verified" | "mismatch"
+  >("idle");
+  const [loading, setLoading] = useState(true);
+  const [verifying, setVerifying] = useState(false);
+  const [panelError, setPanelError] = useState<string | null>(null);
+  const dialogRef = useRef<HTMLElement | null>(null);
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (dialog === null) return;
+    const previousFocus =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    closeButtonRef.current?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = Array.from(
+        dialog.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), input:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
+        ),
+      );
+      if (focusable.length === 0) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = focusable[0]!;
+      const last = focusable[focusable.length - 1]!;
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      } else if (!dialog.contains(document.activeElement)) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      previousFocus?.focus();
+    };
+  }, [onClose]);
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    setPanelError(null);
+    setVerification("idle");
+    setRecoveryKey("");
+    void invoke<PlanReadiness>("get_plan_readiness")
+      .then((report) => {
+        if (!active || !isGenerationCurrent(generation)) return;
+        setReadiness(report);
+      })
+      .catch((reason: unknown) => {
+        if (!active || !isGenerationCurrent(generation)) return;
+        setPanelError(readError(reason));
+      })
+      .finally(() => {
+        if (active && isGenerationCurrent(generation)) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [generation, isGenerationCurrent]);
+
+  async function verifyRecoveryKey(event: FormEvent) {
+    event.preventDefault();
+    if (verifying || !recoveryKey || !readiness?.recovery_configured) return;
+    const candidate = recoveryKey;
+    setRecoveryKey("");
+    setVerifying(true);
+    setPanelError(null);
+    setVerification("idle");
+    try {
+      const matches = await invoke<boolean>("verify_recovery_secret", {
+        secret: candidate,
+      });
+      if (!isGenerationCurrent(generation)) return;
+      setVerification(matches ? "verified" : "mismatch");
+    } catch (reason) {
+      if (isGenerationCurrent(generation)) setPanelError(readError(reason));
+    } finally {
+      if (isGenerationCurrent(generation)) {
+        setVerifying(false);
+      }
+    }
+  }
+
+  const recordsReady =
+    readiness?.has_selected_records === true &&
+    readiness.has_stale_selected_records === false;
+  const checks = readiness
+    ? [
+        {
+          ready: readiness.recovery_configured,
+          label: "Recovery kit installed",
+          detail: readiness.recovery_configured
+            ? "The current vault has a recovery wrap."
+            : "Set up a recovery kit in Settings.",
+        },
+        {
+          ready: recordsReady,
+          label: "Emergency records available",
+          detail: readiness.has_stale_selected_records
+            ? "The Emergency Card references a record that is no longer active."
+            : readiness.has_selected_records
+              ? "At least one active record is selected."
+              : "Select at least one active record in the Emergency Card.",
+        },
+        {
+          ready: readiness.has_contacts,
+          label: "Emergency contact added",
+          detail: readiness.has_contacts
+            ? "At least one named contact with a phone number is present."
+            : "Add a named contact with a phone number to the Emergency Card.",
+        },
+        {
+          ready: readiness.has_instructions,
+          label: "Emergency instructions written",
+          detail: readiness.has_instructions
+            ? "The Emergency Card includes instructions."
+            : "Add instructions to the Emergency Card.",
+        },
+        {
+          ready: verification === "verified",
+          label: "Recovery key tested now",
+          detail:
+            verification === "verified"
+              ? "The entered key matches this currently open vault."
+              : verification === "mismatch"
+                ? "Safeory could not verify this key against the current recovery wrap."
+                : "Enter your saved or printed recovery key below to test it.",
+        },
+      ]
+    : [];
+  const readyCount = checks.filter((check) => check.ready).length;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 overflow-y-auto bg-black/20"
+      role="presentation"
+    >
+      <div className="mx-auto my-10 w-full max-w-2xl px-4">
+        <section
+          ref={dialogRef}
+          tabIndex={-1}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="plan-test-title"
+          className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-6 shadow-2xl"
+        >
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <div className="text-[11px] font-medium uppercase tracking-[0.12em] text-[var(--text-muted)]">
+                Local preparedness
+              </div>
+              <h1
+                id="plan-test-title"
+                className="mt-1 text-2xl font-semibold tracking-[-0.03em]"
+              >
+                Plan Test
+              </h1>
+              <p className="mt-1 text-sm leading-6 text-[var(--text-muted)]">
+                Check the emergency information and recovery path that Safeory
+                can verify on this device today.
+              </p>
+            </div>
+            <button
+              ref={closeButtonRef}
+              type="button"
+              onClick={onClose}
+              className="flex shrink-0 items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] px-3 py-2 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--selected)]"
+            >
+              <HugeiconsIcon
+                icon={ArrowLeft01Icon}
+                className="size-4"
+                aria-hidden="true"
+              />
+              Close
+            </button>
+          </div>
+
+          {panelError ? (
+            <div
+              role="alert"
+              className="mt-5 rounded-xl border border-[var(--danger-border)] bg-[var(--danger-soft)] px-4 py-3 text-sm text-[var(--danger)]"
+            >
+              {panelError}
+            </div>
+          ) : null}
+
+          {loading || readiness === null ? (
+            <p className="mt-6 text-sm text-[var(--text-muted)]">
+              Checking local plan readiness…
+            </p>
+          ) : (
+            <>
+              <div className="mt-6 rounded-2xl border border-[var(--border)] bg-[var(--surface-secondary)] p-5">
+                <div className="text-sm font-semibold">
+                  {readyCount} of {checks.length} checks ready
+                </div>
+                <div className="mt-4 overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)]">
+                  {checks.map((check) => (
+                    <div
+                      key={check.label}
+                      className="grid grid-cols-[auto_minmax(0,1fr)] gap-3 px-4 py-3 [&+&]:border-t [&+&]:border-[var(--border)]"
+                    >
+                      <div
+                        className={`mt-0.5 text-xs font-semibold ${
+                          check.ready
+                            ? "text-[var(--primary)]"
+                            : "text-[var(--text-muted)]"
+                        }`}
+                      >
+                        {check.ready ? "Ready" : "Check"}
+                      </div>
+                      <div>
+                        <div className="text-sm font-medium">{check.label}</div>
+                        <div className="mt-0.5 text-xs leading-5 text-[var(--text-muted)]">
+                          {check.detail}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <form
+                onSubmit={verifyRecoveryKey}
+                className="mt-5 rounded-2xl border border-[var(--border)] p-5"
+              >
+                <div className="text-sm font-semibold">Test recovery key</div>
+                <p className="mt-1 text-xs leading-5 text-[var(--text-muted)]">
+                  This read-only test checks that the key unwraps the exact root
+                  of the currently open vault. The key is not saved by this
+                  test, and the result is not persisted.
+                </p>
+                <div className="mt-4 flex gap-2">
+                  <input
+                    type="password"
+                    autoComplete="off"
+                    spellCheck={false}
+                    value={recoveryKey}
+                    onChange={(event) => setRecoveryKey(event.target.value)}
+                    disabled={!readiness.recovery_configured || verifying}
+                    className="field-input font-mono"
+                    placeholder={
+                      readiness.recovery_configured
+                        ? "Enter your 64-character recovery key"
+                        : "Set up a recovery kit first"
+                    }
+                  />
+                  <button
+                    type="submit"
+                    disabled={
+                      !readiness.recovery_configured ||
+                      verifying ||
+                      !recoveryKey
+                    }
+                    className="shrink-0 rounded-xl bg-[var(--primary)] px-4 py-2.5 text-sm font-medium text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-55"
+                  >
+                    {verifying ? "Testing…" : "Test key"}
+                  </button>
+                </div>
+              </form>
+
+              <p className="mt-5 text-xs leading-5 text-[var(--text-muted)]">
+                This local test does not exercise trusted-person sharing or
+                desktop/server enforcement for waiting periods, timed release,
+                or destruction. Policy evaluation exists in the portable core,
+                but no release path is wired yet.
+              </p>
+            </>
+          )}
+        </section>
+      </div>
+    </div>
   );
 }
 

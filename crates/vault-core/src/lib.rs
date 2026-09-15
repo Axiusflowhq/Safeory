@@ -14,8 +14,8 @@ use vault_crypto::{
     ATTACHMENT_CHUNK_SIZE, ATTACHMENT_MAX_FILENAME_CHARS, ATTACHMENT_MAX_PLAINTEXT_BYTES,
     AccountRootKey, AttachmentCipherContext, AttachmentManifestV1, CryptoError,
     EncryptedAttachmentV1, EncryptedItemV1, RecoveryKitWrapV1, RecoverySecret, decrypt_item_state,
-    encrypt_item, encrypt_item_state, open_attachment_manifest, seal_attachment_manifest,
-    unwrap_root_key, unwrap_root_key_with_recovery_secret, wrap_root_key,
+    encrypt_item, encrypt_item_state, open_attachment_manifest, recovery_secret_matches_root_key,
+    seal_attachment_manifest, unwrap_root_key, unwrap_root_key_with_recovery_secret, wrap_root_key,
     wrap_root_key_with_recovery_secret,
 };
 use vault_models::{EMERGENCY_CARD_ID, EmergencyCard, VaultItem, VaultItemState};
@@ -984,6 +984,13 @@ impl VaultSession {
 
     pub fn has_recovery_kit(&self) -> Result<bool, VaultError> {
         Ok(self.storage.has_recovery_wrap()?)
+    }
+
+    pub fn verify_recovery_kit(&self, secret: &RecoverySecret) -> Result<bool, VaultError> {
+        let Some(wrapped) = self.storage.load_recovery_wrap()? else {
+            return Ok(false);
+        };
+        recovery_secret_matches_root_key(secret, &wrapped, &self.root_key).map_err(Into::into)
     }
 
     pub fn validate_persisted_state(&self) -> Result<(), VaultError> {
@@ -2288,6 +2295,45 @@ mod tests {
 
         let wrong = RecoverySecret::generate().expect("wrong secret");
         assert!(VaultSession::unlock_with_recovery_kit(&database, &wrong).is_err());
+    }
+
+    #[test]
+    fn recovery_kit_verification_is_read_only_and_handles_missing_or_wrong_keys() {
+        let dir = tempdir().expect("temp directory");
+        let database = dir.path().join("vault.sqlite3");
+        let session = VaultSession::create(&database, TEST_PASSPHRASE).expect("create vault");
+        let secret = RecoverySecret::generate().expect("recovery secret");
+        let wrong = RecoverySecret::generate().expect("wrong recovery secret");
+
+        assert!(!session.verify_recovery_kit(&secret).expect("missing kit"));
+        session
+            .install_recovery_kit(&secret)
+            .expect("install recovery kit");
+        assert!(
+            session
+                .verify_recovery_kit(&secret)
+                .expect("verify correct key")
+        );
+        assert!(
+            !session
+                .verify_recovery_kit(&wrong)
+                .expect("verify wrong key")
+        );
+        assert!(session.has_recovery_kit().expect("kit remains installed"));
+
+        let foreign_root = AccountRootKey::generate().expect("foreign root key");
+        let foreign_secret = RecoverySecret::generate().expect("foreign recovery secret");
+        let foreign_wrap = wrap_root_key_with_recovery_secret(&foreign_secret, &foreign_root)
+            .expect("foreign recovery wrap");
+        session
+            .storage
+            .store_recovery_wrap(&foreign_wrap)
+            .expect("transplant foreign recovery wrap");
+        assert!(
+            !session
+                .verify_recovery_kit(&foreign_secret)
+                .expect("foreign wrap must not verify against this vault")
+        );
     }
 
     #[test]

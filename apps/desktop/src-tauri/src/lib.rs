@@ -764,6 +764,15 @@ struct RecoveryStatusView {
     configured: bool,
 }
 
+#[derive(serde::Serialize)]
+struct PlanReadinessView {
+    recovery_configured: bool,
+    has_selected_records: bool,
+    has_contacts: bool,
+    has_instructions: bool,
+    has_stale_selected_records: bool,
+}
+
 struct GeneratedRecoverySecretView {
     secret: Zeroizing<String>,
     generation: u64,
@@ -1604,6 +1613,16 @@ async fn save_recovery_secret(
 #[tauri::command]
 fn get_recovery_status(state: State<'_, VaultRuntime>) -> Result<RecoveryStatusView, String> {
     get_recovery_status_impl(&state)
+}
+
+#[tauri::command]
+fn verify_recovery_secret(state: State<'_, VaultRuntime>, secret: String) -> Result<bool, String> {
+    verify_recovery_secret_impl(&state, secret)
+}
+
+#[tauri::command]
+fn get_plan_readiness(state: State<'_, VaultRuntime>) -> Result<PlanReadinessView, String> {
+    get_plan_readiness_impl(&state)
 }
 
 #[tauri::command]
@@ -3641,6 +3660,64 @@ fn get_recovery_status_impl(state: &VaultRuntime) -> Result<RecoveryStatusView, 
     })
 }
 
+fn verify_recovery_secret_impl(state: &VaultRuntime, secret: String) -> Result<bool, String> {
+    let secret = Zeroizing::new(secret);
+    let session = lock_session(state)?;
+    let session = session
+        .as_ref()
+        .ok_or_else(|| "Unlock the vault before testing the recovery key.".to_owned())?;
+    let Ok(parsed) = RecoverySecret::from_hex(secret.trim()) else {
+        return Ok(false);
+    };
+    session
+        .verify_recovery_kit(&parsed)
+        .map_err(safe_vault_error)
+}
+
+fn get_plan_readiness_impl(state: &VaultRuntime) -> Result<PlanReadinessView, String> {
+    let session = lock_session(state)?;
+    let session = session
+        .as_ref()
+        .ok_or_else(|| "Unlock the vault before testing the emergency plan.".to_owned())?;
+    let recovery_configured = session.has_recovery_kit().map_err(safe_vault_error)?;
+    let card = session.get_emergency_card().map_err(safe_vault_error)?;
+    let Some((card, _revision)) = card else {
+        return Ok(PlanReadinessView {
+            recovery_configured,
+            has_selected_records: false,
+            has_contacts: false,
+            has_instructions: false,
+            has_stale_selected_records: false,
+        });
+    };
+    let mut has_selected_records = false;
+    let mut has_stale_selected_records = false;
+    for id in &card.selected_item_ids {
+        if *id == EMERGENCY_CARD_ID {
+            has_stale_selected_records = true;
+            continue;
+        }
+        match session.get_item_with_revision(*id) {
+            Ok(_) => has_selected_records = true,
+            Err(VaultError::ItemNotActive)
+            | Err(VaultError::Storage(StorageError::ItemNotFound)) => {
+                has_stale_selected_records = true;
+            }
+            Err(error) => return Err(safe_vault_error(error)),
+        }
+    }
+    Ok(PlanReadinessView {
+        recovery_configured,
+        has_selected_records,
+        has_contacts: card
+            .contacts
+            .iter()
+            .any(|contact| !contact.name.trim().is_empty() && !contact.phone.trim().is_empty()),
+        has_instructions: !card.instructions.trim().is_empty(),
+        has_stale_selected_records,
+    })
+}
+
 fn unlock_vault_with_recovery_kit_impl(
     state: &VaultRuntime,
     secret: String,
@@ -4959,6 +5036,8 @@ pub fn run() {
             confirm_recovery_secret,
             save_recovery_secret,
             get_recovery_status,
+            verify_recovery_secret,
+            get_plan_readiness,
             unlock_vault_with_recovery_kit,
             export_human_readable,
             backup_database_copy,
@@ -7183,6 +7262,91 @@ mod tests {
     }
 
     #[test]
+    fn recovery_key_self_test_is_read_only_and_returns_only_match_status() {
+        let (_directory, runtime) = runtime();
+        initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
+        let generated = generate_recovery_secret_impl(&runtime).expect("generate secret");
+        confirm_recovery_secret_impl(&runtime, generated.secret.to_string(), generated.generation)
+            .expect("install recovery key");
+        let generation = capture_session_generation(&runtime);
+
+        assert!(
+            verify_recovery_secret_impl(&runtime, generated.secret.to_string())
+                .expect("verify installed recovery key")
+        );
+        assert!(
+            !verify_recovery_secret_impl(&runtime, "not-a-recovery-key".to_owned())
+                .expect("malformed key is a mismatch")
+        );
+        let mut wrong = generated.secret.to_string();
+        let first = wrong.remove(0);
+        wrong.insert(0, if first == 'a' { 'b' } else { 'a' });
+        assert!(!verify_recovery_secret_impl(&runtime, wrong).expect("wrong key is a mismatch"));
+        assert_eq!(capture_session_generation(&runtime), generation);
+        assert!(vault_status_impl(&runtime).expect("vault status").unlocked);
+    }
+
+    #[test]
+    fn plan_readiness_is_metadata_only_and_detects_stale_card_references() {
+        let (_directory, runtime) = runtime();
+        initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
+        let active = create_note_impl(&runtime, "Executor packet".to_owned(), "secret".to_owned())
+            .expect("create active note");
+        let stale = create_note_impl(&runtime, "Old packet".to_owned(), "secret".to_owned())
+            .expect("create stale note");
+        update_emergency_card_impl(
+            &runtime,
+            None,
+            vec![active.id.clone(), stale.id.clone()],
+            vec![ContactPayload {
+                name: "Private Contact Name".to_owned(),
+                relation: "Sibling".to_owned(),
+                phone: "+1-555-0199".to_owned(),
+                notes: "Private contact notes".to_owned(),
+            }],
+            "Private emergency instructions".to_owned(),
+        )
+        .expect("set emergency card");
+        trash_item_impl(&runtime, stale.id, stale.revision).expect("trash selected record");
+        let generated = generate_recovery_secret_impl(&runtime).expect("generate recovery key");
+        confirm_recovery_secret_impl(&runtime, generated.secret.to_string(), generated.generation)
+            .expect("install recovery key");
+
+        let readiness = get_plan_readiness_impl(&runtime).expect("plan readiness");
+        assert!(readiness.recovery_configured);
+        assert!(readiness.has_selected_records);
+        assert!(readiness.has_contacts);
+        assert!(readiness.has_instructions);
+        assert!(readiness.has_stale_selected_records);
+        let serialized = serde_json::to_string(&readiness).expect("serialize readiness");
+        assert!(!serialized.contains("Private Contact Name"));
+        assert!(!serialized.contains("Private emergency instructions"));
+        assert!(!serialized.contains("Executor packet"));
+    }
+
+    #[test]
+    fn plan_readiness_does_not_count_a_blank_emergency_contact() {
+        let (_directory, runtime) = runtime();
+        initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
+        update_emergency_card_impl(
+            &runtime,
+            None,
+            Vec::new(),
+            vec![ContactPayload {
+                name: String::new(),
+                relation: String::new(),
+                phone: String::new(),
+                notes: String::new(),
+            }],
+            String::new(),
+        )
+        .expect("set blank emergency contact");
+
+        let readiness = get_plan_readiness_impl(&runtime).expect("plan readiness");
+        assert!(!readiness.has_contacts);
+    }
+
+    #[test]
     fn export_and_backup_copy_contain_seeded_data() {
         let (directory, runtime) = runtime();
         initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
@@ -7601,6 +7765,8 @@ mod tests {
             .is_err()
         );
         assert!(get_recovery_status_impl(&runtime).is_err());
+        assert!(verify_recovery_secret_impl(&runtime, "00".to_owned()).is_err());
+        assert!(get_plan_readiness_impl(&runtime).is_err());
         assert!(export_human_readable_impl(&runtime, "export.json".to_owned()).is_err());
         assert!(backup_database_copy_impl(&runtime, "backup.sqlite3".to_owned()).is_err());
         assert!(export_human_readable_impl(&runtime, String::new()).is_err());
