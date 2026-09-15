@@ -342,6 +342,14 @@ type LegacyDisposition =
   | "private_forever"
   | "destroy_on_death";
 
+type AccountClosureDisposition =
+  "unspecified" | "keep_open" | "close_account" | "review_manually";
+
+type AccountClosurePlan = {
+  disposition: AccountClosureDisposition;
+  instructions: string;
+};
+
 type AttachmentSummary = {
   id: string;
   revision: number;
@@ -359,6 +367,8 @@ type LinkedSectionProps = {
   allItems: VaultItem[];
   onJump: (kind: string, id: string) => void;
   onLinksChanged: (id: string, revision: number) => void;
+  supportMutationBusy: boolean;
+  onSupportMutationBusyChange: (busy: boolean) => void;
 };
 
 type VaultView = "active" | "trash";
@@ -391,6 +401,10 @@ export default function App() {
   const [cardOpen, setCardOpen] = useState(false);
   const [planOpen, setPlanOpen] = useState(false);
   const closePlanTest = useCallback(() => setPlanOpen(false), []);
+  const [accountClosureDraftDirty, setAccountClosureDraftDirty] =
+    useState(false);
+  const [recordSupportMutationBusy, setRecordSupportMutationBusy] =
+    useState(false);
   const [deadlines, setDeadlines] = useState<TodayEntry[] | null>(null);
   const [linkedTitles, setLinkedTitles] = useState<ItemTitle[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -451,6 +465,8 @@ export default function App() {
     setSettingsOpen(false);
     setCardOpen(false);
     setPlanOpen(false);
+    setAccountClosureDraftDirty(false);
+    setRecordSupportMutationBusy(false);
     setDeadlines(null);
     setLinkedTitles([]);
   }, []);
@@ -711,7 +727,13 @@ export default function App() {
       (!needle || item.title.toLocaleLowerCase().includes(needle)),
   );
 
+  const canLeaveSelectedRecord = () =>
+    !recordSupportMutationBusy &&
+    (!accountClosureDraftDirty ||
+      window.confirm("Discard unsaved account closure plan changes?"));
+
   const switchSection = (next: Section) => {
+    if (!canLeaveSelectedRecord()) return;
     setSection(next);
     setEditor(null);
     setError(null);
@@ -719,6 +741,7 @@ export default function App() {
   };
 
   const jumpToRecord = (kind: string, id: string) => {
+    if (id !== selectedId && !canLeaveSelectedRecord()) return;
     setCardOpen(false);
     setEditor(null);
     setError(null);
@@ -760,6 +783,7 @@ export default function App() {
 
   const enterTrash = async () => {
     if (!desktopRuntime || loadingTrash) return;
+    if (!canLeaveSelectedRecord()) return;
     const token = sessionFence.token();
     const requestGeneration = ++trashLoadGeneration.current;
     setVaultView("trash");
@@ -802,7 +826,11 @@ export default function App() {
 
   const trashSelected = async () => {
     if (!desktopRuntime || !selected) return;
-    if (!window.confirm(`Move “${selected.title}” to Trash?`)) return;
+    if (recordSupportMutationBusy) return;
+    const trashPrompt = accountClosureDraftDirty
+      ? `Move “${selected.title}” to Trash and discard the unsaved account closure plan changes?`
+      : `Move “${selected.title}” to Trash?`;
+    if (!window.confirm(trashPrompt)) return;
     const token = sessionFence.token();
     setError(null);
     try {
@@ -863,6 +891,7 @@ export default function App() {
   };
 
   const startNewItem = () => {
+    if (!canLeaveSelectedRecord()) return;
     setSelectedId(null);
     setError(null);
     if (section === "secure_note") {
@@ -1051,7 +1080,7 @@ export default function App() {
               </span>
               <select
                 value={section}
-                disabled={editor !== null}
+                disabled={editor !== null || recordSupportMutationBusy}
                 onChange={(event) =>
                   switchSection(event.target.value as Section)
                 }
@@ -1087,8 +1116,9 @@ export default function App() {
                   aria-label={`Search ${sectionLabel(section).toLocaleLowerCase()}`}
                   placeholder={`Search ${sectionLabel(section).toLocaleLowerCase()}`}
                   value={query}
-                  disabled={editor !== null}
+                  disabled={editor !== null || recordSupportMutationBusy}
                   onChange={(event) => {
+                    if (!canLeaveSelectedRecord()) return;
                     setQuery(event.target.value);
                     setSelectedId(null);
                     setError(null);
@@ -1101,8 +1131,12 @@ export default function App() {
             {selected && !editor ? (
               <button
                 type="button"
-                onClick={() => setSelectedId(null)}
-                className="flex h-10 items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] px-3 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--selected)]"
+                onClick={() => {
+                  if (!canLeaveSelectedRecord()) return;
+                  setSelectedId(null);
+                }}
+                disabled={recordSupportMutationBusy}
+                className="flex h-10 items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] px-3 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--selected)] disabled:cursor-not-allowed disabled:opacity-55"
               >
                 <HugeiconsIcon
                   icon={ArrowLeft01Icon}
@@ -1133,7 +1167,11 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => void enterTrash()}
-                  disabled={!desktopRuntime || editor !== null}
+                  disabled={
+                    !desktopRuntime ||
+                    editor !== null ||
+                    recordSupportMutationBusy
+                  }
                   className="flex h-10 items-center justify-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] px-4 text-sm font-medium text-[var(--text-secondary)] transition hover:bg-[var(--selected)] disabled:cursor-not-allowed disabled:opacity-55"
                 >
                   <HugeiconsIcon
@@ -1147,7 +1185,8 @@ export default function App() {
                   <button
                     type="button"
                     onClick={() => void trashSelected()}
-                    className="flex h-10 items-center justify-center gap-2 rounded-xl border border-[var(--danger-border)] bg-[var(--danger-soft)] px-4 text-sm font-medium text-[var(--danger)] transition hover:opacity-80"
+                    disabled={recordSupportMutationBusy}
+                    className="flex h-10 items-center justify-center gap-2 rounded-xl border border-[var(--danger-border)] bg-[var(--danger-soft)] px-4 text-sm font-medium text-[var(--danger)] transition hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-55"
                   >
                     <HugeiconsIcon
                       icon={Delete02Icon}
@@ -1160,7 +1199,11 @@ export default function App() {
                 <button
                   type="button"
                   onClick={startNewItem}
-                  disabled={!desktopRuntime || editor !== null}
+                  disabled={
+                    !desktopRuntime ||
+                    editor !== null ||
+                    recordSupportMutationBusy
+                  }
                   className="flex h-10 items-center justify-center gap-2 rounded-xl bg-[var(--primary)] px-4 text-sm font-medium text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-55"
                 >
                   <HugeiconsIcon
@@ -1321,7 +1364,10 @@ export default function App() {
               allItems={items}
               onJump={jumpToRecord}
               onLinksChanged={handleRecordSupportChanged}
+              supportMutationBusy={recordSupportMutationBusy}
+              onSupportMutationBusyChange={setRecordSupportMutationBusy}
               onEdit={() =>
+                canLeaveSelectedRecord() &&
                 setEditor({
                   kind: "secure_note",
                   item: withoutKind(selected),
@@ -1337,9 +1383,13 @@ export default function App() {
               allItems={items}
               onJump={jumpToRecord}
               onLinksChanged={handleRecordSupportChanged}
+              supportMutationBusy={recordSupportMutationBusy}
+              onSupportMutationBusyChange={setRecordSupportMutationBusy}
               generation={sessionFence.token()}
               isGenerationCurrent={isSessionGenerationCurrent}
+              onClosureDraftDirtyChange={setAccountClosureDraftDirty}
               onEdit={() => {
+                if (!canLeaveSelectedRecord()) return;
                 setError(null);
                 setEditor({ kind: "password", item: withoutKind(selected) });
               }}
@@ -1353,9 +1403,12 @@ export default function App() {
               allItems={items}
               onJump={jumpToRecord}
               onLinksChanged={handleRecordSupportChanged}
+              supportMutationBusy={recordSupportMutationBusy}
+              onSupportMutationBusyChange={setRecordSupportMutationBusy}
               generation={sessionFence.token()}
               isGenerationCurrent={isSessionGenerationCurrent}
               onEdit={() => {
+                if (!canLeaveSelectedRecord()) return;
                 setError(null);
                 setEditor({ kind: "document", item: withoutKind(selected) });
               }}
@@ -1369,9 +1422,12 @@ export default function App() {
               allItems={items}
               onJump={jumpToRecord}
               onLinksChanged={handleRecordSupportChanged}
+              supportMutationBusy={recordSupportMutationBusy}
+              onSupportMutationBusyChange={setRecordSupportMutationBusy}
               generation={sessionFence.token()}
               isGenerationCurrent={isSessionGenerationCurrent}
               onEdit={() => {
+                if (!canLeaveSelectedRecord()) return;
                 setError(null);
                 setEditor({ kind: "receipt", item: withoutKind(selected) });
               }}
@@ -1385,9 +1441,12 @@ export default function App() {
               allItems={items}
               onJump={jumpToRecord}
               onLinksChanged={handleRecordSupportChanged}
+              supportMutationBusy={recordSupportMutationBusy}
+              onSupportMutationBusyChange={setRecordSupportMutationBusy}
               generation={sessionFence.token()}
               isGenerationCurrent={isSessionGenerationCurrent}
               onEdit={() => {
+                if (!canLeaveSelectedRecord()) return;
                 setError(null);
                 setEditor({ kind: "insurance", item: withoutKind(selected) });
               }}
@@ -1401,9 +1460,12 @@ export default function App() {
               allItems={items}
               onJump={jumpToRecord}
               onLinksChanged={handleRecordSupportChanged}
+              supportMutationBusy={recordSupportMutationBusy}
+              onSupportMutationBusyChange={setRecordSupportMutationBusy}
               generation={sessionFence.token()}
               isGenerationCurrent={isSessionGenerationCurrent}
               onEdit={() => {
+                if (!canLeaveSelectedRecord()) return;
                 setError(null);
                 setEditor({ kind: "financial", item: withoutKind(selected) });
               }}
@@ -1417,9 +1479,12 @@ export default function App() {
               allItems={items}
               onJump={jumpToRecord}
               onLinksChanged={handleRecordSupportChanged}
+              supportMutationBusy={recordSupportMutationBusy}
+              onSupportMutationBusyChange={setRecordSupportMutationBusy}
               generation={sessionFence.token()}
               isGenerationCurrent={isSessionGenerationCurrent}
               onEdit={() => {
+                if (!canLeaveSelectedRecord()) return;
                 setError(null);
                 setEditor({ kind: "property", item: withoutKind(selected) });
               }}
@@ -1433,9 +1498,12 @@ export default function App() {
               allItems={items}
               onJump={jumpToRecord}
               onLinksChanged={handleRecordSupportChanged}
+              supportMutationBusy={recordSupportMutationBusy}
+              onSupportMutationBusyChange={setRecordSupportMutationBusy}
               generation={sessionFence.token()}
               isGenerationCurrent={isSessionGenerationCurrent}
               onEdit={() => {
+                if (!canLeaveSelectedRecord()) return;
                 setError(null);
                 setEditor({ kind: "vehicle", item: withoutKind(selected) });
               }}
@@ -1449,9 +1517,12 @@ export default function App() {
               allItems={items}
               onJump={jumpToRecord}
               onLinksChanged={handleRecordSupportChanged}
+              supportMutationBusy={recordSupportMutationBusy}
+              onSupportMutationBusyChange={setRecordSupportMutationBusy}
               generation={sessionFence.token()}
               isGenerationCurrent={isSessionGenerationCurrent}
               onEdit={() => {
+                if (!canLeaveSelectedRecord()) return;
                 setError(null);
                 setEditor({ kind: "possession", item: withoutKind(selected) });
               }}
@@ -4977,6 +5048,9 @@ function RecordSupportSections({
   itemId,
   revision,
   links,
+  showAccountClosurePlan = false,
+  onMutationBusyChange,
+  onAccountClosureDraftDirtyChange,
   generation,
   isGenerationCurrent,
   linkedTitles,
@@ -4988,10 +5062,16 @@ function RecordSupportSections({
   itemId: string;
   revision: number;
   links: string[];
+  showAccountClosurePlan?: boolean;
+  onMutationBusyChange?: (busy: boolean) => void;
+  onAccountClosureDraftDirtyChange?: (dirty: boolean) => void;
   generation: number;
   isGenerationCurrent: (generation: number) => boolean;
   onError: (message: string | null) => void;
-} & Omit<LinkedSectionProps, "onLinksChanged"> & {
+} & Omit<
+  LinkedSectionProps,
+  "onLinksChanged" | "supportMutationBusy" | "onSupportMutationBusyChange"
+> & {
     onChanged: (id: string, revision: number) => void;
   }) {
   const [itemRevision, setItemRevision] = useState(revision);
@@ -5002,26 +5082,37 @@ function RecordSupportSections({
     setItemRevision((current) => Math.max(current, revision));
   }, [revision]);
 
+  useEffect(
+    () => () => {
+      onMutationBusyChange?.(false);
+      onAccountClosureDraftDirtyChange?.(false);
+    },
+    [onAccountClosureDraftDirtyChange, onMutationBusyChange],
+  );
+
   const beginRevisionMutation = useCallback(() => {
     if (mutationInFlight.current) return false;
     mutationInFlight.current = true;
     setMutationBusy(true);
+    onMutationBusyChange?.(true);
     return true;
-  }, []);
+  }, [onMutationBusyChange]);
 
   const endRevisionMutation = useCallback(() => {
     mutationInFlight.current = false;
     setMutationBusy(false);
-  }, []);
+    onMutationBusyChange?.(false);
+  }, [onMutationBusyChange]);
 
   const commitRevisionMutation = useCallback(
     (nextRevision: number) => {
       setItemRevision(nextRevision);
       mutationInFlight.current = false;
       setMutationBusy(false);
+      onMutationBusyChange?.(false);
       onChanged(itemId, nextRevision);
     },
-    [itemId, onChanged],
+    [itemId, onChanged, onMutationBusyChange],
   );
 
   const coordinator: RevisionMutationCoordinator = {
@@ -5034,6 +5125,16 @@ function RecordSupportSections({
 
   return (
     <>
+      {showAccountClosurePlan ? (
+        <AccountClosurePlanSection
+          itemId={itemId}
+          generation={generation}
+          isGenerationCurrent={isGenerationCurrent}
+          coordinator={coordinator}
+          onDirtyChange={onAccountClosureDraftDirtyChange}
+          onError={onError}
+        />
+      ) : null}
       <AttachmentsSection
         ownerItemId={itemId}
         generation={generation}
@@ -5056,6 +5157,213 @@ function RecordSupportSections({
   );
 }
 
+function AccountClosurePlanSection({
+  itemId,
+  generation,
+  isGenerationCurrent,
+  coordinator,
+  onDirtyChange,
+  onError,
+}: {
+  itemId: string;
+  generation: number;
+  isGenerationCurrent: (generation: number) => boolean;
+  coordinator: RevisionMutationCoordinator;
+  onDirtyChange?: ((dirty: boolean) => void) | undefined;
+  onError: (message: string | null) => void;
+}) {
+  const [plan, setPlan] = useState<AccountClosurePlan | null>(null);
+  const [draft, setDraft] = useState<AccountClosurePlan | null>(null);
+  const [loadState, setLoadState] = useState<"loading" | "ready" | "error">(
+    "loading",
+  );
+  const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const setDirtyState = useCallback(
+    (next: boolean) => {
+      setDirty(next);
+      onDirtyChange?.(next);
+    },
+    [onDirtyChange],
+  );
+
+  useEffect(() => {
+    if (dirty) return;
+    let active = true;
+    setLoadState("loading");
+    void invoke<AccountClosurePlan>("get_credential_closure_plan", {
+      id: itemId,
+      revision: coordinator.revision,
+    })
+      .then((loaded) => {
+        if (!active || !isGenerationCurrent(generation)) return;
+        setPlan(loaded);
+        setDraft(loaded);
+        setLoadState("ready");
+      })
+      .catch((reason: unknown) => {
+        if (active && isGenerationCurrent(generation)) {
+          setLoadState("error");
+          onError(readError(reason));
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [
+    coordinator.revision,
+    dirty,
+    generation,
+    isGenerationCurrent,
+    itemId,
+    onError,
+  ]);
+
+  async function savePlan() {
+    if (
+      saving ||
+      loadState !== "ready" ||
+      draft === null ||
+      !dirty ||
+      !coordinator.beginRevisionMutation()
+    )
+      return;
+    setSaving(true);
+    onError(null);
+    try {
+      const nextRevision = await invoke<number>("set_credential_closure_plan", {
+        id: itemId,
+        revision: coordinator.revision,
+        plan: draft,
+      });
+      if (!isGenerationCurrent(generation)) return;
+      setPlan(draft);
+      setDirtyState(false);
+      coordinator.commitRevisionMutation(nextRevision);
+    } catch (reason) {
+      if (isGenerationCurrent(generation)) onError(readError(reason));
+    } finally {
+      if (isGenerationCurrent(generation)) {
+        coordinator.endRevisionMutation();
+        setSaving(false);
+      }
+    }
+  }
+
+  const explanation =
+    draft?.disposition === "keep_open"
+      ? "Plan to keep this account open. Safeory does not keep it active or sign in for you."
+      : draft?.disposition === "close_account"
+        ? "Plan to close this account manually. Safeory does not contact the provider or close it automatically."
+        : draft?.disposition === "review_manually"
+          ? "Plan to review this account before deciding whether it should stay open or be closed."
+          : "No account-closure preference is recorded.";
+
+  return (
+    <div className="mt-8">
+      <div className="text-xs font-medium uppercase tracking-[0.12em] text-[var(--text-muted)]">
+        Account closure plan
+      </div>
+      <div className="mt-3 rounded-2xl border border-[var(--border)] bg-[var(--surface-secondary)] p-4">
+        <p className="text-xs leading-5 text-[var(--text-muted)]">
+          Planning only. Safeory does not sign in, close the account, verify
+          death, or share credentials automatically.
+        </p>
+        {loadState === "loading" ? (
+          <p className="mt-3 text-xs leading-5 text-[var(--text-muted)]">
+            Loading account closure plan…
+          </p>
+        ) : loadState === "error" || draft === null ? (
+          <p
+            role="alert"
+            className="mt-3 text-xs leading-5 text-[var(--danger)]"
+          >
+            Account closure plan is unavailable. Reload this credential before
+            changing it.
+          </p>
+        ) : (
+          <div className="mt-3 space-y-3">
+            <label className="block">
+              <span className="text-xs font-medium text-[var(--text-secondary)]">
+                Preference
+              </span>
+              <select
+                value={draft.disposition}
+                disabled={saving || coordinator.mutationBusy}
+                onChange={(event) => {
+                  setDraft((current) =>
+                    current
+                      ? {
+                          ...current,
+                          disposition: event.target
+                            .value as AccountClosureDisposition,
+                        }
+                      : current,
+                  );
+                  setDirtyState(true);
+                }}
+                className="field-input mt-1.5"
+              >
+                <option value="unspecified">Unspecified</option>
+                <option value="keep_open">Keep open</option>
+                <option value="close_account">Close account</option>
+                <option value="review_manually">Review manually</option>
+              </select>
+            </label>
+            <p className="text-xs leading-5 text-[var(--text-muted)]">
+              {explanation}
+            </p>
+            <label className="block">
+              <span className="text-xs font-medium text-[var(--text-secondary)]">
+                Private instructions
+              </span>
+              <textarea
+                value={draft.instructions}
+                maxLength={100_000}
+                disabled={saving || coordinator.mutationBusy}
+                onChange={(event) => {
+                  setDraft((current) =>
+                    current
+                      ? { ...current, instructions: event.target.value }
+                      : current,
+                  );
+                  setDirtyState(true);
+                }}
+                className="field-input mt-1.5 min-h-24 resize-y"
+                placeholder="Optional steps, provider contacts, records to export, or other private context"
+              />
+            </label>
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                disabled={
+                  saving || coordinator.mutationBusy || !dirty || plan === null
+                }
+                onClick={() => {
+                  if (plan === null) return;
+                  setDraft(plan);
+                  setDirtyState(false);
+                }}
+                className="rounded-xl border border-[var(--border)] bg-[var(--surface)] px-4 py-2 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--selected)] disabled:cursor-not-allowed disabled:opacity-55"
+              >
+                Reset
+              </button>
+              <button
+                type="button"
+                disabled={saving || coordinator.mutationBusy || !dirty}
+                onClick={() => void savePlan()}
+                className="rounded-xl bg-[var(--primary)] px-4 py-2 text-sm font-medium text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-55"
+              >
+                {saving ? "Saving…" : "Save plan"}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function LinkedRecordsSection({
   itemId,
   links,
@@ -5073,7 +5381,10 @@ function LinkedRecordsSection({
   isGenerationCurrent: (generation: number) => boolean;
   coordinator: RevisionMutationCoordinator;
   onError: (message: string | null) => void;
-} & Omit<LinkedSectionProps, "onLinksChanged">) {
+} & Omit<
+  LinkedSectionProps,
+  "onLinksChanged" | "supportMutationBusy" | "onSupportMutationBusyChange"
+>) {
   const [managing, setManaging] = useState(false);
   const [currentLinks, setCurrentLinks] = useState<string[]>(links);
   const [draft, setDraft] = useState<string[]>(links);
@@ -5346,7 +5657,8 @@ function LinkedRecordsSection({
                   key={id}
                   type="button"
                   onClick={() => onJump(entry.kind, entry.id)}
-                  className="grid w-full grid-cols-[140px_minmax(0,1fr)] gap-4 px-5 py-4 text-left transition hover:bg-[var(--selected)] [&+&]:border-t [&+&]:border-[var(--border)]"
+                  disabled={coordinator.mutationBusy}
+                  className="grid w-full grid-cols-[140px_minmax(0,1fr)] gap-4 px-5 py-4 text-left transition hover:bg-[var(--selected)] disabled:cursor-not-allowed disabled:opacity-55 [&+&]:border-t [&+&]:border-[var(--border)]"
                 >
                   <div className="text-sm text-[var(--text-muted)]">
                     {kindLabel(entry.kind)}
@@ -5595,6 +5907,8 @@ function NoteReader({
   allItems,
   onJump,
   onLinksChanged,
+  supportMutationBusy,
+  onSupportMutationBusyChange,
   onEdit,
   onError,
 }: {
@@ -5606,7 +5920,12 @@ function NoteReader({
 } & LinkedSectionProps) {
   return (
     <article className="mx-auto max-w-3xl px-8 py-12">
-      <ReaderHeader icon={FileTextIcon} label="Secure note" onEdit={onEdit} />
+      <ReaderHeader
+        icon={FileTextIcon}
+        label="Secure note"
+        onEdit={onEdit}
+        editDisabled={supportMutationBusy}
+      />
       <h1 className="text-3xl font-semibold tracking-[-0.035em]">
         {note.title}
       </h1>
@@ -5619,6 +5938,7 @@ function NoteReader({
         itemId={note.id}
         revision={note.revision}
         links={note.links ?? []}
+        onMutationBusyChange={onSupportMutationBusyChange}
         generation={generation}
         isGenerationCurrent={isGenerationCurrent}
         linkedTitles={linkedTitles}
@@ -5639,12 +5959,18 @@ function CredentialReader({
   allItems,
   onJump,
   onLinksChanged,
+  onClosureDraftDirtyChange,
+  supportMutationBusy,
+  onSupportMutationBusyChange,
   onEdit,
   onError,
 }: {
   credential: CredentialView;
   generation: number;
   isGenerationCurrent: (generation: number) => boolean;
+  onClosureDraftDirtyChange: (dirty: boolean) => void;
+  supportMutationBusy: boolean;
+  onSupportMutationBusyChange: (busy: boolean) => void;
   onEdit: () => void;
   onError: (message: string | null) => void;
 } & LinkedSectionProps) {
@@ -5669,7 +5995,8 @@ function CredentialReader({
       setPassword(null);
       return;
     }
-    if (!credential.has_password || loadingSecret) return;
+    if (!credential.has_password || loadingSecret || supportMutationBusy)
+      return;
 
     setLoadingSecret(true);
     onError(null);
@@ -5689,7 +6016,8 @@ function CredentialReader({
   }
 
   async function copyPassword() {
-    if (!credential.has_password || copyingPassword) return;
+    if (!credential.has_password || copyingPassword || supportMutationBusy)
+      return;
 
     setCopyingPassword(true);
     setCopyNotice(null);
@@ -5719,7 +6047,12 @@ function CredentialReader({
 
   return (
     <article className="mx-auto max-w-3xl px-8 py-12">
-      <ReaderHeader icon={Key01Icon} label="Credential" onEdit={onEdit} />
+      <ReaderHeader
+        icon={Key01Icon}
+        label="Credential"
+        onEdit={onEdit}
+        editDisabled={supportMutationBusy}
+      />
       <h1 className="text-3xl font-semibold tracking-[-0.035em]">
         {credential.title}
       </h1>
@@ -5752,7 +6085,7 @@ function CredentialReader({
               <button
                 type="button"
                 onClick={() => void copyPassword()}
-                disabled={copyingPassword}
+                disabled={copyingPassword || supportMutationBusy}
                 className="flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs text-[var(--text-muted)] transition hover:bg-[var(--selected)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-55"
               >
                 <HugeiconsIcon
@@ -5765,7 +6098,7 @@ function CredentialReader({
               <button
                 type="button"
                 onClick={() => void togglePassword()}
-                disabled={loadingSecret}
+                disabled={loadingSecret || supportMutationBusy}
                 className="flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs text-[var(--text-muted)] transition hover:bg-[var(--selected)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-55"
               >
                 <HugeiconsIcon
@@ -5797,6 +6130,9 @@ function CredentialReader({
         itemId={credential.id}
         revision={credential.revision}
         links={credential.links ?? []}
+        showAccountClosurePlan
+        onMutationBusyChange={onSupportMutationBusyChange}
+        onAccountClosureDraftDirtyChange={onClosureDraftDirtyChange}
         generation={generation}
         isGenerationCurrent={isGenerationCurrent}
         linkedTitles={linkedTitles}
@@ -5817,6 +6153,8 @@ function DocumentReader({
   allItems,
   onJump,
   onLinksChanged,
+  supportMutationBusy,
+  onSupportMutationBusyChange,
   onEdit,
   onError,
 }: {
@@ -5836,7 +6174,8 @@ function DocumentReader({
       setDocumentNumber(null);
       return;
     }
-    if (!document.has_document_number || loadingSecret) return;
+    if (!document.has_document_number || loadingSecret || supportMutationBusy)
+      return;
 
     setLoadingSecret(true);
     onError(null);
@@ -5861,6 +6200,7 @@ function DocumentReader({
         icon={DocumentValidationIcon}
         label="Document"
         onEdit={onEdit}
+        editDisabled={supportMutationBusy}
       />
       <h1 className="text-3xl font-semibold tracking-[-0.035em]">
         {document.title}
@@ -5889,7 +6229,7 @@ function DocumentReader({
             <button
               type="button"
               onClick={() => void toggleDocumentNumber()}
-              disabled={loadingSecret}
+              disabled={loadingSecret || supportMutationBusy}
               className="flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs text-[var(--text-muted)] transition hover:bg-[var(--selected)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-55"
             >
               <HugeiconsIcon
@@ -5916,6 +6256,7 @@ function DocumentReader({
         itemId={document.id}
         revision={document.revision}
         links={document.links ?? []}
+        onMutationBusyChange={onSupportMutationBusyChange}
         generation={generation}
         isGenerationCurrent={isGenerationCurrent}
         linkedTitles={linkedTitles}
@@ -5936,6 +6277,8 @@ function ReceiptReader({
   allItems,
   onJump,
   onLinksChanged,
+  supportMutationBusy,
+  onSupportMutationBusyChange,
   onEdit,
   onError,
 }: {
@@ -5974,7 +6317,8 @@ function ReceiptReader({
       setReceiptReference(null);
       return;
     }
-    if (!receipt.has_receipt_reference || loadingSecret) return;
+    if (!receipt.has_receipt_reference || loadingSecret || supportMutationBusy)
+      return;
     setLoadingSecret(true);
     onError(null);
     try {
@@ -5994,7 +6338,12 @@ function ReceiptReader({
 
   return (
     <article className="mx-auto max-w-3xl px-8 py-12">
-      <ReaderHeader icon={FileTextIcon} label="Receipt" onEdit={onEdit} />
+      <ReaderHeader
+        icon={FileTextIcon}
+        label="Receipt"
+        onEdit={onEdit}
+        editDisabled={supportMutationBusy}
+      />
       <h1 className="text-3xl font-semibold tracking-[-0.035em]">
         {receipt.title}
       </h1>
@@ -6045,7 +6394,7 @@ function ReceiptReader({
             <button
               type="button"
               onClick={() => void toggleReceiptReference()}
-              disabled={loadingSecret}
+              disabled={loadingSecret || supportMutationBusy}
               className="flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs text-[var(--text-muted)] transition hover:bg-[var(--selected)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-55"
             >
               <HugeiconsIcon
@@ -6076,6 +6425,7 @@ function ReceiptReader({
         itemId={receipt.id}
         revision={receipt.revision}
         links={receipt.links ?? []}
+        onMutationBusyChange={onSupportMutationBusyChange}
         generation={generation}
         isGenerationCurrent={isGenerationCurrent}
         linkedTitles={linkedTitles}
@@ -6096,6 +6446,8 @@ function InsuranceReader({
   allItems,
   onJump,
   onLinksChanged,
+  supportMutationBusy,
+  onSupportMutationBusyChange,
   onEdit,
   onError,
 }: {
@@ -6115,7 +6467,8 @@ function InsuranceReader({
       setPolicyNumber(null);
       return;
     }
-    if (!insurance.has_policy_number || loadingSecret) return;
+    if (!insurance.has_policy_number || loadingSecret || supportMutationBusy)
+      return;
 
     setLoadingSecret(true);
     onError(null);
@@ -6136,7 +6489,12 @@ function InsuranceReader({
 
   return (
     <article className="mx-auto max-w-3xl px-8 py-12">
-      <ReaderHeader icon={ShieldCheckIcon} label="Insurance" onEdit={onEdit} />
+      <ReaderHeader
+        icon={ShieldCheckIcon}
+        label="Insurance"
+        onEdit={onEdit}
+        editDisabled={supportMutationBusy}
+      />
       <h1 className="text-3xl font-semibold tracking-[-0.035em]">
         {insurance.title}
       </h1>
@@ -6169,7 +6527,7 @@ function InsuranceReader({
             <button
               type="button"
               onClick={() => void togglePolicyNumber()}
-              disabled={loadingSecret}
+              disabled={loadingSecret || supportMutationBusy}
               className="flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs text-[var(--text-muted)] transition hover:bg-[var(--selected)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-55"
             >
               <HugeiconsIcon
@@ -6196,6 +6554,7 @@ function InsuranceReader({
         itemId={insurance.id}
         revision={insurance.revision}
         links={insurance.links ?? []}
+        onMutationBusyChange={onSupportMutationBusyChange}
         generation={generation}
         isGenerationCurrent={isGenerationCurrent}
         linkedTitles={linkedTitles}
@@ -6216,6 +6575,8 @@ function FinancialReader({
   allItems,
   onJump,
   onLinksChanged,
+  supportMutationBusy,
+  onSupportMutationBusyChange,
   onEdit,
   onError,
 }: {
@@ -6235,7 +6596,8 @@ function FinancialReader({
       setAccountNumber(null);
       return;
     }
-    if (!financial.has_account_number || loadingSecret) return;
+    if (!financial.has_account_number || loadingSecret || supportMutationBusy)
+      return;
 
     setLoadingSecret(true);
     onError(null);
@@ -6256,7 +6618,12 @@ function FinancialReader({
 
   return (
     <article className="mx-auto max-w-3xl px-8 py-12">
-      <ReaderHeader icon={BankIcon} label="Financial" onEdit={onEdit} />
+      <ReaderHeader
+        icon={BankIcon}
+        label="Financial"
+        onEdit={onEdit}
+        editDisabled={supportMutationBusy}
+      />
       <h1 className="text-3xl font-semibold tracking-[-0.035em]">
         {financial.title}
       </h1>
@@ -6292,7 +6659,7 @@ function FinancialReader({
             <button
               type="button"
               onClick={() => void toggleAccountNumber()}
-              disabled={loadingSecret}
+              disabled={loadingSecret || supportMutationBusy}
               className="flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs text-[var(--text-muted)] transition hover:bg-[var(--selected)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-55"
             >
               <HugeiconsIcon
@@ -6313,6 +6680,7 @@ function FinancialReader({
         itemId={financial.id}
         revision={financial.revision}
         links={financial.links ?? []}
+        onMutationBusyChange={onSupportMutationBusyChange}
         generation={generation}
         isGenerationCurrent={isGenerationCurrent}
         linkedTitles={linkedTitles}
@@ -6333,6 +6701,8 @@ function PropertyReader({
   allItems,
   onJump,
   onLinksChanged,
+  supportMutationBusy,
+  onSupportMutationBusyChange,
   onEdit,
   onError,
 }: {
@@ -6357,7 +6727,7 @@ function PropertyReader({
       setAddress(null);
       return;
     }
-    if (!property.has_address || loadingAddress) return;
+    if (!property.has_address || loadingAddress || supportMutationBusy) return;
     setLoadingAddress(true);
     onError(null);
     try {
@@ -6381,7 +6751,12 @@ function PropertyReader({
       setPropertyReference(null);
       return;
     }
-    if (!property.has_property_reference || loadingReference) return;
+    if (
+      !property.has_property_reference ||
+      loadingReference ||
+      supportMutationBusy
+    )
+      return;
     setLoadingReference(true);
     onError(null);
     try {
@@ -6401,7 +6776,12 @@ function PropertyReader({
 
   return (
     <article className="mx-auto max-w-3xl px-8 py-12">
-      <ReaderHeader icon={Building03Icon} label="Property" onEdit={onEdit} />
+      <ReaderHeader
+        icon={Building03Icon}
+        label="Property"
+        onEdit={onEdit}
+        editDisabled={supportMutationBusy}
+      />
       <h1 className="text-3xl font-semibold tracking-[-0.035em]">
         {property.title}
       </h1>
@@ -6427,7 +6807,7 @@ function PropertyReader({
             <button
               type="button"
               onClick={() => void toggleAddress()}
-              disabled={loadingAddress}
+              disabled={loadingAddress || supportMutationBusy}
               className="flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs text-[var(--text-muted)] transition hover:bg-[var(--selected)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-55"
             >
               <HugeiconsIcon
@@ -6464,7 +6844,7 @@ function PropertyReader({
             <button
               type="button"
               onClick={() => void toggleReference()}
-              disabled={loadingReference}
+              disabled={loadingReference || supportMutationBusy}
               className="flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs text-[var(--text-muted)] transition hover:bg-[var(--selected)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-55"
             >
               <HugeiconsIcon
@@ -6489,6 +6869,7 @@ function PropertyReader({
         itemId={property.id}
         revision={property.revision}
         links={property.links ?? []}
+        onMutationBusyChange={onSupportMutationBusyChange}
         generation={generation}
         isGenerationCurrent={isGenerationCurrent}
         linkedTitles={linkedTitles}
@@ -6509,6 +6890,8 @@ function VehicleReader({
   allItems,
   onJump,
   onLinksChanged,
+  supportMutationBusy,
+  onSupportMutationBusyChange,
   onEdit,
   onError,
 }: {
@@ -6541,7 +6924,12 @@ function VehicleReader({
       setRegistrationNumber(null);
       return;
     }
-    if (!vehicle.has_registration_number || loadingRegistration) return;
+    if (
+      !vehicle.has_registration_number ||
+      loadingRegistration ||
+      supportMutationBusy
+    )
+      return;
     setLoadingRegistration(true);
     onError(null);
     try {
@@ -6562,7 +6950,7 @@ function VehicleReader({
       setVin(null);
       return;
     }
-    if (!vehicle.has_vin || loadingVin) return;
+    if (!vehicle.has_vin || loadingVin || supportMutationBusy) return;
     setLoadingVin(true);
     onError(null);
     try {
@@ -6579,7 +6967,12 @@ function VehicleReader({
 
   return (
     <article className="mx-auto max-w-3xl px-8 py-12">
-      <ReaderHeader icon={Car01Icon} label="Vehicle" onEdit={onEdit} />
+      <ReaderHeader
+        icon={Car01Icon}
+        label="Vehicle"
+        onEdit={onEdit}
+        editDisabled={supportMutationBusy}
+      />
       <h1 className="text-3xl font-semibold tracking-[-0.035em]">
         {vehicle.title}
       </h1>
@@ -6609,7 +7002,7 @@ function VehicleReader({
             <button
               type="button"
               onClick={() => void toggleRegistration()}
-              disabled={loadingRegistration}
+              disabled={loadingRegistration || supportMutationBusy}
               className="flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs text-[var(--text-muted)] transition hover:bg-[var(--selected)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-55"
             >
               <HugeiconsIcon
@@ -6644,7 +7037,7 @@ function VehicleReader({
             <button
               type="button"
               onClick={() => void toggleVin()}
-              disabled={loadingVin}
+              disabled={loadingVin || supportMutationBusy}
               className="flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs text-[var(--text-muted)] transition hover:bg-[var(--selected)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-55"
             >
               <HugeiconsIcon
@@ -6671,6 +7064,7 @@ function VehicleReader({
         itemId={vehicle.id}
         revision={vehicle.revision}
         links={vehicle.links ?? []}
+        onMutationBusyChange={onSupportMutationBusyChange}
         generation={generation}
         isGenerationCurrent={isGenerationCurrent}
         linkedTitles={linkedTitles}
@@ -6691,6 +7085,8 @@ function PossessionReader({
   allItems,
   onJump,
   onLinksChanged,
+  supportMutationBusy,
+  onSupportMutationBusyChange,
   onEdit,
   onError,
 }: {
@@ -6710,7 +7106,8 @@ function PossessionReader({
       setSerialNumber(null);
       return;
     }
-    if (!possession.has_serial_number || loadingSecret) return;
+    if (!possession.has_serial_number || loadingSecret || supportMutationBusy)
+      return;
 
     setLoadingSecret(true);
     onError(null);
@@ -6731,7 +7128,12 @@ function PossessionReader({
 
   return (
     <article className="mx-auto max-w-3xl px-8 py-12">
-      <ReaderHeader icon={PackageIcon} label="Possession" onEdit={onEdit} />
+      <ReaderHeader
+        icon={PackageIcon}
+        label="Possession"
+        onEdit={onEdit}
+        editDisabled={supportMutationBusy}
+      />
       <h1 className="text-3xl font-semibold tracking-[-0.035em]">
         {possession.title}
       </h1>
@@ -6770,7 +7172,7 @@ function PossessionReader({
             <button
               type="button"
               onClick={() => void toggleSerialNumber()}
-              disabled={loadingSecret}
+              disabled={loadingSecret || supportMutationBusy}
               className="flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs text-[var(--text-muted)] transition hover:bg-[var(--selected)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-55"
             >
               <HugeiconsIcon
@@ -6797,6 +7199,7 @@ function PossessionReader({
         itemId={possession.id}
         revision={possession.revision}
         links={possession.links ?? []}
+        onMutationBusyChange={onSupportMutationBusyChange}
         generation={generation}
         isGenerationCurrent={isGenerationCurrent}
         linkedTitles={linkedTitles}
@@ -6813,10 +7216,12 @@ function ReaderHeader({
   icon,
   label,
   onEdit,
+  editDisabled = false,
 }: {
   icon: Parameters<typeof HugeiconsIcon>[0]["icon"];
   label: string;
   onEdit: () => void;
+  editDisabled?: boolean;
 }) {
   return (
     <div className="mb-5 flex items-center justify-between">
@@ -6827,7 +7232,8 @@ function ReaderHeader({
       <button
         type="button"
         onClick={onEdit}
-        className="flex items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] px-3 py-2 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--selected)]"
+        disabled={editDisabled}
+        className="flex items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] px-3 py-2 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--selected)] disabled:cursor-not-allowed disabled:opacity-55"
       >
         <HugeiconsIcon
           icon={FileEditIcon}

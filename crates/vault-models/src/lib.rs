@@ -29,6 +29,23 @@ pub enum LegacyDisposition {
     DestroyOnDeath,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountClosureDisposition {
+    #[default]
+    Unspecified,
+    KeepOpen,
+    CloseAccount,
+    ReviewManually,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountClosurePlan {
+    pub disposition: AccountClosureDisposition,
+    pub instructions: String,
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VaultItem {
@@ -38,6 +55,7 @@ pub struct VaultItem {
     pub links: Vec<Uuid>,
     pub attachments: Vec<Uuid>,
     pub legacy_disposition: LegacyDisposition,
+    pub account_closure_plan: AccountClosurePlan,
     pub fields: BTreeMap<String, String>,
     #[serde(deserialize_with = "deserialize_present_optional_string")]
     pub notes: Option<String>,
@@ -99,6 +117,7 @@ impl VaultItem {
             links: Vec::new(),
             attachments: Vec::new(),
             legacy_disposition: LegacyDisposition::Unspecified,
+            account_closure_plan: AccountClosurePlan::default(),
             fields,
             notes: None,
         }
@@ -123,6 +142,7 @@ impl VaultItem {
             links: Vec::new(),
             attachments: Vec::new(),
             legacy_disposition: LegacyDisposition::Unspecified,
+            account_closure_plan: AccountClosurePlan::default(),
             fields,
             notes: (!notes.is_empty()).then_some(notes),
         }
@@ -147,6 +167,7 @@ impl VaultItem {
             links: Vec::new(),
             attachments: Vec::new(),
             legacy_disposition: LegacyDisposition::Unspecified,
+            account_closure_plan: AccountClosurePlan::default(),
             fields,
             notes: (!notes.is_empty()).then_some(notes),
         }
@@ -182,6 +203,7 @@ impl VaultItem {
             links: Vec::new(),
             attachments: Vec::new(),
             legacy_disposition: LegacyDisposition::Unspecified,
+            account_closure_plan: AccountClosurePlan::default(),
             fields,
             notes: (!notes.is_empty()).then_some(notes),
         }
@@ -208,6 +230,7 @@ impl VaultItem {
             links: Vec::new(),
             attachments: Vec::new(),
             legacy_disposition: LegacyDisposition::Unspecified,
+            account_closure_plan: AccountClosurePlan::default(),
             fields,
             notes: (!notes.is_empty()).then_some(notes),
         }
@@ -234,6 +257,7 @@ impl VaultItem {
             links: Vec::new(),
             attachments: Vec::new(),
             legacy_disposition: LegacyDisposition::Unspecified,
+            account_closure_plan: AccountClosurePlan::default(),
             fields,
             notes: (!notes.is_empty()).then_some(notes),
         }
@@ -260,6 +284,7 @@ impl VaultItem {
             links: Vec::new(),
             attachments: Vec::new(),
             legacy_disposition: LegacyDisposition::Unspecified,
+            account_closure_plan: AccountClosurePlan::default(),
             fields,
             notes: (!notes.is_empty()).then_some(notes),
         }
@@ -291,6 +316,7 @@ impl VaultItem {
             links: Vec::new(),
             attachments: Vec::new(),
             legacy_disposition: LegacyDisposition::Unspecified,
+            account_closure_plan: AccountClosurePlan::default(),
             fields,
             notes: (!notes.is_empty()).then_some(notes),
         }
@@ -324,6 +350,7 @@ impl VaultItem {
             links: Vec::new(),
             attachments: Vec::new(),
             legacy_disposition: LegacyDisposition::Unspecified,
+            account_closure_plan: AccountClosurePlan::default(),
             fields,
             notes: (!notes.is_empty()).then_some(notes),
         }
@@ -342,6 +369,7 @@ impl VaultItem {
             links: Vec::new(),
             attachments: Vec::new(),
             legacy_disposition: LegacyDisposition::Unspecified,
+            account_closure_plan: AccountClosurePlan::default(),
             fields,
             notes: None,
         }
@@ -435,17 +463,30 @@ mod tests {
     }
 
     #[test]
-    fn current_item_payload_requires_legacy_disposition() {
+    fn current_item_payload_requires_current_planning_fields() {
         let incomplete = serde_json::json!({
             "id": Uuid::new_v4(),
             "kind": "secure_note",
             "title": "current",
             "links": [],
             "attachments": [],
+            "account_closure_plan": {"disposition": "unspecified", "instructions": ""},
             "fields": {"body": "hello"},
             "notes": null
         });
         assert!(serde_json::from_value::<VaultItem>(incomplete).is_err());
+
+        let missing_closure_plan = serde_json::json!({
+            "id": Uuid::new_v4(),
+            "kind": "secure_note",
+            "title": "current",
+            "links": [],
+            "attachments": [],
+            "legacy_disposition": "unspecified",
+            "fields": {"body": "hello"},
+            "notes": null
+        });
+        assert!(serde_json::from_value::<VaultItem>(missing_closure_plan).is_err());
 
         let missing_links = serde_json::json!({
             "id": Uuid::new_v4(),
@@ -453,6 +494,7 @@ mod tests {
             "title": "current",
             "attachments": [],
             "legacy_disposition": "unspecified",
+            "account_closure_plan": {"disposition": "unspecified", "instructions": ""},
             "fields": {"body": "hello"},
             "notes": null
         });
@@ -464,6 +506,7 @@ mod tests {
             "title": "current",
             "links": [],
             "legacy_disposition": "unspecified",
+            "account_closure_plan": {"disposition": "unspecified", "instructions": ""},
             "fields": {"body": "hello"},
             "notes": null
         });
@@ -476,6 +519,7 @@ mod tests {
             "links": [],
             "attachments": [],
             "legacy_disposition": "unspecified",
+            "account_closure_plan": {"disposition": "unspecified", "instructions": ""},
             "fields": {"body": "hello"}
         });
         assert!(serde_json::from_value::<VaultItem>(missing_notes).is_err());
@@ -487,6 +531,7 @@ mod tests {
             "links": [],
             "attachments": [],
             "legacy_disposition": "unspecified",
+            "account_closure_plan": {"disposition": "unspecified", "instructions": ""},
             "fields": {"body": "hello"},
             "notes": null,
             "future_policy": {"unexpected": true}
@@ -495,21 +540,30 @@ mod tests {
     }
 
     #[test]
-    fn current_item_payload_round_trips_legacy_disposition() {
+    fn current_item_payload_round_trips_planning_metadata() {
         let current = serde_json::json!({
             "id": Uuid::new_v4(),
-            "kind": "secure_note",
+            "kind": "password",
             "title": "current",
             "links": [Uuid::new_v4()],
             "attachments": [],
             "legacy_disposition": "private_forever",
-            "fields": {"body": "hello"},
+            "account_closure_plan": {"disposition": "close_account", "instructions": "Cancel after exporting statements."},
+            "fields": {"username": "u", "password": "p", "website": "https://example.test"},
             "notes": null
         });
         let item: VaultItem = serde_json::from_value(current).expect("current payload decodes");
         assert_eq!(item.links.len(), 1);
         assert!(item.attachments.is_empty());
         assert_eq!(item.legacy_disposition, LegacyDisposition::PrivateForever);
+        assert_eq!(
+            item.account_closure_plan.disposition,
+            AccountClosureDisposition::CloseAccount
+        );
+        assert_eq!(
+            item.account_closure_plan.instructions,
+            "Cancel after exporting statements."
+        );
     }
 
     #[test]

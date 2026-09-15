@@ -19,7 +19,8 @@ use vault_crypto::{
     wrap_root_key_with_recovery_secret,
 };
 use vault_models::{
-    EMERGENCY_CARD_ID, EmergencyCard, LegacyDisposition, VaultItem, VaultItemState,
+    AccountClosurePlan, EMERGENCY_CARD_ID, EmergencyCard, ItemKind, LegacyDisposition, VaultItem,
+    VaultItemState,
 };
 use vault_storage::{StorageError, VaultStorage};
 
@@ -375,6 +376,8 @@ pub enum VaultError {
     OperationCancelled,
     #[error("legacy disposition is not supported for this item")]
     InvalidLegacyDisposition,
+    #[error("account closure plans are supported only for credential records")]
+    InvalidAccountClosurePlan,
     #[error("attachment file operation failed")]
     AttachmentIo(#[from] std::io::Error),
 }
@@ -797,6 +800,26 @@ impl VaultSession {
             return Err(VaultError::Storage(StorageError::StaleRevision));
         }
         item.legacy_disposition = disposition;
+        self.update_item(&item, expected_revision)
+    }
+
+    pub fn set_account_closure_plan(
+        &self,
+        id: Uuid,
+        expected_revision: u64,
+        plan: AccountClosurePlan,
+    ) -> Result<u64, VaultError> {
+        if id == EMERGENCY_CARD_ID {
+            return Err(VaultError::InvalidAccountClosurePlan);
+        }
+        let (mut item, current_revision) = self.get_item_with_revision(id)?;
+        if current_revision != expected_revision {
+            return Err(VaultError::Storage(StorageError::StaleRevision));
+        }
+        if item.kind != ItemKind::Password {
+            return Err(VaultError::InvalidAccountClosurePlan);
+        }
+        item.account_closure_plan = plan;
         self.update_item(&item, expected_revision)
     }
 
@@ -1293,8 +1316,14 @@ fn decode_attachment_record(
 
 fn validate_item(item: &VaultItem) -> Result<(), VaultError> {
     let unique_attachments = item.attachments.iter().copied().collect::<BTreeSet<_>>();
-    if (item.id == EMERGENCY_CARD_ID && item.legacy_disposition != LegacyDisposition::Unspecified)
-        || item.title.chars().count() > MAX_ITEM_TITLE_CHARS
+    if item.id == EMERGENCY_CARD_ID && item.legacy_disposition != LegacyDisposition::Unspecified {
+        return Err(VaultError::InvalidLegacyDisposition);
+    }
+    if item.kind != ItemKind::Password && item.account_closure_plan != AccountClosurePlan::default()
+    {
+        return Err(VaultError::InvalidAccountClosurePlan);
+    }
+    if item.title.chars().count() > MAX_ITEM_TITLE_CHARS
         || item.fields.len() > MAX_ITEM_FIELDS
         || item.links.len() > MAX_ITEM_LINKS
         || item.attachments.len() > MAX_ITEM_ATTACHMENTS
@@ -1307,16 +1336,9 @@ fn validate_item(item: &VaultItem) -> Result<(), VaultError> {
             .notes
             .as_ref()
             .is_some_and(|notes| notes.chars().count() > MAX_ITEM_NOTES_CHARS)
+        || item.account_closure_plan.instructions.chars().count() > MAX_ITEM_NOTES_CHARS
     {
-        return Err(
-            if item.id == EMERGENCY_CARD_ID
-                && item.legacy_disposition != LegacyDisposition::Unspecified
-            {
-                VaultError::InvalidLegacyDisposition
-            } else {
-                VaultError::ItemTooLarge
-            },
-        );
+        return Err(VaultError::ItemTooLarge);
     }
     Ok(())
 }
@@ -1750,6 +1772,127 @@ mod tests {
             restored.legacy_disposition,
             LegacyDisposition::SelectedForLegacy
         );
+    }
+
+    #[test]
+    fn account_closure_plan_is_credential_only_cas_safe_and_survives_lifecycle() {
+        let dir = tempdir().expect("temp directory");
+        let database = dir.path().join("vault.sqlite3");
+        let session = VaultSession::create(&database, TEST_PASSPHRASE).expect("create vault");
+        let mut credential = VaultItem::password(
+            "Primary email",
+            "owner@example.test",
+            "secret",
+            "https://example.test",
+            "private note",
+        );
+        credential.links.push(Uuid::new_v4());
+        credential.legacy_disposition = LegacyDisposition::SelectedForLegacy;
+        let id = credential.id;
+        session.put_item(&credential, 1).expect("store credential");
+
+        let plan = AccountClosurePlan {
+            disposition: vault_models::AccountClosureDisposition::CloseAccount,
+            instructions: "Export statements and close manually.".to_owned(),
+        };
+        let revision = session
+            .set_account_closure_plan(id, 1, plan.clone())
+            .expect("set closure plan");
+        assert_eq!(revision, 2);
+        let updated = session.get_item(id).expect("load updated credential");
+        assert_eq!(updated.account_closure_plan, plan);
+        assert_eq!(updated.links, credential.links);
+        assert_eq!(
+            updated.legacy_disposition,
+            LegacyDisposition::SelectedForLegacy
+        );
+        assert_eq!(
+            updated.fields.get("password").map(String::as_str),
+            Some("secret")
+        );
+
+        assert!(matches!(
+            session.set_account_closure_plan(id, 1, AccountClosurePlan::default()),
+            Err(VaultError::Storage(StorageError::StaleRevision))
+        ));
+
+        let note = VaultItem::secure_note("not an account", "body");
+        session.put_item(&note, 1).expect("store note");
+        assert!(matches!(
+            session.set_account_closure_plan(note.id, 1, plan.clone()),
+            Err(VaultError::InvalidAccountClosurePlan)
+        ));
+
+        let oversized = AccountClosurePlan {
+            disposition: vault_models::AccountClosureDisposition::ReviewManually,
+            instructions: "x".repeat(MAX_ITEM_NOTES_CHARS + 1),
+        };
+        assert!(matches!(
+            session.set_account_closure_plan(id, revision, oversized),
+            Err(VaultError::ItemTooLarge)
+        ));
+
+        let trashed_revision = session
+            .trash_item(id, revision, 42)
+            .expect("trash credential");
+        let trashed = session
+            .list_trashed_items_with_revisions()
+            .expect("list trash")
+            .into_iter()
+            .find(|(candidate, _, _)| candidate.id == id)
+            .expect("trashed credential");
+        assert_eq!(trashed.0.account_closure_plan, plan);
+        let restored_revision = session
+            .restore_item(id, trashed_revision)
+            .expect("restore credential");
+        let (restored, current_revision) = session
+            .get_item_with_revision(id)
+            .expect("load restored credential");
+        assert_eq!(current_revision, restored_revision);
+        assert_eq!(restored.account_closure_plan, plan);
+    }
+
+    #[test]
+    fn encrypted_backup_restore_preserves_account_closure_plan() {
+        let dir = tempdir().expect("temp directory");
+        let database = dir.path().join("vault.sqlite3");
+        let backup = dir.path().join("closure-plan-backup.sqlite3");
+        let mut session = VaultSession::create(&database, TEST_PASSPHRASE).expect("create vault");
+        let credential = VaultItem::password(
+            "Broker account",
+            "owner",
+            "secret",
+            "https://broker.example",
+            "",
+        );
+        let id = credential.id;
+        session.put_item(&credential, 1).expect("store credential");
+        let backed_up = AccountClosurePlan {
+            disposition: vault_models::AccountClosureDisposition::ReviewManually,
+            instructions: "Review tax records before deciding.".to_owned(),
+        };
+        let backup_revision = session
+            .set_account_closure_plan(id, 1, backed_up.clone())
+            .expect("set backed-up closure plan");
+        session
+            .backup_database_to(&backup)
+            .expect("create validated backup");
+
+        session
+            .set_account_closure_plan(
+                id,
+                backup_revision,
+                AccountClosurePlan {
+                    disposition: vault_models::AccountClosureDisposition::KeepOpen,
+                    instructions: "Keep open.".to_owned(),
+                },
+            )
+            .expect("mutate live closure plan");
+        session
+            .replace_with_backup(&backup, TEST_PASSPHRASE)
+            .expect("restore validated backup");
+        let restored = session.get_item(id).expect("load restored credential");
+        assert_eq!(restored.account_closure_plan, backed_up);
     }
 
     #[test]

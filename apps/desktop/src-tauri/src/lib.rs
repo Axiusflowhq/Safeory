@@ -27,7 +27,8 @@ use vault_core::{
 };
 use vault_crypto::RecoverySecret;
 use vault_models::{
-    EMERGENCY_CARD_ID, EmergencyCard, EmergencyContact, ItemKind, LegacyDisposition, VaultItem,
+    AccountClosurePlan, EMERGENCY_CARD_ID, EmergencyCard, EmergencyContact, ItemKind,
+    LegacyDisposition, VaultItem,
 };
 use vault_platform::{Clipboard as PlatformClipboard, PlatformError};
 use vault_storage::StorageError;
@@ -1496,6 +1497,25 @@ fn set_item_legacy_disposition(
 }
 
 #[tauri::command]
+fn get_credential_closure_plan(
+    state: State<'_, VaultRuntime>,
+    id: String,
+    revision: u64,
+) -> Result<AccountClosurePlan, String> {
+    get_credential_closure_plan_impl(&state, id, revision)
+}
+
+#[tauri::command]
+fn set_credential_closure_plan(
+    state: State<'_, VaultRuntime>,
+    id: String,
+    revision: u64,
+    plan: AccountClosurePlan,
+) -> Result<u64, String> {
+    set_credential_closure_plan_impl(&state, id, revision, plan)
+}
+
+#[tauri::command]
 async fn add_attachment(
     app: tauri::AppHandle,
     state: State<'_, VaultRuntime>,
@@ -2136,6 +2156,7 @@ fn update_note_impl(
         links: existing.links.clone(),
         attachments: existing.attachments.clone(),
         legacy_disposition: existing.legacy_disposition,
+        account_closure_plan: existing.account_closure_plan.clone(),
         fields,
         notes: existing.notes,
     };
@@ -2339,6 +2360,7 @@ fn update_document_impl(
         links: existing.links.clone(),
         attachments: existing.attachments.clone(),
         legacy_disposition: existing.legacy_disposition,
+        account_closure_plan: existing.account_closure_plan.clone(),
         fields,
         notes: (!notes.is_empty()).then_some(notes),
     };
@@ -2481,6 +2503,7 @@ fn update_receipt_impl(
         links: existing.links.clone(),
         attachments: existing.attachments.clone(),
         legacy_disposition: existing.legacy_disposition,
+        account_closure_plan: existing.account_closure_plan.clone(),
         fields,
         notes: (!notes.is_empty()).then_some(notes),
     };
@@ -2591,6 +2614,7 @@ fn update_insurance_impl(
         links: existing.links.clone(),
         attachments: existing.attachments.clone(),
         legacy_disposition: existing.legacy_disposition,
+        account_closure_plan: existing.account_closure_plan.clone(),
         fields,
         notes: (!notes.is_empty()).then_some(notes),
     };
@@ -2710,6 +2734,7 @@ fn update_financial_impl(
         links: existing.links.clone(),
         attachments: existing.attachments.clone(),
         legacy_disposition: existing.legacy_disposition,
+        account_closure_plan: existing.account_closure_plan.clone(),
         fields,
         notes: (!notes.is_empty()).then_some(notes),
     };
@@ -2830,6 +2855,7 @@ fn update_property_impl(
         links: existing.links.clone(),
         attachments: existing.attachments.clone(),
         legacy_disposition: existing.legacy_disposition,
+        account_closure_plan: existing.account_closure_plan.clone(),
         fields,
         notes: (!notes.is_empty()).then_some(notes),
     };
@@ -2956,6 +2982,7 @@ fn update_vehicle_impl(
         links: existing.links.clone(),
         attachments: existing.attachments.clone(),
         legacy_disposition: existing.legacy_disposition,
+        account_closure_plan: existing.account_closure_plan.clone(),
         fields,
         notes: (!notes.is_empty()).then_some(notes),
     };
@@ -3087,6 +3114,7 @@ fn update_possession_impl(
         links: existing.links.clone(),
         attachments: existing.attachments.clone(),
         legacy_disposition: existing.legacy_disposition,
+        account_closure_plan: existing.account_closure_plan.clone(),
         fields,
         notes: (!notes.is_empty()).then_some(notes),
     };
@@ -3295,6 +3323,64 @@ fn set_item_legacy_disposition_impl(
         .map_err(|error| match error {
             VaultError::Storage(StorageError::StaleRevision) => {
                 "This record changed since you opened it. Reload it before saving.".to_owned()
+            }
+            other => safe_vault_error(other),
+        })
+}
+
+fn get_credential_closure_plan_impl(
+    state: &VaultRuntime,
+    id: String,
+    revision: u64,
+) -> Result<AccountClosurePlan, String> {
+    let id = id
+        .parse()
+        .map_err(|_| "The credential identifier is invalid.".to_owned())?;
+    if id == EMERGENCY_CARD_ID {
+        return Err("The emergency card does not support an account closure plan.".to_owned());
+    }
+    let session = lock_session(state)?;
+    let session = session
+        .as_ref()
+        .ok_or_else(|| "Unlock the vault before reading the account closure plan.".to_owned())?;
+    let (item, current_revision) = session
+        .get_item_with_revision(id)
+        .map_err(safe_vault_error)?;
+    if current_revision != revision {
+        return Err(
+            "This credential changed since you opened it. Reload it before continuing.".to_owned(),
+        );
+    }
+    if item.kind != ItemKind::Password {
+        return Err("Only credentials support an account closure plan.".to_owned());
+    }
+    Ok(item.account_closure_plan)
+}
+
+fn set_credential_closure_plan_impl(
+    state: &VaultRuntime,
+    id: String,
+    revision: u64,
+    plan: AccountClosurePlan,
+) -> Result<u64, String> {
+    let id = id
+        .parse()
+        .map_err(|_| "The credential identifier is invalid.".to_owned())?;
+    if id == EMERGENCY_CARD_ID {
+        return Err("The emergency card does not support an account closure plan.".to_owned());
+    }
+    let session = lock_session(state)?;
+    let session = session
+        .as_ref()
+        .ok_or_else(|| "Unlock the vault before changing the account closure plan.".to_owned())?;
+    session
+        .set_account_closure_plan(id, revision, plan)
+        .map_err(|error| match error {
+            VaultError::Storage(StorageError::StaleRevision) => {
+                "This credential changed since you opened it. Reload it before saving.".to_owned()
+            }
+            VaultError::InvalidAccountClosurePlan => {
+                "Only credentials support an account closure plan.".to_owned()
             }
             other => safe_vault_error(other),
         })
@@ -3912,6 +3998,7 @@ fn stage_human_readable_export(
             "title": item.title,
             "links": item.links.iter().map(ToString::to_string).collect::<Vec<_>>(),
             "legacy_disposition": item.legacy_disposition,
+            "account_closure_plan": item.account_closure_plan,
             "fields": item.fields,
             "notes": item.notes,
             "revision": revision,
@@ -4285,6 +4372,7 @@ fn update_credential_impl(
         links: existing.links.clone(),
         attachments: existing.attachments.clone(),
         legacy_disposition: existing.legacy_disposition,
+        account_closure_plan: existing.account_closure_plan.clone(),
         fields,
         notes: (!notes.is_empty()).then_some(notes),
     };
@@ -5131,6 +5219,8 @@ pub fn run() {
             set_item_links,
             get_item_legacy_disposition,
             set_item_legacy_disposition,
+            get_credential_closure_plan,
+            set_credential_closure_plan,
             add_attachment,
             list_attachments,
             export_attachment,
@@ -7183,6 +7273,91 @@ mod tests {
     }
 
     #[test]
+    fn credential_closure_plan_is_detail_only_stale_safe_and_survives_credential_edit() {
+        let (_directory, runtime) = runtime();
+        initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
+        let credential = create_credential_impl(
+            &runtime,
+            "Primary email".to_owned(),
+            "owner@example.test".to_owned(),
+            "secret-password".to_owned(),
+            "https://example.test".to_owned(),
+            "private note".to_owned(),
+        )
+        .expect("create credential");
+
+        assert_eq!(
+            get_credential_closure_plan_impl(&runtime, credential.id.clone(), credential.revision,)
+                .expect("get initial closure plan"),
+            AccountClosurePlan::default()
+        );
+        let plan = AccountClosurePlan {
+            disposition: vault_models::AccountClosureDisposition::CloseAccount,
+            instructions: "CLOSURE-PRIVATE-MARKER export statements before closing.".to_owned(),
+        };
+        let revision = set_credential_closure_plan_impl(
+            &runtime,
+            credential.id.clone(),
+            credential.revision,
+            plan.clone(),
+        )
+        .expect("set closure plan");
+        assert_eq!(revision, credential.revision + 1);
+        assert_eq!(
+            get_credential_closure_plan_impl(&runtime, credential.id.clone(), revision)
+                .expect("get updated closure plan"),
+            plan
+        );
+
+        let stale = set_credential_closure_plan_impl(
+            &runtime,
+            credential.id.clone(),
+            credential.revision,
+            AccountClosurePlan::default(),
+        )
+        .expect_err("stale closure update must fail");
+        assert_eq!(
+            stale,
+            "This credential changed since you opened it. Reload it before saving."
+        );
+
+        let note = create_note_impl(&runtime, "Not an account".to_owned(), "Body".to_owned())
+            .expect("create note");
+        assert!(
+            get_credential_closure_plan_impl(&runtime, note.id.clone(), note.revision).is_err()
+        );
+        assert!(
+            set_credential_closure_plan_impl(&runtime, note.id, note.revision, plan.clone(),)
+                .is_err()
+        );
+
+        let edited = update_credential_impl(
+            &runtime,
+            credential.id.clone(),
+            revision,
+            "Primary email updated".to_owned(),
+            "new-owner@example.test".to_owned(),
+            "new-secret-password".to_owned(),
+            "https://example.test/account".to_owned(),
+            "updated note".to_owned(),
+        )
+        .expect("edit credential after setting closure plan");
+        assert_eq!(
+            get_credential_closure_plan_impl(&runtime, credential.id.clone(), edited.revision)
+                .expect("closure plan survives credential edit"),
+            plan
+        );
+
+        let serialized = serde_json::to_string(
+            &list_vault_items_impl(&runtime).expect("list items after closure update"),
+        )
+        .expect("serialize list projection");
+        assert!(!serialized.contains("account_closure_plan"));
+        assert!(!serialized.contains("CLOSURE-PRIVATE-MARKER"));
+        assert!(!serialized.contains("close_account"));
+    }
+
+    #[test]
     fn deadlines_include_vehicle_and_possession_and_skip_garbage() {
         let (_directory, runtime) = runtime();
         initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
@@ -7524,6 +7699,25 @@ mod tests {
             LegacyDisposition::SelectedForLegacy,
         )
         .expect("set export legacy preference");
+        let credential = create_credential_impl(
+            &runtime,
+            "Export account plan".to_owned(),
+            "owner".to_owned(),
+            "secret".to_owned(),
+            "https://example.test".to_owned(),
+            String::new(),
+        )
+        .expect("create export credential");
+        set_credential_closure_plan_impl(
+            &runtime,
+            credential.id.clone(),
+            credential.revision,
+            AccountClosurePlan {
+                disposition: vault_models::AccountClosureDisposition::ReviewManually,
+                instructions: "EXPORT-CLOSURE-MARKER review tax documents first.".to_owned(),
+            },
+        )
+        .expect("set export account closure plan");
         update_emergency_card_impl(
             &runtime,
             None,
@@ -7551,6 +7745,8 @@ mod tests {
         assert!(serialized.contains("Seeded Export Title"));
         assert!(serialized.contains("Export card instructions"));
         assert!(serialized.contains("selected_for_legacy"));
+        assert!(serialized.contains("EXPORT-CLOSURE-MARKER"));
+        assert!(serialized.contains("review_manually"));
 
         let backup_path = directory
             .path()
@@ -7929,6 +8125,18 @@ mod tests {
                 note.id.clone(),
                 note.revision,
                 LegacyDisposition::PrivateForever,
+            )
+            .is_err()
+        );
+        assert!(
+            get_credential_closure_plan_impl(&runtime, note.id.clone(), note.revision).is_err()
+        );
+        assert!(
+            set_credential_closure_plan_impl(
+                &runtime,
+                note.id.clone(),
+                note.revision,
+                AccountClosurePlan::default(),
             )
             .is_err()
         );

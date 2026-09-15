@@ -49,6 +49,10 @@ Implemented now:
   legacy`, `Private forever`, `Destroy on death`) with exact-revision mutation,
   detail-only IPC, lifecycle/backup preservation, and explicit UI copy that no
   sharing, release, death verification, or automatic deletion is enforced yet,
+- encrypted credential account-closure planning (`Unspecified`, `Keep open`,
+  `Close account`, `Review manually`) with private instructions, exact-revision
+  detail-only IPC, lifecycle/backup preservation, and no automatic provider
+  contact, sign-in, death verification, credential sharing, or account closure,
 - Trust Engine core: conditional access policies with fail-closed local
   evaluation (destruction/deny wins, private-forever, multi-approval,
   waiting periods as documented server-enforced policy, not time-lock crypto),
@@ -79,7 +83,7 @@ Implemented now:
 
 Not implemented yet: grant persistence inside item payloads, trusted-person
 grant UX, enforcement of legacy/private-forever/destruction intent, Emergency
-Access timed-release coordination, account/passkey flows,
+Access timed-release coordination, automated account closure, account/passkey flows,
 Cloudflare sync. Cloud integration starts only
 after this local platform is stable.
 
