@@ -113,7 +113,8 @@ confidence-threshold = 0.8
 exceptions = [
     # Each entry is the crate and version constraint, and its specific allow
     # list
-    #{ allow = ["Zlib"], crate = "adler32" },
+    { allow = ["BSL-1.0"], crate = "clipboard-win@5.4.1" },
+    { allow = ["BSL-1.0"], crate = "error-code@3.4.0" },
 ]
 
 # Some crates don't have (easily) machine readable licensing information,

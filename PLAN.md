@@ -12,7 +12,7 @@ Rule: cloud integration starts only after the local platform below is stable.
 | # | Item | Status |
 |---|------|--------|
 | 1 | Documents | ✅ Done — encrypted metadata (number masked), search, trash/restore |
-| 2 | Important records | ✅ Done — secure notes, credentials (masked + generator) |
+| 2 | Important records | ✅ Done — secure notes, credentials (masked + generator + guarded 30s clipboard copy) |
 | 3 | Property | ✅ Done — masked address/reference, ownership validation |
 | 4 | Insurance | ✅ Done — masked policy number, renewal feeds Today |
 | 5 | Vehicles | ✅ Done — make/model/year/renewal, reg/VIN masked, renewal feeds Today |
@@ -62,7 +62,7 @@ Rule: cloud integration starts only after the local platform below is stable.
 3. Selected legacy access per asset + private-forever/destruction UX.
 4. Plan test (simulation) + preparedness score.
 5. Sync: device auth, D1 metadata, R2 blobs, queues/notifications.
-6. OS keystore + biometric unlock; clipboard timed-clear; passkeys/TOTP.
+6. OS keystore + biometric unlock; passkeys/TOTP.
 7. Subscriptions, home inventory, account-closure plan.
 8. Email import, browser capture, mobile scanner, private-AI modes (local-first per spec).
 9. Audit/version history UI (data already exists as revisions), family space, secure links.

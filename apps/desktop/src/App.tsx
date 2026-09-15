@@ -6,6 +6,7 @@ import {
   Building03Icon,
   Car01Icon,
   Contact01Icon,
+  Copy01Icon,
   DatabaseRestoreIcon,
   Delete02Icon,
   DocumentValidationIcon,
@@ -4916,6 +4917,17 @@ function CredentialReader({
   const [password, setPassword] = useState<string | null>(null);
   const [revealed, setRevealed] = useState(false);
   const [loadingSecret, setLoadingSecret] = useState(false);
+  const [copyingPassword, setCopyingPassword] = useState(false);
+  const [copyNotice, setCopyNotice] = useState<string | null>(null);
+  const copyNoticeTimeout = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (copyNoticeTimeout.current !== null) {
+        window.clearTimeout(copyNoticeTimeout.current);
+      }
+    };
+  }, []);
 
   async function togglePassword() {
     if (revealed) {
@@ -4939,6 +4951,35 @@ function CredentialReader({
       if (isGenerationCurrent(generation)) onError(readError(reason));
     } finally {
       if (isGenerationCurrent(generation)) setLoadingSecret(false);
+    }
+  }
+
+  async function copyPassword() {
+    if (!credential.has_password || copyingPassword) return;
+
+    setCopyingPassword(true);
+    setCopyNotice(null);
+    onError(null);
+    try {
+      const result = await invoke<{ clears_in_seconds: number }>(
+        "copy_credential_password",
+        {
+          id: credential.id,
+          revision: credential.revision,
+        },
+      );
+      if (!isGenerationCurrent(generation)) return;
+      setCopyNotice(`Copied · clears in ${result.clears_in_seconds}s`);
+      if (copyNoticeTimeout.current !== null) {
+        window.clearTimeout(copyNoticeTimeout.current);
+      }
+      copyNoticeTimeout.current = window.setTimeout(() => {
+        if (isGenerationCurrent(generation)) setCopyNotice(null);
+      }, 5_000);
+    } catch (reason) {
+      if (isGenerationCurrent(generation)) onError(readError(reason));
+    } finally {
+      if (isGenerationCurrent(generation)) setCopyingPassword(false);
     }
   }
 
@@ -4973,19 +5014,34 @@ function CredentialReader({
               : "Not set"}
           </div>
           {credential.has_password ? (
-            <button
-              type="button"
-              onClick={() => void togglePassword()}
-              disabled={loadingSecret}
-              className="flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs text-[var(--text-muted)] transition hover:bg-[var(--selected)] hover:text-[var(--text-primary)]"
-            >
-              <HugeiconsIcon
-                icon={revealed ? EyeOffIcon : EyeIcon}
-                className="size-4"
-                aria-hidden="true"
-              />
-              {loadingSecret ? "Opening…" : revealed ? "Hide" : "Reveal"}
-            </button>
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={() => void copyPassword()}
+                disabled={copyingPassword}
+                className="flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs text-[var(--text-muted)] transition hover:bg-[var(--selected)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-55"
+              >
+                <HugeiconsIcon
+                  icon={Copy01Icon}
+                  className="size-4"
+                  aria-hidden="true"
+                />
+                {copyingPassword ? "Copying…" : "Copy"}
+              </button>
+              <button
+                type="button"
+                onClick={() => void togglePassword()}
+                disabled={loadingSecret}
+                className="flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs text-[var(--text-muted)] transition hover:bg-[var(--selected)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-55"
+              >
+                <HugeiconsIcon
+                  icon={revealed ? EyeOffIcon : EyeIcon}
+                  className="size-4"
+                  aria-hidden="true"
+                />
+                {loadingSecret ? "Opening…" : revealed ? "Hide" : "Reveal"}
+              </button>
+            </div>
           ) : null}
         </div>
       </div>
@@ -5000,8 +5056,8 @@ function CredentialReader({
         </div>
       ) : null}
       <p className="mt-8 text-xs leading-5 text-[var(--text-muted)]">
-        Clipboard actions are intentionally unavailable until timed clipboard
-        clearing is implemented.
+        {copyNotice ??
+          "Best effort: Safeory ownership-checks copied passwords before clearing after 30 seconds. Clipboard history and OS clipboard behavior may still retain copied values."}
       </p>
       <AttachmentsSection
         key={credential.id}

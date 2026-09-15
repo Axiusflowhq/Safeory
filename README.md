@@ -27,6 +27,8 @@ Implemented now:
   encrypted document-metadata, receipt, insurance, financial, property, vehicle,
   and possession records, revisioned editing, stale-edit conflict protection,
   metadata-only list projections with narrow on-demand secret reveal/edit,
+  backend-owned credential password copy with conditional 30-second clipboard
+  clearing that never exposes generic clipboard access to the renderer,
   encrypted cross-item links with title resolution and jump navigation,
   CSPRNG-backed strong-password generation, record-type filtering, local
   search, a Today panel driven by a tested local deadlines engine, trash with
@@ -67,7 +69,7 @@ Implemented now:
 
 Not implemented yet: grant persistence inside item payloads, trusted-person
 grant UX, Emergency Access timed-release coordination, account/passkey flows,
-Cloudflare sync, clipboard copy. Cloud integration starts only
+Cloudflare sync. Cloud integration starts only
 after this local platform is stable.
 
 ## Validation

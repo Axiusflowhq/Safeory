@@ -16,7 +16,7 @@ pub trait SecureKeyStore {
     fn delete(&self, key_id: &str) -> Result<(), PlatformError>;
 }
 
-pub trait Clipboard {
+pub trait Clipboard: Send + Sync {
     fn set_secret(&self, value: &str) -> Result<(), PlatformError>;
-    fn clear(&self) -> Result<(), PlatformError>;
+    fn compare_and_clear(&self, expected_sha256: &[u8; 32]) -> Result<bool, PlatformError>;
 }

@@ -67,6 +67,29 @@ continues to print them on every run.
 - Watch items: same as above — pinned, audited via `cargo audit`/`cargo deny`,
   no silent ignores.
 
+## Desktop capability dependency: `tauri-plugin-clipboard-manager` 2.3.3 (pinned)
+
+- Added only to the replaceable desktop shell for explicit credential-password
+  copy. It is an official Tauri v2 plugin and delegates desktop clipboard access
+  to `arboard`; no clipboard code enters the portable vault/crypto crates.
+- On Windows, `arboard` resolves through `clipboard-win` 5.4.1 and
+  `error-code` 3.4.0. Safeory also pins `clipboard-win` directly on Windows so
+  the guarded clear can hold the global clipboard lock across compare + clear.
+  Both crates use the OSI-approved Boost Software License 1.0. `deny.toml`
+  allows BSL-1.0 only for those exact crate versions rather than widening the
+  workspace-wide license allowlist.
+- Safeory uses the Rust extension API behind one narrow domain command. The
+  WebView is not granted the plugin's generic read/write/clear permissions and
+  the JavaScript clipboard package is not installed.
+- Timed cleanup stores only a SHA-256 ownership digest/token after the write.
+  Windows compare + clear is serialized by the OS clipboard lock. On platforms
+  where the plugin exposes no atomic compare-and-clear primitive, Safeory does
+  a best-effort immediate recheck and documents the residual external-writer
+  race. OS clipboard history/sync remains a separate residual risk.
+- Watch items: keep the dependency pinned to the Tauri 2-compatible stable
+  release; rerun `cargo audit`/`cargo deny` on upgrades and review any new
+  native clipboard transitive dependency before accepting it.
+
 ## Review rule
 
 Do not add new advisory ignores merely to make CI green. For any new finding:

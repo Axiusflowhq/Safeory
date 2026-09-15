@@ -15,13 +15,19 @@ tauri-build = { version = "=2.6.3", features = [] }
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tauri = { version = "=2.11.5", features = [] }
+tauri-plugin-clipboard-manager = "=2.3.3"
 tauri-plugin-dialog = "=2.7.2"
 vault-core = { path = "../../../crates/vault-core", version = "=0.1.0" }
 vault-crypto = { path = "../../../crates/vault-crypto", version = "=0.1.0" }
 vault-models = { path = "../../../crates/vault-models", version = "=0.1.0" }
+vault-platform = { path = "../../../crates/vault-platform", version = "=0.1.0" }
 vault-storage = { path = "../../../crates/vault-storage", version = "=0.1.0" }
 zeroize.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+clipboard-win = "=5.4.1"
 
 [dev-dependencies]
 serde_json.workspace = true

@@ -1,16 +1,23 @@
 #![forbid(unsafe_code)]
 
+#[cfg(windows)]
+use clipboard_win::{
+    Clipboard as WindowsClipboard, Format as _, Getter as _, Unicode as WindowsUnicode,
+};
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, MutexGuard,
+        Arc, Condvar, Mutex, MutexGuard,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    thread::JoinHandle,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tauri::{Manager, State};
+use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::DialogExt;
 use vault_core::{
     AttachmentImportSource, AttachmentSummary as CoreAttachmentSummary, PreparedVaultRestore,
@@ -19,10 +26,15 @@ use vault_core::{
 };
 use vault_crypto::RecoverySecret;
 use vault_models::{EMERGENCY_CARD_ID, EmergencyCard, EmergencyContact, ItemKind, VaultItem};
+use vault_platform::{Clipboard as PlatformClipboard, PlatformError};
 use vault_storage::StorageError;
 use zeroize::Zeroizing;
 
 const LEGACY_PRE_SAFEORY_APP_IDENTIFIER: &str = "com.lifevault.desktop";
+const CREDENTIAL_CLIPBOARD_TTL_SECONDS: u64 = 30;
+const CLIPBOARD_GENERATION_POLL: Duration = Duration::from_millis(100);
+const CLIPBOARD_CLEAR_RETRY_DELAY: Duration = Duration::from_millis(150);
+const CLIPBOARD_CLEAR_MAX_ATTEMPTS: u8 = 8;
 
 struct VaultRuntime {
     database_path: PathBuf,
@@ -32,6 +44,320 @@ struct VaultRuntime {
     restore_in_progress: Arc<AtomicBool>,
     settings: Arc<Mutex<DeviceSettings>>,
     last_activity: Arc<Mutex<Instant>>,
+    clipboard_cleaner: ClipboardCleaner,
+}
+
+#[derive(Clone)]
+struct PendingClipboardClear {
+    token: u64,
+    digest: [u8; 32],
+    generation: u64,
+    clear_at: Instant,
+    attempts: u8,
+}
+
+struct ClipboardCleanerState {
+    pending: Option<PendingClipboardClear>,
+    next_token: u64,
+    shutdown: bool,
+}
+
+struct ClipboardCleanerShared {
+    clipboard: Arc<dyn PlatformClipboard>,
+    session_generation: Arc<AtomicU64>,
+    state: Mutex<ClipboardCleanerState>,
+    wake: Condvar,
+    io_gate: Mutex<()>,
+    ttl: Duration,
+}
+
+struct ClipboardCleaner {
+    shared: Arc<ClipboardCleanerShared>,
+    worker: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl ClipboardCleaner {
+    fn spawn(
+        clipboard: Arc<dyn PlatformClipboard>,
+        session_generation: Arc<AtomicU64>,
+        ttl: Duration,
+    ) -> Self {
+        let shared = Arc::new(ClipboardCleanerShared {
+            clipboard,
+            session_generation,
+            state: Mutex::new(ClipboardCleanerState {
+                pending: None,
+                next_token: 0,
+                shutdown: false,
+            }),
+            wake: Condvar::new(),
+            io_gate: Mutex::new(()),
+            ttl,
+        });
+        let worker_shared = Arc::clone(&shared);
+        let worker = std::thread::spawn(move || clipboard_cleaner_loop(worker_shared));
+        Self {
+            shared,
+            worker: Mutex::new(Some(worker)),
+        }
+    }
+
+    fn copy_secret(&self, secret: &str, generation: u64) -> Result<(), String> {
+        if self.shared.session_generation.load(Ordering::Acquire) != generation {
+            return Err(clipboard_session_changed_error());
+        }
+        let digest = clipboard_digest(secret);
+        let _io = self
+            .shared
+            .io_gate
+            .lock()
+            .map_err(|_| "The secure clipboard is unavailable.".to_owned())?;
+        if self.shared.session_generation.load(Ordering::Acquire) != generation {
+            return Err(clipboard_session_changed_error());
+        }
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .map_err(|_| "The secure clipboard cleaner is unavailable.".to_owned())?;
+        if state.shutdown {
+            return Err("The secure clipboard is shutting down.".to_owned());
+        }
+        self.shared.clipboard.set_secret(secret).map_err(|_| {
+            "Unable to copy the credential password to the system clipboard.".to_owned()
+        })?;
+
+        let generation_still_current =
+            self.shared.session_generation.load(Ordering::Acquire) == generation;
+        state.next_token = state.next_token.wrapping_add(1);
+        let token = state.next_token;
+        state.pending = Some(PendingClipboardClear {
+            token,
+            digest,
+            generation,
+            clear_at: if generation_still_current {
+                Instant::now() + self.shared.ttl
+            } else {
+                Instant::now()
+            },
+            attempts: 0,
+        });
+        drop(state);
+        self.shared.wake.notify_one();
+        if generation_still_current {
+            Ok(())
+        } else {
+            Err(clipboard_session_changed_error())
+        }
+    }
+
+    fn shutdown_and_clear(&self) {
+        if let Ok(mut state) = self.shared.state.lock() {
+            state.shutdown = true;
+            if let Some(pending) = state.pending.as_mut() {
+                pending.clear_at = Instant::now();
+            }
+            self.shared.wake.notify_one();
+        }
+        if let Ok(mut worker) = self.worker.lock()
+            && let Some(worker) = worker.take()
+        {
+            let _ = worker.join();
+        }
+    }
+}
+
+impl Drop for ClipboardCleaner {
+    fn drop(&mut self) {
+        self.shutdown_and_clear();
+    }
+}
+
+fn clipboard_cleaner_loop(shared: Arc<ClipboardCleanerShared>) {
+    loop {
+        let candidate = {
+            let mut state = match shared.state.lock() {
+                Ok(state) => state,
+                Err(_) => return,
+            };
+            loop {
+                if state.shutdown {
+                    break state.pending.clone();
+                }
+                let Some(pending) = state.pending.as_ref() else {
+                    state = match shared.wake.wait(state) {
+                        Ok(state) => state,
+                        Err(_) => return,
+                    };
+                    continue;
+                };
+                let generation_changed =
+                    shared.session_generation.load(Ordering::Acquire) != pending.generation;
+                let now = Instant::now();
+                if generation_changed || now >= pending.clear_at {
+                    break Some(pending.clone());
+                }
+                let until_expiry = pending.clear_at.saturating_duration_since(now);
+                let wait_for = until_expiry.min(CLIPBOARD_GENERATION_POLL);
+                let (next, _) = match shared.wake.wait_timeout(state, wait_for) {
+                    Ok(result) => result,
+                    Err(_) => return,
+                };
+                state = next;
+            }
+        };
+
+        let shutdown = shared
+            .state
+            .lock()
+            .map(|state| state.shutdown)
+            .unwrap_or(true);
+        if let Some(candidate) = candidate {
+            process_pending_clipboard_clear(&shared, candidate, shutdown);
+        }
+        if shutdown {
+            return;
+        }
+    }
+}
+
+fn process_pending_clipboard_clear(
+    shared: &ClipboardCleanerShared,
+    candidate: PendingClipboardClear,
+    shutdown: bool,
+) {
+    let _io = match shared.io_gate.lock() {
+        Ok(gate) => gate,
+        Err(_) => return,
+    };
+    let still_current = shared
+        .state
+        .lock()
+        .ok()
+        .and_then(|state| {
+            state
+                .pending
+                .as_ref()
+                .map(|pending| pending.token == candidate.token)
+        })
+        .unwrap_or(false);
+    if !still_current {
+        return;
+    }
+
+    match shared.clipboard.compare_and_clear(&candidate.digest) {
+        Ok(true) => {
+            discard_pending_clipboard_token(shared, candidate.token);
+        }
+        Ok(false) => {
+            discard_pending_clipboard_token(shared, candidate.token);
+        }
+        Err(_) => {
+            if !shutdown {
+                retry_pending_clipboard_clear(shared, &candidate);
+            }
+        }
+    }
+}
+
+fn retry_pending_clipboard_clear(
+    shared: &ClipboardCleanerShared,
+    candidate: &PendingClipboardClear,
+) {
+    let Ok(mut state) = shared.state.lock() else {
+        return;
+    };
+    let Some(pending) = state.pending.as_mut() else {
+        return;
+    };
+    if pending.token != candidate.token {
+        return;
+    }
+    if pending.attempts >= CLIPBOARD_CLEAR_MAX_ATTEMPTS {
+        state.pending = None;
+        return;
+    }
+    pending.attempts = pending.attempts.saturating_add(1);
+    pending.clear_at = Instant::now() + CLIPBOARD_CLEAR_RETRY_DELAY;
+    shared.wake.notify_one();
+}
+
+fn discard_pending_clipboard_token(shared: &ClipboardCleanerShared, token: u64) {
+    if let Ok(mut state) = shared.state.lock()
+        && state
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.token == token)
+    {
+        state.pending = None;
+    }
+}
+
+fn clipboard_digest(value: &str) -> [u8; 32] {
+    Sha256::digest(value.as_bytes()).into()
+}
+
+fn clipboard_session_changed_error() -> String {
+    "The vault session changed while copying the credential password. Try again.".to_owned()
+}
+
+struct TauriClipboard {
+    app: tauri::AppHandle,
+}
+
+impl PlatformClipboard for TauriClipboard {
+    fn set_secret(&self, value: &str) -> Result<(), PlatformError> {
+        self.app
+            .clipboard()
+            .write_text(value)
+            .map_err(|_| PlatformError::OperationFailed)
+    }
+
+    fn compare_and_clear(&self, expected_sha256: &[u8; 32]) -> Result<bool, PlatformError> {
+        #[cfg(windows)]
+        {
+            let _clipboard =
+                WindowsClipboard::new_attempts(10).map_err(|_| PlatformError::OperationFailed)?;
+            if !WindowsUnicode.is_format_avail() {
+                return Ok(false);
+            }
+            let mut current = Zeroizing::new(String::new());
+            WindowsUnicode
+                .read_clipboard(&mut *current)
+                .map_err(|_| PlatformError::OperationFailed)?;
+            if clipboard_digest(&current) != *expected_sha256 {
+                return Ok(false);
+            }
+            clipboard_win::empty().map_err(|_| PlatformError::OperationFailed)?;
+            Ok(true)
+        }
+        #[cfg(not(windows))]
+        {
+            let first = Zeroizing::new(
+                self.app
+                    .clipboard()
+                    .read_text()
+                    .map_err(|_| PlatformError::OperationFailed)?,
+            );
+            if clipboard_digest(&first) != *expected_sha256 {
+                return Ok(false);
+            }
+            let second = Zeroizing::new(
+                self.app
+                    .clipboard()
+                    .read_text()
+                    .map_err(|_| PlatformError::OperationFailed)?,
+            );
+            if clipboard_digest(&second) != *expected_sha256 {
+                return Ok(false);
+            }
+            self.app
+                .clipboard()
+                .clear()
+                .map_err(|_| PlatformError::OperationFailed)?;
+            Ok(true)
+        }
+    }
 }
 
 #[derive(Clone, Copy, serde::Deserialize, serde::Serialize)]
@@ -86,6 +412,11 @@ struct CredentialDetailView {
     password: String,
     website: String,
     notes: String,
+}
+
+#[derive(serde::Serialize)]
+struct CopyCredentialPasswordStatus {
+    clears_in_seconds: u64,
 }
 
 #[derive(serde::Serialize)]
@@ -580,6 +911,15 @@ fn get_credential(
     revision: u64,
 ) -> Result<CredentialDetailView, String> {
     get_credential_impl(&state, id, revision)
+}
+
+#[tauri::command]
+fn copy_credential_password(
+    state: State<'_, VaultRuntime>,
+    id: String,
+    revision: u64,
+) -> Result<CopyCredentialPasswordStatus, String> {
+    copy_credential_password_impl(&state, id, revision)
 }
 
 #[tauri::command]
@@ -1759,6 +2099,48 @@ fn get_credential_impl(
         return Err("Only credentials can be opened from this view.".to_owned());
     }
     credential_detail_view(item, current_revision)
+}
+
+fn copy_credential_password_impl(
+    state: &VaultRuntime,
+    id: String,
+    revision: u64,
+) -> Result<CopyCredentialPasswordStatus, String> {
+    let id = id
+        .parse()
+        .map_err(|_| "The credential identifier is invalid.".to_owned())?;
+    let session = lock_session(state)?;
+    let session_ref = session
+        .as_ref()
+        .ok_or_else(|| "Unlock the vault before copying a credential password.".to_owned())?;
+    let (mut item, current_revision) = session_ref
+        .get_item_with_revision(id)
+        .map_err(safe_vault_error)?;
+    if current_revision != revision {
+        return Err(
+            "This credential changed since you opened it. Reload it before copying its password."
+                .to_owned(),
+        );
+    }
+    if item.kind != ItemKind::Password {
+        return Err("Only credential passwords can be copied from this command.".to_owned());
+    }
+    let password = Zeroizing::new(
+        item.fields
+            .remove("password")
+            .ok_or_else(|| "The encrypted credential is missing its password field.".to_owned())?,
+    );
+    if password.is_empty() {
+        return Err("This credential does not have a password to copy.".to_owned());
+    }
+    let generation = capture_session_generation(state);
+    drop(item);
+    drop(session);
+
+    state.clipboard_cleaner.copy_secret(&password, generation)?;
+    Ok(CopyCredentialPasswordStatus {
+        clears_in_seconds: CREDENTIAL_CLIPBOARD_TTL_SECONDS,
+    })
 }
 
 fn generate_password_impl(state: &VaultRuntime) -> Result<String, String> {
@@ -4319,7 +4701,8 @@ fn prepare_app_data_directory(directory: &Path) -> std::io::Result<()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let directory = app.path().app_data_dir()?;
@@ -4330,6 +4713,13 @@ pub fn run() {
             let session_generation = Arc::new(AtomicU64::new(0));
             let restore_in_progress = Arc::new(AtomicBool::new(false));
             let last_activity = Arc::new(Mutex::new(Instant::now()));
+            let clipboard_cleaner = ClipboardCleaner::spawn(
+                Arc::new(TauriClipboard {
+                    app: app.handle().clone(),
+                }),
+                Arc::clone(&session_generation),
+                Duration::from_secs(CREDENTIAL_CLIPBOARD_TTL_SECONDS),
+            );
             spawn_auto_lock_watchdog(
                 Arc::clone(&session),
                 Arc::clone(&session_generation),
@@ -4344,6 +4734,7 @@ pub fn run() {
                 restore_in_progress,
                 settings,
                 last_activity,
+                clipboard_cleaner,
             });
             Ok(())
         })
@@ -4365,6 +4756,7 @@ pub fn run() {
             update_note,
             create_credential,
             get_credential,
+            copy_credential_password,
             generate_password,
             update_credential,
             create_document,
@@ -4410,30 +4802,105 @@ pub fn run() {
             backup_database_copy,
             restore_database_backup
         ])
-        .run(tauri::generate_context!())
-        .expect("failed to run Safeory desktop shell");
+        .build(tauri::generate_context!())
+        .expect("failed to build Safeory desktop shell");
+    app.run(|app_handle, event| {
+        if matches!(
+            event,
+            tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+        ) && let Some(state) = app_handle.try_state::<VaultRuntime>()
+        {
+            state.clipboard_cleaner.shutdown_and_clear();
+        }
+    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
     use tempfile::tempdir;
 
     const PASSPHRASE: &str = "a long adapter test passphrase";
 
+    #[derive(Default)]
+    struct FakeClipboard {
+        text: Mutex<String>,
+        clears: AtomicUsize,
+    }
+
+    impl FakeClipboard {
+        fn text(&self) -> String {
+            self.text.lock().expect("fake clipboard mutex").clone()
+        }
+
+        fn replace_text(&self, value: &str) {
+            *self.text.lock().expect("fake clipboard mutex") = value.to_owned();
+        }
+
+        fn clears(&self) -> usize {
+            self.clears.load(Ordering::Acquire)
+        }
+    }
+
+    impl PlatformClipboard for FakeClipboard {
+        fn set_secret(&self, value: &str) -> Result<(), PlatformError> {
+            *self
+                .text
+                .lock()
+                .map_err(|_| PlatformError::OperationFailed)? = value.to_owned();
+            Ok(())
+        }
+
+        fn compare_and_clear(&self, expected_sha256: &[u8; 32]) -> Result<bool, PlatformError> {
+            let mut text = self
+                .text
+                .lock()
+                .map_err(|_| PlatformError::OperationFailed)?;
+            if clipboard_digest(&text) != *expected_sha256 {
+                return Ok(false);
+            }
+            text.clear();
+            self.clears.fetch_add(1, Ordering::AcqRel);
+            Ok(true)
+        }
+    }
+
     fn runtime() -> (tempfile::TempDir, VaultRuntime) {
+        runtime_with_clipboard(Arc::new(FakeClipboard::default()), Duration::from_secs(30))
+    }
+
+    fn runtime_with_clipboard(
+        clipboard: Arc<dyn PlatformClipboard>,
+        clipboard_ttl: Duration,
+    ) -> (tempfile::TempDir, VaultRuntime) {
         let directory = tempdir().expect("temp directory");
         let settings_path = directory.path().join("device-settings.json");
+        let session_generation = Arc::new(AtomicU64::new(0));
+        let clipboard_cleaner =
+            ClipboardCleaner::spawn(clipboard, Arc::clone(&session_generation), clipboard_ttl);
         let runtime = VaultRuntime {
             database_path: directory.path().join("vault.sqlite3"),
             settings_path,
             session: Arc::new(Mutex::new(None)),
-            session_generation: Arc::new(AtomicU64::new(0)),
+            session_generation,
             restore_in_progress: Arc::new(AtomicBool::new(false)),
             settings: Arc::new(Mutex::new(DeviceSettings::default())),
             last_activity: Arc::new(Mutex::new(Instant::now())),
+            clipboard_cleaner,
         };
         (directory, runtime)
+    }
+
+    fn wait_until(timeout: Duration, mut predicate: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if predicate() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        predicate()
     }
 
     #[test]
@@ -4468,6 +4935,221 @@ mod tests {
     }
 
     #[test]
+    fn credential_password_copy_rejects_locked_stale_wrong_kind_and_empty() {
+        let clipboard = Arc::new(FakeClipboard::default());
+        let (_directory, runtime) =
+            runtime_with_clipboard(clipboard.clone(), Duration::from_secs(30));
+        initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
+        let credential = create_credential_impl(
+            &runtime,
+            "Email".to_owned(),
+            "user@example.com".to_owned(),
+            "top-secret-password".to_owned(),
+            String::new(),
+            String::new(),
+        )
+        .expect("create credential");
+        let empty = create_credential_impl(
+            &runtime,
+            "No password".to_owned(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+        )
+        .expect("create empty credential");
+        let note = create_note_impl(&runtime, "Not a credential".to_owned(), "body".to_owned())
+            .expect("create note");
+
+        assert!(
+            copy_credential_password_impl(&runtime, credential.id.clone(), credential.revision + 1)
+                .is_err()
+        );
+        assert!(copy_credential_password_impl(&runtime, note.id, note.revision).is_err());
+        assert!(copy_credential_password_impl(&runtime, empty.id, empty.revision).is_err());
+        assert!(clipboard.text().is_empty());
+
+        lock_vault_impl(&runtime).expect("lock vault");
+        assert!(
+            copy_credential_password_impl(&runtime, credential.id, credential.revision).is_err()
+        );
+        assert!(clipboard.text().is_empty());
+    }
+
+    #[test]
+    fn credential_password_copy_response_contains_only_ttl() {
+        let clipboard = Arc::new(FakeClipboard::default());
+        let (_directory, runtime) =
+            runtime_with_clipboard(clipboard.clone(), Duration::from_secs(30));
+        initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
+        let password = "response-must-not-contain-this-secret";
+        let credential = create_credential_impl(
+            &runtime,
+            "Email".to_owned(),
+            String::new(),
+            password.to_owned(),
+            String::new(),
+            String::new(),
+        )
+        .expect("create credential");
+
+        let response = copy_credential_password_impl(&runtime, credential.id, credential.revision)
+            .expect("copy password");
+        let serialized = serde_json::to_string(&response).expect("serialize copy status");
+
+        assert_eq!(serialized, r#"{"clears_in_seconds":30}"#);
+        assert!(!serialized.contains(password));
+        assert_eq!(clipboard.text(), password);
+    }
+
+    #[test]
+    fn credential_password_clipboard_clears_matching_owned_value_at_expiry() {
+        let clipboard = Arc::new(FakeClipboard::default());
+        let (_directory, runtime) =
+            runtime_with_clipboard(clipboard.clone(), Duration::from_millis(60));
+        initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
+        let credential = create_credential_impl(
+            &runtime,
+            "Email".to_owned(),
+            String::new(),
+            "expires-from-clipboard".to_owned(),
+            String::new(),
+            String::new(),
+        )
+        .expect("create credential");
+        copy_credential_password_impl(&runtime, credential.id.clone(), credential.revision)
+            .expect("copy password");
+
+        assert!(wait_until(Duration::from_secs(2), || clipboard
+            .text()
+            .is_empty()));
+        assert_eq!(clipboard.clears(), 1);
+    }
+
+    #[test]
+    fn credential_password_clipboard_preserves_user_replacement() {
+        let clipboard = Arc::new(FakeClipboard::default());
+        let (_directory, runtime) =
+            runtime_with_clipboard(clipboard.clone(), Duration::from_millis(60));
+        initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
+        let credential = create_credential_impl(
+            &runtime,
+            "Email".to_owned(),
+            String::new(),
+            "owned-secret".to_owned(),
+            String::new(),
+            String::new(),
+        )
+        .expect("create credential");
+        copy_credential_password_impl(&runtime, credential.id.clone(), credential.revision)
+            .expect("copy password");
+        clipboard.replace_text("user replacement");
+
+        std::thread::sleep(Duration::from_millis(250));
+        assert_eq!(clipboard.text(), "user replacement");
+        assert_eq!(clipboard.clears(), 0);
+    }
+
+    #[test]
+    fn second_credential_password_copy_supersedes_first_pending_clear() {
+        let clipboard = Arc::new(FakeClipboard::default());
+        let (_directory, runtime) =
+            runtime_with_clipboard(clipboard.clone(), Duration::from_millis(500));
+        initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
+        let first = create_credential_impl(
+            &runtime,
+            "First".to_owned(),
+            String::new(),
+            "first-secret".to_owned(),
+            String::new(),
+            String::new(),
+        )
+        .expect("create first credential");
+        let second = create_credential_impl(
+            &runtime,
+            "Second".to_owned(),
+            String::new(),
+            "second-secret".to_owned(),
+            String::new(),
+            String::new(),
+        )
+        .expect("create second credential");
+
+        copy_credential_password_impl(&runtime, first.id, first.revision)
+            .expect("copy first password");
+        std::thread::sleep(Duration::from_millis(300));
+        copy_credential_password_impl(&runtime, second.id, second.revision)
+            .expect("copy second password");
+        std::thread::sleep(Duration::from_millis(250));
+
+        assert_eq!(clipboard.text(), "second-secret");
+        assert_eq!(clipboard.clears(), 0);
+        assert!(wait_until(Duration::from_secs(2), || clipboard
+            .text()
+            .is_empty()));
+        assert_eq!(clipboard.clears(), 1);
+    }
+
+    #[test]
+    fn session_generation_change_clears_owned_credential_password_early() {
+        let clipboard = Arc::new(FakeClipboard::default());
+        let (_directory, runtime) =
+            runtime_with_clipboard(clipboard.clone(), Duration::from_secs(5));
+        initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
+        let credential = create_credential_impl(
+            &runtime,
+            "Email".to_owned(),
+            String::new(),
+            "clear-on-lock".to_owned(),
+            String::new(),
+            String::new(),
+        )
+        .expect("create credential");
+        copy_credential_password_impl(&runtime, credential.id, credential.revision)
+            .expect("copy password");
+        assert_eq!(clipboard.text(), "clear-on-lock");
+
+        lock_vault_impl(&runtime).expect("lock vault");
+
+        assert!(wait_until(Duration::from_secs(2), || clipboard
+            .text()
+            .is_empty()));
+        assert_eq!(clipboard.clears(), 1);
+    }
+
+    #[test]
+    fn clipboard_shutdown_attempts_guarded_clear_of_owned_password() {
+        let clipboard = Arc::new(FakeClipboard::default());
+        let (_directory, runtime) =
+            runtime_with_clipboard(clipboard.clone(), Duration::from_secs(30));
+        initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
+        let credential = create_credential_impl(
+            &runtime,
+            "Email".to_owned(),
+            String::new(),
+            "clear-on-exit".to_owned(),
+            String::new(),
+            String::new(),
+        )
+        .expect("create credential");
+        copy_credential_password_impl(&runtime, credential.id.clone(), credential.revision)
+            .expect("copy password");
+
+        runtime.clipboard_cleaner.shutdown_and_clear();
+
+        assert!(clipboard.text().is_empty());
+        assert_eq!(clipboard.clears(), 1);
+        let error =
+            match copy_credential_password_impl(&runtime, credential.id, credential.revision) {
+                Ok(_) => panic!("copy after clipboard shutdown unexpectedly succeeded"),
+                Err(error) => error,
+            };
+        assert_eq!(error, "The secure clipboard is shutting down.");
+        assert!(clipboard.text().is_empty());
+        assert_eq!(clipboard.clears(), 1);
+    }
+
+    #[test]
     fn desktop_restart_reopens_locked_and_preserves_local_state() {
         let (directory, first) = runtime();
         initialize_vault_impl(&first, PASSPHRASE.to_owned()).expect("initialize vault");
@@ -4488,14 +5170,20 @@ mod tests {
         drop(first);
 
         let settings_path = directory.path().join("device-settings.json");
+        let session_generation = Arc::new(AtomicU64::new(0));
         let second = VaultRuntime {
             database_path: directory.path().join("vault.sqlite3"),
             settings_path: settings_path.clone(),
             session: Arc::new(Mutex::new(None)),
-            session_generation: Arc::new(AtomicU64::new(0)),
+            session_generation: Arc::clone(&session_generation),
             restore_in_progress: Arc::new(AtomicBool::new(false)),
             settings: Arc::new(Mutex::new(load_device_settings(&settings_path))),
             last_activity: Arc::new(Mutex::new(Instant::now())),
+            clipboard_cleaner: ClipboardCleaner::spawn(
+                Arc::new(FakeClipboard::default()),
+                session_generation,
+                Duration::from_secs(30),
+            ),
         };
 
         let status = vault_status_impl(&second).expect("status after restart");
