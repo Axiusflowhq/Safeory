@@ -6,17 +6,19 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
 };
 use hkdf::Hkdf;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use sha2::Sha256;
+use std::collections::BTreeMap;
 use thiserror::Error;
 use uuid::Uuid;
-use vault_models::{VaultItem, VaultItemState};
+use vault_models::{ItemKind, LegacyDisposition, VaultItem, VaultItemState};
 use zeroize::Zeroizing;
 
 const FORMAT_VERSION: u16 = 1;
 const LEGACY_ITEM_PAYLOAD_SCHEMA_VERSION: u16 = 1;
 const LIFECYCLE_ITEM_PAYLOAD_SCHEMA_VERSION: u16 = 2;
-const ITEM_PAYLOAD_SCHEMA_VERSION: u16 = 3;
+const ATTACHMENT_ITEM_PAYLOAD_SCHEMA_VERSION: u16 = 3;
+const ITEM_PAYLOAD_SCHEMA_VERSION: u16 = 4;
 const ATTACHMENT_PAYLOAD_SCHEMA_VERSION: u16 = 1;
 const ALGORITHM: &str = "xchacha20poly1305";
 const ITEM_WRAP_INFO: &[u8] = b"lifevault:v1:item-wrap";
@@ -24,6 +26,77 @@ const ATTACHMENT_WRAP_INFO: &[u8] = b"safeory:v1:attachment-wrap";
 const ROOT_WRAP_AAD: &[u8] = b"lifevault:root-wrap:v1";
 const RECOVERY_WRAP_INFO: &[u8] = b"safeory:v1:recovery-wrap";
 const RECOVERY_WRAP_AAD: &[u8] = b"safeory:recovery-wrap:v1";
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreDispositionVaultItem {
+    id: Uuid,
+    kind: ItemKind,
+    title: String,
+    #[serde(default)]
+    links: Vec<Uuid>,
+    #[serde(default)]
+    attachments: Vec<Uuid>,
+    fields: BTreeMap<String, String>,
+    #[serde(deserialize_with = "deserialize_present_optional_string")]
+    notes: Option<String>,
+}
+
+fn deserialize_present_optional_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)
+}
+
+impl From<PreDispositionVaultItem> for VaultItem {
+    fn from(item: PreDispositionVaultItem) -> Self {
+        Self {
+            id: item.id,
+            kind: item.kind,
+            title: item.title,
+            links: item.links,
+            attachments: item.attachments,
+            legacy_disposition: LegacyDisposition::Unspecified,
+            fields: item.fields,
+            notes: item.notes,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+enum PreDispositionVaultItemState {
+    Active {
+        item: PreDispositionVaultItem,
+    },
+    Trashed {
+        item: PreDispositionVaultItem,
+        deleted_at_ms: u64,
+    },
+    Tombstone {
+        id: Uuid,
+        deleted_at_ms: u64,
+    },
+}
+
+impl From<PreDispositionVaultItemState> for VaultItemState {
+    fn from(state: PreDispositionVaultItemState) -> Self {
+        match state {
+            PreDispositionVaultItemState::Active { item } => Self::Active { item: item.into() },
+            PreDispositionVaultItemState::Trashed {
+                item,
+                deleted_at_ms,
+            } => Self::Trashed {
+                item: item.into(),
+                deleted_at_ms,
+            },
+            PreDispositionVaultItemState::Tombstone { id, deleted_at_ms } => {
+                Self::Tombstone { id, deleted_at_ms }
+            }
+        }
+    }
+}
 
 pub const ATTACHMENT_CHUNK_SIZE: u64 = 1024 * 1024;
 pub const ATTACHMENT_MAX_CHUNKS: u64 = 64;
@@ -572,6 +645,7 @@ pub fn decrypt_item_state(
 ) -> Result<VaultItemState, CryptoError> {
     ensure_supported(encrypted.format_version, &encrypted.algorithm)?;
     if encrypted.payload_schema_version != ITEM_PAYLOAD_SCHEMA_VERSION
+        && encrypted.payload_schema_version != ATTACHMENT_ITEM_PAYLOAD_SCHEMA_VERSION
         && encrypted.payload_schema_version != LIFECYCLE_ITEM_PAYLOAD_SCHEMA_VERSION
         && encrypted.payload_schema_version != LEGACY_ITEM_PAYLOAD_SCHEMA_VERSION
     {
@@ -614,12 +688,15 @@ pub fn decrypt_item_state(
             )
             .map_err(|_| CryptoError::Authentication)?,
     );
-    let state = if encrypted.payload_schema_version == LEGACY_ITEM_PAYLOAD_SCHEMA_VERSION {
-        VaultItemState::Active {
-            item: serde_json::from_slice(&plaintext)?,
+    let state = match encrypted.payload_schema_version {
+        LEGACY_ITEM_PAYLOAD_SCHEMA_VERSION => VaultItemState::Active {
+            item: serde_json::from_slice::<PreDispositionVaultItem>(&plaintext)?.into(),
+        },
+        LIFECYCLE_ITEM_PAYLOAD_SCHEMA_VERSION | ATTACHMENT_ITEM_PAYLOAD_SCHEMA_VERSION => {
+            serde_json::from_slice::<PreDispositionVaultItemState>(&plaintext)?.into()
         }
-    } else {
-        serde_json::from_slice(&plaintext)?
+        ITEM_PAYLOAD_SCHEMA_VERSION => serde_json::from_slice(&plaintext)?,
+        _ => return Err(CryptoError::UnsupportedFormat),
     };
     if state_object_id(&state) != encrypted.object_id {
         return Err(CryptoError::InconsistentRecord);
@@ -1032,11 +1109,18 @@ mod tests {
     #[test]
     fn legacy_v1_item_payload_decodes_as_active() {
         let root = AccountRootKey::generate().expect("root key");
-        let item = VaultItem::secure_note("legacy", "still readable");
-        let plaintext = serde_json::to_vec(&item).expect("serialize legacy item");
+        let object_id = Uuid::new_v4();
+        let plaintext = serde_json::to_vec(&serde_json::json!({
+            "id": object_id,
+            "kind": "secure_note",
+            "title": "legacy",
+            "fields": {"body": "still readable"},
+            "notes": null
+        }))
+        .expect("serialize legacy item");
         let encrypted = encrypt_payload(
             &root,
-            item.id,
+            object_id,
             &plaintext,
             7,
             LEGACY_ITEM_PAYLOAD_SCHEMA_VERSION,
@@ -1047,7 +1131,11 @@ mod tests {
         assert!(matches!(
             state,
             VaultItemState::Active { item: restored }
-                if restored.id == item.id && restored.title == "legacy"
+                if restored.id == object_id
+                    && restored.title == "legacy"
+                    && restored.links.is_empty()
+                    && restored.attachments.is_empty()
+                    && restored.legacy_disposition == LegacyDisposition::Unspecified
         ));
     }
 
@@ -1081,6 +1169,240 @@ mod tests {
             state,
             VaultItemState::Active { item }
                 if item.id == object_id && item.attachments.is_empty()
+        ));
+    }
+
+    #[test]
+    fn pre_legacy_disposition_v3_payload_decodes_as_unspecified() {
+        let root = AccountRootKey::generate().expect("root key");
+        let object_id = Uuid::new_v4();
+        let plaintext = serde_json::to_vec(&serde_json::json!({
+            "state": "active",
+            "item": {
+                "id": object_id,
+                "kind": "secure_note",
+                "title": "pre-legacy-disposition",
+                "links": [],
+                "attachments": [],
+                "fields": {"body": "still readable"},
+                "notes": null
+            }
+        }))
+        .expect("serialize item payload v3");
+        let encrypted = encrypt_payload(
+            &root,
+            object_id,
+            &plaintext,
+            5,
+            ATTACHMENT_ITEM_PAYLOAD_SCHEMA_VERSION,
+        )
+        .expect("encrypt item payload v3");
+
+        let state = decrypt_item_state(&root, &encrypted).expect("decode item payload v3");
+        assert!(matches!(
+            state,
+            VaultItemState::Active { item }
+                if item.id == object_id
+                    && item.legacy_disposition == LegacyDisposition::Unspecified
+        ));
+    }
+
+    #[test]
+    fn pre_legacy_disposition_v3_trashed_payload_decodes_as_unspecified() {
+        let root = AccountRootKey::generate().expect("root key");
+        let object_id = Uuid::new_v4();
+        let plaintext = serde_json::to_vec(&serde_json::json!({
+            "state": "trashed",
+            "item": {
+                "id": object_id,
+                "kind": "secure_note",
+                "title": "pre-legacy-disposition trash",
+                "links": [],
+                "attachments": [],
+                "fields": {"body": "still readable"},
+                "notes": null
+            },
+            "deleted_at_ms": 42
+        }))
+        .expect("serialize trashed item payload v3");
+        let encrypted = encrypt_payload(
+            &root,
+            object_id,
+            &plaintext,
+            5,
+            ATTACHMENT_ITEM_PAYLOAD_SCHEMA_VERSION,
+        )
+        .expect("encrypt trashed item payload v3");
+
+        let state = decrypt_item_state(&root, &encrypted).expect("decode trashed item payload v3");
+        assert!(matches!(
+            state,
+            VaultItemState::Trashed {
+                item,
+                deleted_at_ms: 42
+            } if item.id == object_id
+                && item.legacy_disposition == LegacyDisposition::Unspecified
+        ));
+    }
+
+    #[test]
+    fn new_item_writes_use_legacy_disposition_payload_v4() {
+        let root = AccountRootKey::generate().expect("root key");
+        let mut item = VaultItem::secure_note("legacy plan", "body");
+        item.legacy_disposition = LegacyDisposition::PrivateForever;
+
+        let encrypted = encrypt_item(&root, &item, 1).expect("encrypt item payload v4");
+        assert_eq!(
+            encrypted.payload_schema_version,
+            ITEM_PAYLOAD_SCHEMA_VERSION
+        );
+        assert_eq!(ITEM_PAYLOAD_SCHEMA_VERSION, 4);
+        let restored = decrypt_item(&root, &encrypted).expect("decrypt item payload v4");
+        assert_eq!(
+            restored.legacy_disposition,
+            LegacyDisposition::PrivateForever
+        );
+    }
+
+    #[test]
+    fn item_payload_v4_requires_a_valid_legacy_disposition() {
+        let root = AccountRootKey::generate().expect("root key");
+        let object_id = Uuid::new_v4();
+        let missing = serde_json::to_vec(&serde_json::json!({
+            "state": "active",
+            "item": {
+                "id": object_id,
+                "kind": "secure_note",
+                "title": "missing disposition",
+                "links": [],
+                "attachments": [],
+                "fields": {"body": "body"},
+                "notes": null
+            }
+        }))
+        .expect("serialize missing disposition payload");
+        let missing = encrypt_payload(&root, object_id, &missing, 1, ITEM_PAYLOAD_SCHEMA_VERSION)
+            .expect("encrypt missing disposition payload");
+        assert!(matches!(
+            decrypt_item_state(&root, &missing),
+            Err(CryptoError::Serialization(_))
+        ));
+
+        let unknown = serde_json::to_vec(&serde_json::json!({
+            "state": "active",
+            "item": {
+                "id": object_id,
+                "kind": "secure_note",
+                "title": "unknown disposition",
+                "links": [],
+                "attachments": [],
+                "legacy_disposition": "release_to_everyone",
+                "fields": {"body": "body"},
+                "notes": null
+            }
+        }))
+        .expect("serialize unknown disposition payload");
+        let unknown = encrypt_payload(&root, object_id, &unknown, 1, ITEM_PAYLOAD_SCHEMA_VERSION)
+            .expect("encrypt unknown disposition payload");
+        assert!(matches!(
+            decrypt_item_state(&root, &unknown),
+            Err(CryptoError::Serialization(_))
+        ));
+
+        let unexpected_field = serde_json::to_vec(&serde_json::json!({
+            "state": "active",
+            "item": {
+                "id": object_id,
+                "kind": "secure_note",
+                "title": "unexpected field",
+                "links": [],
+                "attachments": [],
+                "legacy_disposition": "unspecified",
+                "fields": {"body": "body"},
+                "notes": null,
+                "future_policy": {"unexpected": true}
+            }
+        }))
+        .expect("serialize unexpected-field payload");
+        let unexpected_field = encrypt_payload(
+            &root,
+            object_id,
+            &unexpected_field,
+            1,
+            ITEM_PAYLOAD_SCHEMA_VERSION,
+        )
+        .expect("encrypt unexpected-field payload");
+        assert!(matches!(
+            decrypt_item_state(&root, &unexpected_field),
+            Err(CryptoError::Serialization(_))
+        ));
+
+        for (label, item) in [
+            (
+                "missing links",
+                serde_json::json!({
+                    "id": object_id,
+                    "kind": "secure_note",
+                    "title": "missing links",
+                    "attachments": [],
+                    "legacy_disposition": "unspecified",
+                    "fields": {"body": "body"},
+                    "notes": null
+                }),
+            ),
+            (
+                "missing attachments",
+                serde_json::json!({
+                    "id": object_id,
+                    "kind": "secure_note",
+                    "title": "missing attachments",
+                    "links": [],
+                    "legacy_disposition": "unspecified",
+                    "fields": {"body": "body"},
+                    "notes": null
+                }),
+            ),
+            (
+                "missing notes",
+                serde_json::json!({
+                    "id": object_id,
+                    "kind": "secure_note",
+                    "title": "missing notes",
+                    "links": [],
+                    "attachments": [],
+                    "legacy_disposition": "unspecified",
+                    "fields": {"body": "body"}
+                }),
+            ),
+        ] {
+            let plaintext = serde_json::to_vec(&serde_json::json!({
+                "state": "active",
+                "item": item
+            }))
+            .expect("serialize structurally incomplete payload");
+            let encrypted =
+                encrypt_payload(&root, object_id, &plaintext, 1, ITEM_PAYLOAD_SCHEMA_VERSION)
+                    .expect("encrypt structurally incomplete payload");
+            assert!(
+                matches!(
+                    decrypt_item_state(&root, &encrypted),
+                    Err(CryptoError::Serialization(_))
+                ),
+                "{label} must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn item_payload_schema_version_is_authenticated() {
+        let root = AccountRootKey::generate().expect("root key");
+        let item = VaultItem::secure_note("schema binding", "body");
+        let mut encrypted = encrypt_item(&root, &item, 1).expect("encrypt current payload");
+        encrypted.payload_schema_version = ATTACHMENT_ITEM_PAYLOAD_SCHEMA_VERSION;
+
+        assert!(matches!(
+            decrypt_item_state(&root, &encrypted),
+            Err(CryptoError::Authentication)
         ));
     }
 

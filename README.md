@@ -42,7 +42,13 @@ Implemented now:
   recovery plus sealed recovery-share envelopes at the crypto layer,
 - local Plan Test: metadata-only readiness checks for Emergency Card records,
   contacts, instructions, and recovery configuration, plus a read-only recovery
-  key self-test against the exact currently open vault root,
+  key self-test against the exact currently open vault root; it also summarizes
+  whether active records have local legacy-planning preferences without counting
+  those unenforced preferences as readiness,
+- encrypted per-record legacy planning intent (`Unspecified`, `Selected for
+  legacy`, `Private forever`, `Destroy on death`) with exact-revision mutation,
+  detail-only IPC, lifecycle/backup preservation, and explicit UI copy that no
+  sharing, release, death verification, or automatic deletion is enforced yet,
 - Trust Engine core: conditional access policies with fail-closed local
   evaluation (destruction/deny wins, private-forever, multi-approval,
   waiting periods as documented server-enforced policy, not time-lock crypto),
@@ -72,7 +78,8 @@ Implemented now:
 - pinned Rust/JS lockfiles and dependency/security CI policy.
 
 Not implemented yet: grant persistence inside item payloads, trusted-person
-grant UX, Emergency Access timed-release coordination, account/passkey flows,
+grant UX, enforcement of legacy/private-forever/destruction intent, Emergency
+Access timed-release coordination, account/passkey flows,
 Cloudflare sync. Cloud integration starts only
 after this local platform is stable.
 

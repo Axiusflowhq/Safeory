@@ -187,7 +187,7 @@ Before item encryption, the portable Rust core rejects records that exceed the s
 
 ## Versioning and migration
 
-Root wraps, item envelopes, and attachment envelopes carry independent format/payload versions. Item payload schema v3 introduces encrypted attachment references; readers retain v1/v2 compatibility, while new writes use v3 so an older binary that does not understand attachment references cannot safely rewrite a new record as an older payload. Readers reject unknown mandatory algorithms/versions rather than guessing. Future migrations read with the old format and write a new authenticated format without silently deleting records that fail migration.
+Root wraps, item envelopes, and attachment envelopes carry independent format/payload versions. Item payload schema v3 introduced encrypted attachment references. Item payload schema v4 adds the required encrypted per-record legacy-planning disposition. Current readers explicitly decode v1-v3 records with `LegacyDisposition::Unspecified`, while all new item writes use v4. The schema version is authenticated in item-payload AAD, so relabeling a v4 ciphertext as v3 fails authentication. Older binaries that only understand through v3 reject v4 before deserialization rather than silently rewriting away the new field. Readers reject unknown mandatory algorithms/versions rather than guessing. The SQLite database schema remains v3 because this is an encrypted payload-only migration. Future migrations read with the old format and write a new authenticated format without silently deleting records that fail migration.
 
 The encrypted item envelope also carries a payload schema version. Readers reject
 newer payload schemas before deserialization, preventing an older binary from

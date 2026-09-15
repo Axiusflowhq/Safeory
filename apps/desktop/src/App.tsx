@@ -332,7 +332,15 @@ type PlanReadiness = {
   has_contacts: boolean;
   has_instructions: boolean;
   has_stale_selected_records: boolean;
+  has_legacy_preferences: boolean;
+  has_unspecified_legacy_items: boolean;
 };
+
+type LegacyDisposition =
+  | "unspecified"
+  | "selected_for_legacy"
+  | "private_forever"
+  | "destroy_on_death";
 
 type AttachmentSummary = {
   id: string;
@@ -350,7 +358,7 @@ type LinkedSectionProps = {
   linkedTitles: ItemTitle[];
   allItems: VaultItem[];
   onJump: (kind: string, id: string) => void;
-  onLinksChanged: () => void;
+  onLinksChanged: (id: string, revision: number) => void;
 };
 
 type VaultView = "active" | "trash";
@@ -373,6 +381,7 @@ export default function App() {
   const [vaultView, setVaultView] = useState<VaultView>("active");
   const [trashItems, setTrashItems] = useState<TrashedItemView[]>([]);
   const [loadingTrash, setLoadingTrash] = useState(false);
+  const vaultRefreshGeneration = useRef(0);
   const trashLoadGeneration = useRef(0);
   const deadlineLoadGeneration = useRef(0);
   const [deviceSettings, setDeviceSettings] = useState<DeviceSettings>(
@@ -720,13 +729,33 @@ export default function App() {
 
   const refreshVaultItems = async () => {
     const token = sessionFence.token();
+    const requestGeneration = ++vaultRefreshGeneration.current;
     try {
       const refreshed = await fetchVaultItems();
-      if (!sessionFence.accepts(token)) return;
+      if (
+        !sessionFence.accepts(token) ||
+        requestGeneration !== vaultRefreshGeneration.current
+      )
+        return;
       setItems(refreshed.items);
     } catch (reason) {
-      if (sessionFence.accepts(token)) setError(readError(reason));
+      if (
+        sessionFence.accepts(token) &&
+        requestGeneration === vaultRefreshGeneration.current
+      )
+        setError(readError(reason));
     }
+  };
+
+  const handleRecordSupportChanged = (id: string, revision: number) => {
+    setItems((current) =>
+      current.map((item) =>
+        item.id === id && item.revision < revision
+          ? { ...item, revision }
+          : item,
+      ),
+    );
+    void refreshVaultItems();
   };
 
   const enterTrash = async () => {
@@ -1284,13 +1313,14 @@ export default function App() {
             />
           ) : selected?.kind === "secure_note" ? (
             <NoteReader
+              key={selected.id}
               note={selected}
               generation={sessionFence.token()}
               isGenerationCurrent={isSessionGenerationCurrent}
               linkedTitles={linkedTitles}
               allItems={items}
               onJump={jumpToRecord}
-              onLinksChanged={() => void refreshVaultItems()}
+              onLinksChanged={handleRecordSupportChanged}
               onEdit={() =>
                 setEditor({
                   kind: "secure_note",
@@ -1306,7 +1336,7 @@ export default function App() {
               linkedTitles={linkedTitles}
               allItems={items}
               onJump={jumpToRecord}
-              onLinksChanged={() => void refreshVaultItems()}
+              onLinksChanged={handleRecordSupportChanged}
               generation={sessionFence.token()}
               isGenerationCurrent={isSessionGenerationCurrent}
               onEdit={() => {
@@ -1322,7 +1352,7 @@ export default function App() {
               linkedTitles={linkedTitles}
               allItems={items}
               onJump={jumpToRecord}
-              onLinksChanged={() => void refreshVaultItems()}
+              onLinksChanged={handleRecordSupportChanged}
               generation={sessionFence.token()}
               isGenerationCurrent={isSessionGenerationCurrent}
               onEdit={() => {
@@ -1338,7 +1368,7 @@ export default function App() {
               linkedTitles={linkedTitles}
               allItems={items}
               onJump={jumpToRecord}
-              onLinksChanged={() => void refreshVaultItems()}
+              onLinksChanged={handleRecordSupportChanged}
               generation={sessionFence.token()}
               isGenerationCurrent={isSessionGenerationCurrent}
               onEdit={() => {
@@ -1354,7 +1384,7 @@ export default function App() {
               linkedTitles={linkedTitles}
               allItems={items}
               onJump={jumpToRecord}
-              onLinksChanged={() => void refreshVaultItems()}
+              onLinksChanged={handleRecordSupportChanged}
               generation={sessionFence.token()}
               isGenerationCurrent={isSessionGenerationCurrent}
               onEdit={() => {
@@ -1370,7 +1400,7 @@ export default function App() {
               linkedTitles={linkedTitles}
               allItems={items}
               onJump={jumpToRecord}
-              onLinksChanged={() => void refreshVaultItems()}
+              onLinksChanged={handleRecordSupportChanged}
               generation={sessionFence.token()}
               isGenerationCurrent={isSessionGenerationCurrent}
               onEdit={() => {
@@ -1386,7 +1416,7 @@ export default function App() {
               linkedTitles={linkedTitles}
               allItems={items}
               onJump={jumpToRecord}
-              onLinksChanged={() => void refreshVaultItems()}
+              onLinksChanged={handleRecordSupportChanged}
               generation={sessionFence.token()}
               isGenerationCurrent={isSessionGenerationCurrent}
               onEdit={() => {
@@ -1402,7 +1432,7 @@ export default function App() {
               linkedTitles={linkedTitles}
               allItems={items}
               onJump={jumpToRecord}
-              onLinksChanged={() => void refreshVaultItems()}
+              onLinksChanged={handleRecordSupportChanged}
               generation={sessionFence.token()}
               isGenerationCurrent={isSessionGenerationCurrent}
               onEdit={() => {
@@ -1418,7 +1448,7 @@ export default function App() {
               linkedTitles={linkedTitles}
               allItems={items}
               onJump={jumpToRecord}
-              onLinksChanged={() => void refreshVaultItems()}
+              onLinksChanged={handleRecordSupportChanged}
               generation={sessionFence.token()}
               isGenerationCurrent={isSessionGenerationCurrent}
               onEdit={() => {
@@ -1608,6 +1638,16 @@ function PlanTestPanel({
       ]
     : [];
   const readyCount = checks.filter((check) => check.ready).length;
+  const legacyPlanningStatus = !readiness
+    ? null
+    : !readiness.has_legacy_preferences &&
+        !readiness.has_unspecified_legacy_items
+      ? "No active records need a legacy preference yet."
+      : !readiness.has_legacy_preferences
+        ? "No legacy preferences are recorded yet."
+        : readiness.has_unspecified_legacy_items
+          ? "Some active records have a legacy preference and some remain unspecified."
+          : "Every active regular record has a legacy preference recorded.";
 
   return (
     <div
@@ -1712,6 +1752,7 @@ function PlanTestPanel({
                 <div className="mt-4 flex gap-2">
                   <input
                     type="password"
+                    aria-label="Recovery key"
                     autoComplete="off"
                     spellCheck={false}
                     value={recoveryKey}
@@ -1737,6 +1778,18 @@ function PlanTestPanel({
                   </button>
                 </div>
               </form>
+
+              <div className="mt-5 rounded-2xl border border-[var(--border)] bg-[var(--surface-secondary)] p-5">
+                <div className="text-sm font-semibold">Legacy planning</div>
+                <p className="mt-1 text-xs leading-5 text-[var(--text-muted)]">
+                  {legacyPlanningStatus}
+                </p>
+                <p className="mt-2 text-xs leading-5 text-[var(--text-muted)]">
+                  These are planning preferences only. They are not counted as a
+                  readiness check because Safeory does not yet enforce legacy
+                  release, private-forever, or destroy-on-death behavior.
+                </p>
+              </div>
 
               <p className="mt-5 text-xs leading-5 text-[var(--text-muted)]">
                 This local test does not exercise trusted-person sharing or
@@ -4912,7 +4965,15 @@ function PossessionComposer({
   );
 }
 
-function LinkedRecordsSection({
+type RevisionMutationCoordinator = {
+  revision: number;
+  mutationBusy: boolean;
+  beginRevisionMutation: () => boolean;
+  commitRevisionMutation: (revision: number) => void;
+  endRevisionMutation: () => void;
+};
+
+function RecordSupportSections({
   itemId,
   revision,
   links,
@@ -4921,7 +4982,7 @@ function LinkedRecordsSection({
   linkedTitles,
   allItems,
   onJump,
-  onLinksChanged,
+  onChanged,
   onError,
 }: {
   itemId: string;
@@ -4930,15 +4991,132 @@ function LinkedRecordsSection({
   generation: number;
   isGenerationCurrent: (generation: number) => boolean;
   onError: (message: string | null) => void;
-} & LinkedSectionProps) {
+} & Omit<LinkedSectionProps, "onLinksChanged"> & {
+    onChanged: (id: string, revision: number) => void;
+  }) {
+  const [itemRevision, setItemRevision] = useState(revision);
+  const [mutationBusy, setMutationBusy] = useState(false);
+  const mutationInFlight = useRef(false);
+
+  useEffect(() => {
+    setItemRevision((current) => Math.max(current, revision));
+  }, [revision]);
+
+  const beginRevisionMutation = useCallback(() => {
+    if (mutationInFlight.current) return false;
+    mutationInFlight.current = true;
+    setMutationBusy(true);
+    return true;
+  }, []);
+
+  const endRevisionMutation = useCallback(() => {
+    mutationInFlight.current = false;
+    setMutationBusy(false);
+  }, []);
+
+  const commitRevisionMutation = useCallback(
+    (nextRevision: number) => {
+      setItemRevision(nextRevision);
+      mutationInFlight.current = false;
+      setMutationBusy(false);
+      onChanged(itemId, nextRevision);
+    },
+    [itemId, onChanged],
+  );
+
+  const coordinator: RevisionMutationCoordinator = {
+    revision: itemRevision,
+    mutationBusy,
+    beginRevisionMutation,
+    commitRevisionMutation,
+    endRevisionMutation,
+  };
+
+  return (
+    <>
+      <AttachmentsSection
+        ownerItemId={itemId}
+        generation={generation}
+        isGenerationCurrent={isGenerationCurrent}
+        coordinator={coordinator}
+        onError={onError}
+      />
+      <LinkedRecordsSection
+        itemId={itemId}
+        links={links}
+        generation={generation}
+        isGenerationCurrent={isGenerationCurrent}
+        linkedTitles={linkedTitles}
+        allItems={allItems}
+        onJump={onJump}
+        coordinator={coordinator}
+        onError={onError}
+      />
+    </>
+  );
+}
+
+function LinkedRecordsSection({
+  itemId,
+  links,
+  generation,
+  isGenerationCurrent,
+  linkedTitles,
+  allItems,
+  onJump,
+  coordinator,
+  onError,
+}: {
+  itemId: string;
+  links: string[];
+  generation: number;
+  isGenerationCurrent: (generation: number) => boolean;
+  coordinator: RevisionMutationCoordinator;
+  onError: (message: string | null) => void;
+} & Omit<LinkedSectionProps, "onLinksChanged">) {
   const [managing, setManaging] = useState(false);
+  const [currentLinks, setCurrentLinks] = useState<string[]>(links);
   const [draft, setDraft] = useState<string[]>(links);
   const [saving, setSaving] = useState(false);
+  const [legacyDisposition, setLegacyDisposition] =
+    useState<LegacyDisposition | null>(null);
+  const [legacyLoadState, setLegacyLoadState] = useState<
+    "loading" | "ready" | "error"
+  >("loading");
+  const [legacySaving, setLegacySaving] = useState(false);
   const titleById = new Map(linkedTitles.map((entry) => [entry.id, entry]));
   const candidates = allItems.filter((item) => item.id !== itemId);
 
+  useEffect(() => {
+    setCurrentLinks(links);
+  }, [links]);
+
+  useEffect(() => {
+    let active = true;
+    setLegacyDisposition(null);
+    setLegacyLoadState("loading");
+    void invoke<LegacyDisposition>("get_item_legacy_disposition", {
+      id: itemId,
+      revision: coordinator.revision,
+    })
+      .then((disposition) => {
+        if (!active || !isGenerationCurrent(generation)) return;
+        setLegacyDisposition(disposition);
+        setLegacyLoadState("ready");
+      })
+      .catch((reason: unknown) => {
+        if (active && isGenerationCurrent(generation)) {
+          setLegacyLoadState("error");
+          onError(readError(reason));
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [coordinator.revision, generation, isGenerationCurrent, itemId, onError]);
+
   const openManager = () => {
-    setDraft(links);
+    setDraft(currentLinks);
     setManaging(true);
     onError(null);
   };
@@ -4952,145 +5130,237 @@ function LinkedRecordsSection({
   };
 
   async function saveLinks() {
-    if (saving) return;
+    if (saving || !coordinator.beginRevisionMutation()) return;
     setSaving(true);
     onError(null);
     try {
-      await invoke<number>("set_item_links", {
+      const nextRevision = await invoke<number>("set_item_links", {
         id: itemId,
-        revision,
+        revision: coordinator.revision,
         links: draft,
       });
       if (!isGenerationCurrent(generation)) return;
+      setCurrentLinks(draft);
+      coordinator.commitRevisionMutation(nextRevision);
       setManaging(false);
-      onLinksChanged();
     } catch (reason) {
       if (isGenerationCurrent(generation)) onError(readError(reason));
     } finally {
-      if (isGenerationCurrent(generation)) setSaving(false);
+      if (isGenerationCurrent(generation)) {
+        coordinator.endRevisionMutation();
+        setSaving(false);
+      }
     }
   }
 
+  async function saveLegacyDisposition(disposition: LegacyDisposition) {
+    if (
+      legacySaving ||
+      legacyLoadState !== "ready" ||
+      legacyDisposition === null ||
+      !coordinator.beginRevisionMutation()
+    )
+      return;
+    setLegacySaving(true);
+    onError(null);
+    try {
+      const nextRevision = await invoke<number>("set_item_legacy_disposition", {
+        id: itemId,
+        revision: coordinator.revision,
+        disposition,
+      });
+      if (!isGenerationCurrent(generation)) return;
+      setLegacyDisposition(disposition);
+      coordinator.commitRevisionMutation(nextRevision);
+    } catch (reason) {
+      if (isGenerationCurrent(generation)) onError(readError(reason));
+    } finally {
+      if (isGenerationCurrent(generation)) {
+        coordinator.endRevisionMutation();
+        setLegacySaving(false);
+      }
+    }
+  }
+
+  const legacyExplanation =
+    legacyDisposition === "selected_for_legacy"
+      ? "Marked for future legacy planning. This does not grant anyone access or release this record."
+      : legacyDisposition === "private_forever"
+        ? "Records your intent for this item to remain private. This preference is not yet enforced by a release path."
+        : legacyDisposition === "destroy_on_death"
+          ? "Records an intent to destroy this item after death. Safeory does not verify death or delete this item automatically."
+          : "No legacy preference is recorded for this item.";
+
   return (
-    <div className="mt-8">
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-[0.12em] text-[var(--text-muted)]">
-          <HugeiconsIcon
-            icon={Link01Icon}
-            className="size-4"
-            aria-hidden="true"
-          />
-          Linked records
+    <>
+      <div className="mt-8">
+        <div className="text-xs font-medium uppercase tracking-[0.12em] text-[var(--text-muted)]">
+          Legacy plan
         </div>
-        <button
-          type="button"
-          onClick={() => {
-            if (managing) setManaging(false);
-            else openManager();
-          }}
-          className="rounded-lg px-2.5 py-1.5 text-xs text-[var(--text-muted)] transition hover:bg-[var(--selected)] hover:text-[var(--text-primary)]"
-        >
-          {managing ? "Done" : "Manage links"}
-        </button>
-      </div>
-      {managing ? (
         <div className="mt-3 rounded-2xl border border-[var(--border)] bg-[var(--surface-secondary)] p-4">
-          {candidates.length === 0 ? (
-            <p className="text-sm text-[var(--text-muted)]">
-              No other records to link yet.
+          <p className="text-xs leading-5 text-[var(--text-muted)]">
+            Planning preference only. Safeory does not currently share, release,
+            or delete this record automatically.
+          </p>
+          {legacyLoadState === "loading" ? (
+            <p className="mt-3 text-xs leading-5 text-[var(--text-muted)]">
+              Loading legacy preference…
+            </p>
+          ) : legacyLoadState === "error" || legacyDisposition === null ? (
+            <p
+              role="alert"
+              className="mt-3 text-xs leading-5 text-[var(--danger)]"
+            >
+              Legacy preference is unavailable. Reload this record before
+              changing it.
             </p>
           ) : (
-            <div className="space-y-4">
-              {groupItemsByKind(candidates, "").map((group) => (
-                <div key={group.section}>
-                  <div className="text-[11px] font-medium uppercase tracking-[0.1em] text-[var(--text-muted)]">
-                    {sectionLabel(group.section)}
-                  </div>
-                  <div className="mt-2 space-y-1.5">
-                    {group.items.map((candidate) => (
-                      <label
-                        key={candidate.id}
-                        className="flex cursor-pointer items-center gap-3 rounded-xl px-2 py-1.5 text-sm transition hover:bg-[var(--selected)]"
-                      >
-                        <input
-                          type="checkbox"
-                          checked={draft.includes(candidate.id)}
-                          onChange={() => toggleDraft(candidate.id)}
-                          className="size-4"
-                        />
-                        <span className="min-w-0">
-                          <span className="block truncate font-medium text-[var(--text-primary)]">
-                            {candidate.title}
-                          </span>
-                          <span className="block text-xs text-[var(--text-muted)]">
-                            {sectionLabel(candidate.kind)}
-                          </span>
-                        </span>
-                      </label>
-                    ))}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-          <div className="mt-4 flex items-center justify-end gap-2 border-t border-[var(--border)] pt-3">
-            <button
-              type="button"
-              onClick={() => setManaging(false)}
-              className="rounded-xl border border-[var(--border)] bg-[var(--surface)] px-4 py-2 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--selected)]"
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              onClick={() => void saveLinks()}
-              disabled={saving}
-              className="rounded-xl bg-[var(--primary)] px-4 py-2 text-sm font-medium text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-55"
-            >
-              {saving ? "Saving…" : "Save links"}
-            </button>
-          </div>
-        </div>
-      ) : links.length === 0 ? (
-        <p className="mt-3 text-sm text-[var(--text-muted)]">
-          No linked records yet.
-        </p>
-      ) : (
-        <div className="mt-3 overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface-secondary)]">
-          {links.map((id) => {
-            const entry = titleById.get(id);
-            if (!entry) {
-              return (
-                <div
-                  key={id}
-                  className="grid grid-cols-[140px_minmax(0,1fr)] gap-4 px-5 py-4 [&+&]:border-t [&+&]:border-[var(--border)]"
-                >
-                  <div className="text-sm text-[var(--text-muted)]">Record</div>
-                  <div className="min-w-0 truncate text-sm text-[var(--text-muted)]">
-                    Unavailable (moved to Trash or deleted)
-                  </div>
-                </div>
-              );
-            }
-            return (
-              <button
-                key={id}
-                type="button"
-                onClick={() => onJump(entry.kind, entry.id)}
-                className="grid w-full grid-cols-[140px_minmax(0,1fr)] gap-4 px-5 py-4 text-left transition hover:bg-[var(--selected)] [&+&]:border-t [&+&]:border-[var(--border)]"
+            <>
+              <select
+                value={legacyDisposition}
+                disabled={legacySaving || coordinator.mutationBusy}
+                onChange={(event) =>
+                  void saveLegacyDisposition(
+                    event.target.value as LegacyDisposition,
+                  )
+                }
+                className="field-input mt-3"
+                aria-label="Legacy plan preference"
               >
-                <div className="text-sm text-[var(--text-muted)]">
-                  {kindLabel(entry.kind)}
-                </div>
-                <div className="min-w-0 truncate text-sm text-[var(--text-primary)]">
-                  {entry.title}
-                </div>
-              </button>
-            );
-          })}
+                <option value="unspecified">Unspecified</option>
+                <option value="selected_for_legacy">Selected for legacy</option>
+                <option value="private_forever">Private forever</option>
+                <option value="destroy_on_death">Destroy on death</option>
+              </select>
+              <p className="mt-2 text-xs leading-5 text-[var(--text-muted)]">
+                {legacySaving ? "Saving legacy preference…" : legacyExplanation}
+              </p>
+            </>
+          )}
         </div>
-      )}
-    </div>
+      </div>
+      <div className="mt-8">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-[0.12em] text-[var(--text-muted)]">
+            <HugeiconsIcon
+              icon={Link01Icon}
+              className="size-4"
+              aria-hidden="true"
+            />
+            Linked records
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              if (managing) setManaging(false);
+              else openManager();
+            }}
+            className="rounded-lg px-2.5 py-1.5 text-xs text-[var(--text-muted)] transition hover:bg-[var(--selected)] hover:text-[var(--text-primary)]"
+          >
+            {managing ? "Done" : "Manage links"}
+          </button>
+        </div>
+        {managing ? (
+          <div className="mt-3 rounded-2xl border border-[var(--border)] bg-[var(--surface-secondary)] p-4">
+            {candidates.length === 0 ? (
+              <p className="text-sm text-[var(--text-muted)]">
+                No other records to link yet.
+              </p>
+            ) : (
+              <div className="space-y-4">
+                {groupItemsByKind(candidates, "").map((group) => (
+                  <div key={group.section}>
+                    <div className="text-[11px] font-medium uppercase tracking-[0.1em] text-[var(--text-muted)]">
+                      {sectionLabel(group.section)}
+                    </div>
+                    <div className="mt-2 space-y-1.5">
+                      {group.items.map((candidate) => (
+                        <label
+                          key={candidate.id}
+                          className="flex cursor-pointer items-center gap-3 rounded-xl px-2 py-1.5 text-sm transition hover:bg-[var(--selected)]"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={draft.includes(candidate.id)}
+                            onChange={() => toggleDraft(candidate.id)}
+                            className="size-4"
+                          />
+                          <span className="min-w-0">
+                            <span className="block truncate font-medium text-[var(--text-primary)]">
+                              {candidate.title}
+                            </span>
+                            <span className="block text-xs text-[var(--text-muted)]">
+                              {sectionLabel(candidate.kind)}
+                            </span>
+                          </span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="mt-4 flex items-center justify-end gap-2 border-t border-[var(--border)] pt-3">
+              <button
+                type="button"
+                onClick={() => setManaging(false)}
+                className="rounded-xl border border-[var(--border)] bg-[var(--surface)] px-4 py-2 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--selected)]"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void saveLinks()}
+                disabled={saving || coordinator.mutationBusy}
+                className="rounded-xl bg-[var(--primary)] px-4 py-2 text-sm font-medium text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-55"
+              >
+                {saving ? "Saving…" : "Save links"}
+              </button>
+            </div>
+          </div>
+        ) : currentLinks.length === 0 ? (
+          <p className="mt-3 text-sm text-[var(--text-muted)]">
+            No linked records yet.
+          </p>
+        ) : (
+          <div className="mt-3 overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface-secondary)]">
+            {currentLinks.map((id) => {
+              const entry = titleById.get(id);
+              if (!entry) {
+                return (
+                  <div
+                    key={id}
+                    className="grid grid-cols-[140px_minmax(0,1fr)] gap-4 px-5 py-4 [&+&]:border-t [&+&]:border-[var(--border)]"
+                  >
+                    <div className="text-sm text-[var(--text-muted)]">
+                      Record
+                    </div>
+                    <div className="min-w-0 truncate text-sm text-[var(--text-muted)]">
+                      Unavailable (moved to Trash or deleted)
+                    </div>
+                  </div>
+                );
+              }
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => onJump(entry.kind, entry.id)}
+                  className="grid w-full grid-cols-[140px_minmax(0,1fr)] gap-4 px-5 py-4 text-left transition hover:bg-[var(--selected)] [&+&]:border-t [&+&]:border-[var(--border)]"
+                >
+                  <div className="text-sm text-[var(--text-muted)]">
+                    {kindLabel(entry.kind)}
+                  </div>
+                  <div className="min-w-0 truncate text-sm text-[var(--text-primary)]">
+                    {entry.title}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </>
   );
 }
 
@@ -5108,28 +5378,21 @@ function formatAttachmentSize(bytes: number) {
 
 function AttachmentsSection({
   ownerItemId,
-  revision,
   generation,
   isGenerationCurrent,
-  onAttachmentsChanged,
+  coordinator,
   onError,
 }: {
   ownerItemId: string;
-  revision: number;
   generation: number;
   isGenerationCurrent: (generation: number) => boolean;
-  onAttachmentsChanged: () => void;
+  coordinator: RevisionMutationCoordinator;
   onError: (message: string | null) => void;
 }) {
   const [attachments, setAttachments] = useState<AttachmentSummary[]>([]);
-  const [itemRevision, setItemRevision] = useState(revision);
   const [loading, setLoading] = useState(true);
   const [adding, setAdding] = useState(false);
   const [activeAction, setActiveAction] = useState<string | null>(null);
-
-  useEffect(() => {
-    setItemRevision(revision);
-  }, [revision]);
 
   useEffect(() => {
     let active = true;
@@ -5155,7 +5418,13 @@ function AttachmentsSection({
   }, [generation, isGenerationCurrent, onError, ownerItemId]);
 
   async function addAttachment() {
-    if (adding || activeAction !== null || attachments.length >= 16) return;
+    if (
+      adding ||
+      activeAction !== null ||
+      attachments.length >= 16 ||
+      !coordinator.beginRevisionMutation()
+    )
+      return;
     setAdding(true);
     onError(null);
     try {
@@ -5163,18 +5432,20 @@ function AttachmentsSection({
         "add_attachment",
         {
           ownerItemId,
-          expectedItemRevision: itemRevision,
+          expectedItemRevision: coordinator.revision,
         },
       );
       if (!isGenerationCurrent(generation)) return;
       if (result === null) return;
       setAttachments((current) => [...current, result.attachment]);
-      setItemRevision(result.item_revision);
-      onAttachmentsChanged();
+      coordinator.commitRevisionMutation(result.item_revision);
     } catch (reason) {
       if (isGenerationCurrent(generation)) onError(readError(reason));
     } finally {
-      if (isGenerationCurrent(generation)) setAdding(false);
+      if (isGenerationCurrent(generation)) {
+        coordinator.endRevisionMutation();
+        setAdding(false);
+      }
     }
   }
 
@@ -5198,29 +5469,32 @@ function AttachmentsSection({
   async function deleteAttachment(attachment: AttachmentSummary) {
     if (adding || activeAction !== null) return;
     if (!window.confirm(`Delete ${attachment.filename} permanently?`)) return;
+    if (!coordinator.beginRevisionMutation()) return;
     setActiveAction(`delete:${attachment.id}`);
     onError(null);
     try {
       const nextRevision = await invoke<number>("delete_attachment", {
         ownerItemId,
         attachmentId: attachment.id,
-        expectedItemRevision: itemRevision,
+        expectedItemRevision: coordinator.revision,
         expectedAttachmentRevision: attachment.revision,
       });
       if (!isGenerationCurrent(generation)) return;
       setAttachments((current) =>
         current.filter((candidate) => candidate.id !== attachment.id),
       );
-      setItemRevision(nextRevision);
-      onAttachmentsChanged();
+      coordinator.commitRevisionMutation(nextRevision);
     } catch (reason) {
       if (isGenerationCurrent(generation)) onError(readError(reason));
     } finally {
-      if (isGenerationCurrent(generation)) setActiveAction(null);
+      if (isGenerationCurrent(generation)) {
+        coordinator.endRevisionMutation();
+        setActiveAction(null);
+      }
     }
   }
 
-  const busy = adding || activeAction !== null;
+  const busy = adding || activeAction !== null || coordinator.mutationBusy;
 
   return (
     <div className="mt-8">
@@ -5341,16 +5615,7 @@ function NoteReader({
           <span className="text-[var(--text-muted)]">This note is empty.</span>
         )}
       </div>
-      <AttachmentsSection
-        key={note.id}
-        ownerItemId={note.id}
-        revision={note.revision}
-        generation={generation}
-        isGenerationCurrent={isGenerationCurrent}
-        onAttachmentsChanged={onLinksChanged}
-        onError={onError}
-      />
-      <LinkedRecordsSection
+      <RecordSupportSections
         itemId={note.id}
         revision={note.revision}
         links={note.links ?? []}
@@ -5359,7 +5624,7 @@ function NoteReader({
         linkedTitles={linkedTitles}
         allItems={allItems}
         onJump={onJump}
-        onLinksChanged={onLinksChanged}
+        onChanged={onLinksChanged}
         onError={onError}
       />
     </article>
@@ -5528,16 +5793,7 @@ function CredentialReader({
         {copyNotice ??
           "Best effort: Safeory ownership-checks copied passwords before clearing after 30 seconds. Clipboard history and OS clipboard behavior may still retain copied values."}
       </p>
-      <AttachmentsSection
-        key={credential.id}
-        ownerItemId={credential.id}
-        revision={credential.revision}
-        generation={generation}
-        isGenerationCurrent={isGenerationCurrent}
-        onAttachmentsChanged={onLinksChanged}
-        onError={onError}
-      />
-      <LinkedRecordsSection
+      <RecordSupportSections
         itemId={credential.id}
         revision={credential.revision}
         links={credential.links ?? []}
@@ -5546,7 +5802,7 @@ function CredentialReader({
         linkedTitles={linkedTitles}
         allItems={allItems}
         onJump={onJump}
-        onLinksChanged={onLinksChanged}
+        onChanged={onLinksChanged}
         onError={onError}
       />
     </article>
@@ -5656,16 +5912,7 @@ function DocumentReader({
           </div>
         </div>
       ) : null}
-      <AttachmentsSection
-        key={document.id}
-        ownerItemId={document.id}
-        revision={document.revision}
-        generation={generation}
-        isGenerationCurrent={isGenerationCurrent}
-        onAttachmentsChanged={onLinksChanged}
-        onError={onError}
-      />
-      <LinkedRecordsSection
+      <RecordSupportSections
         itemId={document.id}
         revision={document.revision}
         links={document.links ?? []}
@@ -5674,7 +5921,7 @@ function DocumentReader({
         linkedTitles={linkedTitles}
         allItems={allItems}
         onJump={onJump}
-        onLinksChanged={onLinksChanged}
+        onChanged={onLinksChanged}
         onError={onError}
       />
     </article>
@@ -5825,16 +6072,7 @@ function ReceiptReader({
         Receipt references and notes stay out of list and search state and are
         fetched only inside this receipt view.
       </p>
-      <AttachmentsSection
-        key={receipt.id}
-        ownerItemId={receipt.id}
-        revision={receipt.revision}
-        generation={generation}
-        isGenerationCurrent={isGenerationCurrent}
-        onAttachmentsChanged={onLinksChanged}
-        onError={onError}
-      />
-      <LinkedRecordsSection
+      <RecordSupportSections
         itemId={receipt.id}
         revision={receipt.revision}
         links={receipt.links ?? []}
@@ -5843,7 +6081,7 @@ function ReceiptReader({
         linkedTitles={linkedTitles}
         allItems={allItems}
         onJump={onJump}
-        onLinksChanged={onLinksChanged}
+        onChanged={onLinksChanged}
         onError={onError}
       />
     </article>
@@ -5954,16 +6192,7 @@ function InsuranceReader({
           </div>
         </div>
       ) : null}
-      <AttachmentsSection
-        key={insurance.id}
-        ownerItemId={insurance.id}
-        revision={insurance.revision}
-        generation={generation}
-        isGenerationCurrent={isGenerationCurrent}
-        onAttachmentsChanged={onLinksChanged}
-        onError={onError}
-      />
-      <LinkedRecordsSection
+      <RecordSupportSections
         itemId={insurance.id}
         revision={insurance.revision}
         links={insurance.links ?? []}
@@ -5972,7 +6201,7 @@ function InsuranceReader({
         linkedTitles={linkedTitles}
         allItems={allItems}
         onJump={onJump}
-        onLinksChanged={onLinksChanged}
+        onChanged={onLinksChanged}
         onError={onError}
       />
     </article>
@@ -6080,16 +6309,7 @@ function FinancialReader({
         Account numbers are excluded from list and search state and are fetched
         only when you reveal them.
       </p>
-      <AttachmentsSection
-        key={financial.id}
-        ownerItemId={financial.id}
-        revision={financial.revision}
-        generation={generation}
-        isGenerationCurrent={isGenerationCurrent}
-        onAttachmentsChanged={onLinksChanged}
-        onError={onError}
-      />
-      <LinkedRecordsSection
+      <RecordSupportSections
         itemId={financial.id}
         revision={financial.revision}
         links={financial.links ?? []}
@@ -6098,7 +6318,7 @@ function FinancialReader({
         linkedTitles={linkedTitles}
         allItems={allItems}
         onJump={onJump}
-        onLinksChanged={onLinksChanged}
+        onChanged={onLinksChanged}
         onError={onError}
       />
     </article>
@@ -6265,16 +6485,7 @@ function PropertyReader({
         Addresses and property references stay out of list and search state and
         are fetched only on explicit reveal.
       </p>
-      <AttachmentsSection
-        key={property.id}
-        ownerItemId={property.id}
-        revision={property.revision}
-        generation={generation}
-        isGenerationCurrent={isGenerationCurrent}
-        onAttachmentsChanged={onLinksChanged}
-        onError={onError}
-      />
-      <LinkedRecordsSection
+      <RecordSupportSections
         itemId={property.id}
         revision={property.revision}
         links={property.links ?? []}
@@ -6283,7 +6494,7 @@ function PropertyReader({
         linkedTitles={linkedTitles}
         allItems={allItems}
         onJump={onJump}
-        onLinksChanged={onLinksChanged}
+        onChanged={onLinksChanged}
         onError={onError}
       />
     </article>
@@ -6456,16 +6667,7 @@ function VehicleReader({
           </div>
         </div>
       ) : null}
-      <AttachmentsSection
-        key={vehicle.id}
-        ownerItemId={vehicle.id}
-        revision={vehicle.revision}
-        generation={generation}
-        isGenerationCurrent={isGenerationCurrent}
-        onAttachmentsChanged={onLinksChanged}
-        onError={onError}
-      />
-      <LinkedRecordsSection
+      <RecordSupportSections
         itemId={vehicle.id}
         revision={vehicle.revision}
         links={vehicle.links ?? []}
@@ -6474,7 +6676,7 @@ function VehicleReader({
         linkedTitles={linkedTitles}
         allItems={allItems}
         onJump={onJump}
-        onLinksChanged={onLinksChanged}
+        onChanged={onLinksChanged}
         onError={onError}
       />
     </article>
@@ -6591,16 +6793,7 @@ function PossessionReader({
           </div>
         </div>
       ) : null}
-      <AttachmentsSection
-        key={possession.id}
-        ownerItemId={possession.id}
-        revision={possession.revision}
-        generation={generation}
-        isGenerationCurrent={isGenerationCurrent}
-        onAttachmentsChanged={onLinksChanged}
-        onError={onError}
-      />
-      <LinkedRecordsSection
+      <RecordSupportSections
         itemId={possession.id}
         revision={possession.revision}
         links={possession.links ?? []}
@@ -6609,7 +6802,7 @@ function PossessionReader({
         linkedTitles={linkedTitles}
         allItems={allItems}
         onJump={onJump}
-        onLinksChanged={onLinksChanged}
+        onChanged={onLinksChanged}
         onError={onError}
       />
     </article>

@@ -36,7 +36,7 @@ Rule: cloud integration starts only after the local platform below is stable.
 |---|------|--------|
 | 12 | Emergency access | 🟡 Partial — Emergency Card (records + contacts + instructions) works; timed release does not |
 | 13 | Waiting periods | 🟡 Policy core only — 1h/24h/7d/custom evaluated locally; no enforcement timer, no server coordinator |
-| 14 | Selected legacy access | ❌ Left — destruction/private-forever exist as policy; no per-asset legacy rules UX |
+| 14 | Selected legacy access | 🟡 Local planning done — each active record can be marked Unspecified/Selected for legacy/Private forever/Destroy on death; this is encrypted planning metadata only, with no trusted-person release or automatic deletion enforcement yet |
 | 15 | "If something happens to me" | 🟡 Partial — card + instructions + kit cover the single-device case |
 | 16 | Plan test | ✅ Done (local) — checks Emergency Card completeness + verifies the saved recovery key against the current vault; does not simulate trusted-person/timed-release flows |
 
@@ -59,8 +59,8 @@ Rule: cloud integration starts only after the local platform below is stable.
 ## Backlog — ordered, post-V1
 1. Grant persistence inside item payloads + trusted-person management UX.
 2. Emergency timed-release state machine (local simulation first, Durable Object later).
-3. Selected legacy access per asset + private-forever/destruction UX.
-4. Plan test (simulation) + preparedness score.
+3. Enforce legacy/private-forever/destruction intent through trusted-person + emergency-release state once that machinery exists.
+4. Plan test (simulation) + preparedness score beyond today's local readiness checks.
 5. Sync: device auth, D1 metadata, R2 blobs, queues/notifications.
 6. OS keystore + biometric unlock; passkeys/TOTP.
 7. Subscriptions, home inventory, account-closure plan.

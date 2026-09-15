@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
@@ -19,17 +19,35 @@ pub enum ItemKind {
     EmergencyInstruction,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LegacyDisposition {
+    #[default]
+    Unspecified,
+    SelectedForLegacy,
+    PrivateForever,
+    DestroyOnDeath,
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VaultItem {
     pub id: Uuid,
     pub kind: ItemKind,
     pub title: String,
-    #[serde(default)]
     pub links: Vec<Uuid>,
-    #[serde(default)]
     pub attachments: Vec<Uuid>,
+    pub legacy_disposition: LegacyDisposition,
     pub fields: BTreeMap<String, String>,
+    #[serde(deserialize_with = "deserialize_present_optional_string")]
     pub notes: Option<String>,
+}
+
+fn deserialize_present_optional_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)
 }
 
 /// "EMGCARD" prefix + 1, singleton id for the encrypted emergency-card record.
@@ -63,7 +81,7 @@ impl EmergencyCard {
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum VaultItemState {
     Active { item: VaultItem },
     Trashed { item: VaultItem, deleted_at_ms: u64 },
@@ -80,6 +98,7 @@ impl VaultItem {
             title: title.into(),
             links: Vec::new(),
             attachments: Vec::new(),
+            legacy_disposition: LegacyDisposition::Unspecified,
             fields,
             notes: None,
         }
@@ -103,6 +122,7 @@ impl VaultItem {
             title: title.into(),
             links: Vec::new(),
             attachments: Vec::new(),
+            legacy_disposition: LegacyDisposition::Unspecified,
             fields,
             notes: (!notes.is_empty()).then_some(notes),
         }
@@ -126,6 +146,7 @@ impl VaultItem {
             title: title.into(),
             links: Vec::new(),
             attachments: Vec::new(),
+            legacy_disposition: LegacyDisposition::Unspecified,
             fields,
             notes: (!notes.is_empty()).then_some(notes),
         }
@@ -160,6 +181,7 @@ impl VaultItem {
             title: title.into(),
             links: Vec::new(),
             attachments: Vec::new(),
+            legacy_disposition: LegacyDisposition::Unspecified,
             fields,
             notes: (!notes.is_empty()).then_some(notes),
         }
@@ -185,6 +207,7 @@ impl VaultItem {
             title: title.into(),
             links: Vec::new(),
             attachments: Vec::new(),
+            legacy_disposition: LegacyDisposition::Unspecified,
             fields,
             notes: (!notes.is_empty()).then_some(notes),
         }
@@ -210,6 +233,7 @@ impl VaultItem {
             title: title.into(),
             links: Vec::new(),
             attachments: Vec::new(),
+            legacy_disposition: LegacyDisposition::Unspecified,
             fields,
             notes: (!notes.is_empty()).then_some(notes),
         }
@@ -235,6 +259,7 @@ impl VaultItem {
             title: title.into(),
             links: Vec::new(),
             attachments: Vec::new(),
+            legacy_disposition: LegacyDisposition::Unspecified,
             fields,
             notes: (!notes.is_empty()).then_some(notes),
         }
@@ -265,6 +290,7 @@ impl VaultItem {
             title: title.into(),
             links: Vec::new(),
             attachments: Vec::new(),
+            legacy_disposition: LegacyDisposition::Unspecified,
             fields,
             notes: (!notes.is_empty()).then_some(notes),
         }
@@ -297,6 +323,7 @@ impl VaultItem {
             title: title.into(),
             links: Vec::new(),
             attachments: Vec::new(),
+            legacy_disposition: LegacyDisposition::Unspecified,
             fields,
             notes: (!notes.is_empty()).then_some(notes),
         }
@@ -314,6 +341,7 @@ impl VaultItem {
             title: "Emergency Card".to_owned(),
             links: Vec::new(),
             attachments: Vec::new(),
+            legacy_disposition: LegacyDisposition::Unspecified,
             fields,
             notes: None,
         }
@@ -407,35 +435,81 @@ mod tests {
     }
 
     #[test]
-    fn pre_links_payload_still_decodes_with_empty_links() {
-        let legacy = serde_json::json!({
+    fn current_item_payload_requires_legacy_disposition() {
+        let incomplete = serde_json::json!({
             "id": Uuid::new_v4(),
             "kind": "secure_note",
-            "title": "legacy",
+            "title": "current",
+            "links": [],
+            "attachments": [],
             "fields": {"body": "hello"},
             "notes": null
         });
-        let item: VaultItem =
-            serde_json::from_value(legacy).expect("legacy payload without links decodes");
-        assert!(item.links.is_empty());
-        assert!(item.attachments.is_empty());
-        assert_eq!(item.title, "legacy");
+        assert!(serde_json::from_value::<VaultItem>(incomplete).is_err());
+
+        let missing_links = serde_json::json!({
+            "id": Uuid::new_v4(),
+            "kind": "secure_note",
+            "title": "current",
+            "attachments": [],
+            "legacy_disposition": "unspecified",
+            "fields": {"body": "hello"},
+            "notes": null
+        });
+        assert!(serde_json::from_value::<VaultItem>(missing_links).is_err());
+
+        let missing_attachments = serde_json::json!({
+            "id": Uuid::new_v4(),
+            "kind": "secure_note",
+            "title": "current",
+            "links": [],
+            "legacy_disposition": "unspecified",
+            "fields": {"body": "hello"},
+            "notes": null
+        });
+        assert!(serde_json::from_value::<VaultItem>(missing_attachments).is_err());
+
+        let missing_notes = serde_json::json!({
+            "id": Uuid::new_v4(),
+            "kind": "secure_note",
+            "title": "current",
+            "links": [],
+            "attachments": [],
+            "legacy_disposition": "unspecified",
+            "fields": {"body": "hello"}
+        });
+        assert!(serde_json::from_value::<VaultItem>(missing_notes).is_err());
+
+        let unexpected = serde_json::json!({
+            "id": Uuid::new_v4(),
+            "kind": "secure_note",
+            "title": "current",
+            "links": [],
+            "attachments": [],
+            "legacy_disposition": "unspecified",
+            "fields": {"body": "hello"},
+            "notes": null,
+            "future_policy": {"unexpected": true}
+        });
+        assert!(serde_json::from_value::<VaultItem>(unexpected).is_err());
     }
 
     #[test]
-    fn pre_attachments_payload_still_decodes_with_empty_attachments() {
-        let legacy = serde_json::json!({
+    fn current_item_payload_round_trips_legacy_disposition() {
+        let current = serde_json::json!({
             "id": Uuid::new_v4(),
             "kind": "secure_note",
-            "title": "legacy links",
+            "title": "current",
             "links": [Uuid::new_v4()],
+            "attachments": [],
+            "legacy_disposition": "private_forever",
             "fields": {"body": "hello"},
             "notes": null
         });
-        let item: VaultItem =
-            serde_json::from_value(legacy).expect("payload without attachments decodes");
+        let item: VaultItem = serde_json::from_value(current).expect("current payload decodes");
         assert_eq!(item.links.len(), 1);
         assert!(item.attachments.is_empty());
+        assert_eq!(item.legacy_disposition, LegacyDisposition::PrivateForever);
     }
 
     #[test]

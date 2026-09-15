@@ -26,7 +26,9 @@ use vault_core::{
     reminders::{collect_deadlines, parse_ymd},
 };
 use vault_crypto::RecoverySecret;
-use vault_models::{EMERGENCY_CARD_ID, EmergencyCard, EmergencyContact, ItemKind, VaultItem};
+use vault_models::{
+    EMERGENCY_CARD_ID, EmergencyCard, EmergencyContact, ItemKind, LegacyDisposition, VaultItem,
+};
 use vault_platform::{Clipboard as PlatformClipboard, PlatformError};
 use vault_storage::StorageError;
 use zeroize::Zeroizing;
@@ -771,6 +773,8 @@ struct PlanReadinessView {
     has_contacts: bool,
     has_instructions: bool,
     has_stale_selected_records: bool,
+    has_legacy_preferences: bool,
+    has_unspecified_legacy_items: bool,
 }
 
 struct GeneratedRecoverySecretView {
@@ -1473,6 +1477,25 @@ fn set_item_links(
 }
 
 #[tauri::command]
+fn get_item_legacy_disposition(
+    state: State<'_, VaultRuntime>,
+    id: String,
+    revision: u64,
+) -> Result<LegacyDisposition, String> {
+    get_item_legacy_disposition_impl(&state, id, revision)
+}
+
+#[tauri::command]
+fn set_item_legacy_disposition(
+    state: State<'_, VaultRuntime>,
+    id: String,
+    revision: u64,
+    disposition: LegacyDisposition,
+) -> Result<u64, String> {
+    set_item_legacy_disposition_impl(&state, id, revision, disposition)
+}
+
+#[tauri::command]
 async fn add_attachment(
     app: tauri::AppHandle,
     state: State<'_, VaultRuntime>,
@@ -2112,6 +2135,7 @@ fn update_note_impl(
         title: title.to_owned(),
         links: existing.links.clone(),
         attachments: existing.attachments.clone(),
+        legacy_disposition: existing.legacy_disposition,
         fields,
         notes: existing.notes,
     };
@@ -2314,6 +2338,7 @@ fn update_document_impl(
         title: title.to_owned(),
         links: existing.links.clone(),
         attachments: existing.attachments.clone(),
+        legacy_disposition: existing.legacy_disposition,
         fields,
         notes: (!notes.is_empty()).then_some(notes),
     };
@@ -2455,6 +2480,7 @@ fn update_receipt_impl(
         title: title.to_owned(),
         links: existing.links.clone(),
         attachments: existing.attachments.clone(),
+        legacy_disposition: existing.legacy_disposition,
         fields,
         notes: (!notes.is_empty()).then_some(notes),
     };
@@ -2564,6 +2590,7 @@ fn update_insurance_impl(
         title: title.to_owned(),
         links: existing.links.clone(),
         attachments: existing.attachments.clone(),
+        legacy_disposition: existing.legacy_disposition,
         fields,
         notes: (!notes.is_empty()).then_some(notes),
     };
@@ -2682,6 +2709,7 @@ fn update_financial_impl(
         title: title.to_owned(),
         links: existing.links.clone(),
         attachments: existing.attachments.clone(),
+        legacy_disposition: existing.legacy_disposition,
         fields,
         notes: (!notes.is_empty()).then_some(notes),
     };
@@ -2801,6 +2829,7 @@ fn update_property_impl(
         title: title.to_owned(),
         links: existing.links.clone(),
         attachments: existing.attachments.clone(),
+        legacy_disposition: existing.legacy_disposition,
         fields,
         notes: (!notes.is_empty()).then_some(notes),
     };
@@ -2926,6 +2955,7 @@ fn update_vehicle_impl(
         title: title.to_owned(),
         links: existing.links.clone(),
         attachments: existing.attachments.clone(),
+        legacy_disposition: existing.legacy_disposition,
         fields,
         notes: (!notes.is_empty()).then_some(notes),
     };
@@ -3056,6 +3086,7 @@ fn update_possession_impl(
         title: title.to_owned(),
         links: existing.links.clone(),
         attachments: existing.attachments.clone(),
+        legacy_disposition: existing.legacy_disposition,
         fields,
         notes: (!notes.is_empty()).then_some(notes),
     };
@@ -3211,6 +3242,58 @@ fn set_item_links_impl(
         .update_item(&item, revision)
         .map_err(|error| match error {
             vault_core::VaultError::Storage(vault_storage::StorageError::StaleRevision) => {
+                "This record changed since you opened it. Reload it before saving.".to_owned()
+            }
+            other => safe_vault_error(other),
+        })
+}
+
+fn get_item_legacy_disposition_impl(
+    state: &VaultRuntime,
+    id: String,
+    revision: u64,
+) -> Result<LegacyDisposition, String> {
+    let id = id
+        .parse()
+        .map_err(|_| "The record identifier is invalid.".to_owned())?;
+    if id == EMERGENCY_CARD_ID {
+        return Err("The emergency card does not support a legacy preference.".to_owned());
+    }
+    let session = lock_session(state)?;
+    let session = session
+        .as_ref()
+        .ok_or_else(|| "Unlock the vault before reading the legacy plan.".to_owned())?;
+    let (item, current_revision) = session
+        .get_item_with_revision(id)
+        .map_err(safe_vault_error)?;
+    if current_revision != revision {
+        return Err(
+            "This record changed since you opened it. Reload it before continuing.".to_owned(),
+        );
+    }
+    Ok(item.legacy_disposition)
+}
+
+fn set_item_legacy_disposition_impl(
+    state: &VaultRuntime,
+    id: String,
+    revision: u64,
+    disposition: LegacyDisposition,
+) -> Result<u64, String> {
+    let id = id
+        .parse()
+        .map_err(|_| "The record identifier is invalid.".to_owned())?;
+    if id == EMERGENCY_CARD_ID {
+        return Err("The emergency card does not support a legacy preference.".to_owned());
+    }
+    let session = lock_session(state)?;
+    let session = session
+        .as_ref()
+        .ok_or_else(|| "Unlock the vault before changing the legacy plan.".to_owned())?;
+    session
+        .set_legacy_disposition(id, revision, disposition)
+        .map_err(|error| match error {
+            VaultError::Storage(StorageError::StaleRevision) => {
                 "This record changed since you opened it. Reload it before saving.".to_owned()
             }
             other => safe_vault_error(other),
@@ -3680,6 +3763,19 @@ fn get_plan_readiness_impl(state: &VaultRuntime) -> Result<PlanReadinessView, St
         .as_ref()
         .ok_or_else(|| "Unlock the vault before testing the emergency plan.".to_owned())?;
     let recovery_configured = session.has_recovery_kit().map_err(safe_vault_error)?;
+    let active_items = session.list_items().map_err(safe_vault_error)?;
+    let mut has_legacy_preferences = false;
+    let mut has_unspecified_legacy_items = false;
+    for item in &active_items {
+        if item.id == EMERGENCY_CARD_ID {
+            continue;
+        }
+        if item.legacy_disposition == LegacyDisposition::Unspecified {
+            has_unspecified_legacy_items = true;
+        } else {
+            has_legacy_preferences = true;
+        }
+    }
     let card = session.get_emergency_card().map_err(safe_vault_error)?;
     let Some((card, _revision)) = card else {
         return Ok(PlanReadinessView {
@@ -3688,6 +3784,8 @@ fn get_plan_readiness_impl(state: &VaultRuntime) -> Result<PlanReadinessView, St
             has_contacts: false,
             has_instructions: false,
             has_stale_selected_records: false,
+            has_legacy_preferences,
+            has_unspecified_legacy_items,
         });
     };
     let mut has_selected_records = false;
@@ -3715,6 +3813,8 @@ fn get_plan_readiness_impl(state: &VaultRuntime) -> Result<PlanReadinessView, St
             .any(|contact| !contact.name.trim().is_empty() && !contact.phone.trim().is_empty()),
         has_instructions: !card.instructions.trim().is_empty(),
         has_stale_selected_records,
+        has_legacy_preferences,
+        has_unspecified_legacy_items,
     })
 }
 
@@ -3811,6 +3911,7 @@ fn stage_human_readable_export(
             "kind": item.kind,
             "title": item.title,
             "links": item.links.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            "legacy_disposition": item.legacy_disposition,
             "fields": item.fields,
             "notes": item.notes,
             "revision": revision,
@@ -4183,6 +4284,7 @@ fn update_credential_impl(
         title: title.to_owned(),
         links: existing.links.clone(),
         attachments: existing.attachments.clone(),
+        legacy_disposition: existing.legacy_disposition,
         fields,
         notes: (!notes.is_empty()).then_some(notes),
     };
@@ -5027,6 +5129,8 @@ pub fn run() {
             update_emergency_card,
             get_item_titles,
             set_item_links,
+            get_item_legacy_disposition,
+            set_item_legacy_disposition,
             add_attachment,
             list_attachments,
             export_attachment,
@@ -7033,6 +7137,52 @@ mod tests {
     }
 
     #[test]
+    fn legacy_disposition_is_detail_only_and_stale_safe() {
+        let (_directory, runtime) = runtime();
+        initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
+        let note = create_note_impl(&runtime, "Legacy record".to_owned(), "Body".to_owned())
+            .expect("create note");
+
+        assert_eq!(
+            get_item_legacy_disposition_impl(&runtime, note.id.clone(), note.revision)
+                .expect("get initial disposition"),
+            LegacyDisposition::Unspecified
+        );
+        let revision = set_item_legacy_disposition_impl(
+            &runtime,
+            note.id.clone(),
+            note.revision,
+            LegacyDisposition::SelectedForLegacy,
+        )
+        .expect("set disposition");
+        assert_eq!(revision, note.revision + 1);
+        assert_eq!(
+            get_item_legacy_disposition_impl(&runtime, note.id.clone(), revision)
+                .expect("get updated disposition"),
+            LegacyDisposition::SelectedForLegacy
+        );
+
+        let stale = set_item_legacy_disposition_impl(
+            &runtime,
+            note.id.clone(),
+            note.revision,
+            LegacyDisposition::PrivateForever,
+        )
+        .expect_err("stale disposition update must fail");
+        assert_eq!(
+            stale,
+            "This record changed since you opened it. Reload it before saving."
+        );
+
+        let serialized = serde_json::to_string(
+            &list_vault_items_impl(&runtime).expect("list items after disposition update"),
+        )
+        .expect("serialize list projection");
+        assert!(!serialized.contains("legacy_disposition"));
+        assert!(!serialized.contains("selected_for_legacy"));
+    }
+
+    #[test]
     fn deadlines_include_vehicle_and_possession_and_skip_garbage() {
         let (_directory, runtime) = runtime();
         initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
@@ -7308,6 +7458,14 @@ mod tests {
         )
         .expect("set emergency card");
         trash_item_impl(&runtime, stale.id, stale.revision).expect("trash selected record");
+        let active_revision = set_item_legacy_disposition_impl(
+            &runtime,
+            active.id.clone(),
+            active.revision,
+            LegacyDisposition::SelectedForLegacy,
+        )
+        .expect("set active legacy preference");
+        assert_eq!(active_revision, active.revision + 1);
         let generated = generate_recovery_secret_impl(&runtime).expect("generate recovery key");
         confirm_recovery_secret_impl(&runtime, generated.secret.to_string(), generated.generation)
             .expect("install recovery key");
@@ -7318,6 +7476,8 @@ mod tests {
         assert!(readiness.has_contacts);
         assert!(readiness.has_instructions);
         assert!(readiness.has_stale_selected_records);
+        assert!(readiness.has_legacy_preferences);
+        assert!(!readiness.has_unspecified_legacy_items);
         let serialized = serde_json::to_string(&readiness).expect("serialize readiness");
         assert!(!serialized.contains("Private Contact Name"));
         assert!(!serialized.contains("Private emergency instructions"));
@@ -7357,6 +7517,13 @@ mod tests {
             "Export body".to_owned(),
         )
         .expect("create note");
+        set_item_legacy_disposition_impl(
+            &runtime,
+            note.id.clone(),
+            note.revision,
+            LegacyDisposition::SelectedForLegacy,
+        )
+        .expect("set export legacy preference");
         update_emergency_card_impl(
             &runtime,
             None,
@@ -7383,6 +7550,7 @@ mod tests {
         let serialized = serde_json::to_string(&parsed).expect("serialize export");
         assert!(serialized.contains("Seeded Export Title"));
         assert!(serialized.contains("Export card instructions"));
+        assert!(serialized.contains("selected_for_legacy"));
 
         let backup_path = directory
             .path()
@@ -7752,6 +7920,18 @@ mod tests {
         );
         assert!(get_item_titles_impl(&runtime, vec![note.id.clone()]).is_err());
         assert!(set_item_links_impl(&runtime, note.id.clone(), note.revision, Vec::new()).is_err());
+        assert!(
+            get_item_legacy_disposition_impl(&runtime, note.id.clone(), note.revision).is_err()
+        );
+        assert!(
+            set_item_legacy_disposition_impl(
+                &runtime,
+                note.id.clone(),
+                note.revision,
+                LegacyDisposition::PrivateForever,
+            )
+            .is_err()
+        );
         assert!(list_deadlines_impl(&runtime, 2026, 9, 15).is_err());
         assert!(generate_recovery_secret_impl(&runtime).is_err());
         assert!(confirm_recovery_secret_impl(&runtime, "secret".to_owned(), 0).is_err());

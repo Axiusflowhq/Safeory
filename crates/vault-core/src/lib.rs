@@ -18,7 +18,9 @@ use vault_crypto::{
     seal_attachment_manifest, unwrap_root_key, unwrap_root_key_with_recovery_secret, wrap_root_key,
     wrap_root_key_with_recovery_secret,
 };
-use vault_models::{EMERGENCY_CARD_ID, EmergencyCard, VaultItem, VaultItemState};
+use vault_models::{
+    EMERGENCY_CARD_ID, EmergencyCard, LegacyDisposition, VaultItem, VaultItemState,
+};
 use vault_storage::{StorageError, VaultStorage};
 
 const PASSWORD_LOWERCASE: &[u8] = b"abcdefghijkmnopqrstuvwxyz";
@@ -371,6 +373,8 @@ pub enum VaultError {
     AttachmentOperationCancelled,
     #[error("vault operation was cancelled")]
     OperationCancelled,
+    #[error("legacy disposition is not supported for this item")]
+    InvalidLegacyDisposition,
     #[error("attachment file operation failed")]
     AttachmentIo(#[from] std::io::Error),
 }
@@ -777,6 +781,23 @@ impl VaultSession {
                 Err(VaultError::ItemNotActive)
             }
         }
+    }
+
+    pub fn set_legacy_disposition(
+        &self,
+        id: Uuid,
+        expected_revision: u64,
+        disposition: LegacyDisposition,
+    ) -> Result<u64, VaultError> {
+        if id == EMERGENCY_CARD_ID {
+            return Err(VaultError::InvalidLegacyDisposition);
+        }
+        let (mut item, current_revision) = self.get_item_with_revision(id)?;
+        if current_revision != expected_revision {
+            return Err(VaultError::Storage(StorageError::StaleRevision));
+        }
+        item.legacy_disposition = disposition;
+        self.update_item(&item, expected_revision)
     }
 
     pub fn list_items(&self) -> Result<Vec<VaultItem>, VaultError> {
@@ -1272,7 +1293,8 @@ fn decode_attachment_record(
 
 fn validate_item(item: &VaultItem) -> Result<(), VaultError> {
     let unique_attachments = item.attachments.iter().copied().collect::<BTreeSet<_>>();
-    if item.title.chars().count() > MAX_ITEM_TITLE_CHARS
+    if (item.id == EMERGENCY_CARD_ID && item.legacy_disposition != LegacyDisposition::Unspecified)
+        || item.title.chars().count() > MAX_ITEM_TITLE_CHARS
         || item.fields.len() > MAX_ITEM_FIELDS
         || item.links.len() > MAX_ITEM_LINKS
         || item.attachments.len() > MAX_ITEM_ATTACHMENTS
@@ -1286,7 +1308,15 @@ fn validate_item(item: &VaultItem) -> Result<(), VaultError> {
             .as_ref()
             .is_some_and(|notes| notes.chars().count() > MAX_ITEM_NOTES_CHARS)
     {
-        return Err(VaultError::ItemTooLarge);
+        return Err(
+            if item.id == EMERGENCY_CARD_ID
+                && item.legacy_disposition != LegacyDisposition::Unspecified
+            {
+                VaultError::InvalidLegacyDisposition
+            } else {
+                VaultError::ItemTooLarge
+            },
+        );
     }
     Ok(())
 }
@@ -1594,6 +1624,131 @@ mod tests {
         assert_eq!(
             session.get_item(original.id).expect("current item").title,
             "first edit"
+        );
+    }
+
+    #[test]
+    fn legacy_disposition_is_cas_safe_and_survives_lifecycle_transitions() {
+        let dir = tempdir().expect("temp directory");
+        let database = dir.path().join("vault.sqlite3");
+        let session = VaultSession::create(&database, TEST_PASSPHRASE).expect("create vault");
+        let mut item = VaultItem::secure_note("legacy plan", "private body");
+        item.links.push(Uuid::new_v4());
+        let id = item.id;
+        session.put_item(&item, 1).expect("store item");
+
+        let revision = session
+            .set_legacy_disposition(id, 1, LegacyDisposition::PrivateForever)
+            .expect("set legacy disposition");
+        assert_eq!(revision, 2);
+        let (updated, loaded_revision) = session
+            .get_item_with_revision(id)
+            .expect("load updated item");
+        assert_eq!(loaded_revision, 2);
+        assert_eq!(
+            updated.legacy_disposition,
+            LegacyDisposition::PrivateForever
+        );
+        assert_eq!(
+            updated.fields.get("body").map(String::as_str),
+            Some("private body")
+        );
+        assert_eq!(updated.links, item.links);
+
+        assert!(matches!(
+            session.set_legacy_disposition(id, 1, LegacyDisposition::SelectedForLegacy),
+            Err(VaultError::Storage(StorageError::StaleRevision))
+        ));
+
+        let trashed_revision = session.trash_item(id, revision, 42).expect("trash item");
+        let trashed = session
+            .list_trashed_items_with_revisions()
+            .expect("list trash")
+            .into_iter()
+            .find(|(candidate, _, _)| candidate.id == id)
+            .expect("trashed item");
+        assert_eq!(
+            trashed.0.legacy_disposition,
+            LegacyDisposition::PrivateForever
+        );
+        let restored_revision = session
+            .restore_item(id, trashed_revision)
+            .expect("restore item");
+        let (restored, revision) = session
+            .get_item_with_revision(id)
+            .expect("load restored item");
+        assert_eq!(revision, restored_revision);
+        assert_eq!(
+            restored.legacy_disposition,
+            LegacyDisposition::PrivateForever
+        );
+
+        let destroy_revision = session
+            .set_legacy_disposition(id, restored_revision, LegacyDisposition::DestroyOnDeath)
+            .expect("record destroy-on-death intent");
+        assert!(session.get_item(id).is_ok());
+        let second_trash_revision = session
+            .trash_item(id, destroy_revision, 43)
+            .expect("trash item again");
+        let tombstone_revision = session
+            .purge_item(id, second_trash_revision)
+            .expect("purge item");
+        assert!(matches!(
+            session
+                .get_state_with_revision(id)
+                .expect("load tombstone state"),
+            (VaultItemState::Tombstone { id: tombstone_id, .. }, revision)
+                if tombstone_id == id && revision == tombstone_revision
+        ));
+
+        assert!(matches!(
+            session.set_legacy_disposition(
+                EMERGENCY_CARD_ID,
+                1,
+                LegacyDisposition::SelectedForLegacy
+            ),
+            Err(VaultError::InvalidLegacyDisposition)
+        ));
+    }
+
+    #[test]
+    fn encrypted_backup_restore_preserves_legacy_disposition() {
+        let dir = tempdir().expect("temp directory");
+        let database = dir.path().join("vault.sqlite3");
+        let backup = dir.path().join("legacy-plan-backup.sqlite3");
+        let mut session = VaultSession::create(&database, TEST_PASSPHRASE).expect("create vault");
+        let item = VaultItem::secure_note("legacy backup", "body");
+        let id = item.id;
+        session.put_item(&item, 1).expect("store item");
+        let backup_revision = session
+            .set_legacy_disposition(id, 1, LegacyDisposition::SelectedForLegacy)
+            .expect("set backed-up disposition");
+        session
+            .backup_database_to(&backup)
+            .expect("create validated backup");
+
+        let mutated_revision = session
+            .set_legacy_disposition(id, backup_revision, LegacyDisposition::PrivateForever)
+            .expect("mutate live disposition");
+        assert_eq!(mutated_revision, backup_revision + 1);
+        assert_eq!(
+            session
+                .get_item(id)
+                .expect("load mutated item")
+                .legacy_disposition,
+            LegacyDisposition::PrivateForever
+        );
+
+        session
+            .replace_with_backup(&backup, TEST_PASSPHRASE)
+            .expect("restore validated backup");
+        let (restored, restored_revision) = session
+            .get_item_with_revision(id)
+            .expect("load restored legacy item");
+        assert_eq!(restored_revision, backup_revision);
+        assert_eq!(
+            restored.legacy_disposition,
+            LegacyDisposition::SelectedForLegacy
         );
     }
 

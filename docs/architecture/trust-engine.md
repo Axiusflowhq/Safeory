@@ -10,7 +10,12 @@ sealed recovery-share envelopes, is implemented and tested in
 payloads, trusted-person UX, and the timed-release state machine are still
 pending — no UI or server path can release anything today. The desktop Plan
 Test now checks only locally enforceable preparedness (Emergency Card
-completeness and recovery-key verification); it is not a release simulation.
+completeness and recovery-key verification) and reports aggregate local legacy
+planning coverage; it is not a release simulation. Each regular vault item can
+also carry one encrypted `LegacyDisposition` planning preference
+(`Unspecified`, `SelectedForLegacy`, `PrivateForever`, `DestroyOnDeath`). That
+preference is not an `AccessPolicy`, grants no access, and triggers no automatic
+release or deletion.
 
 ## Non-goals for V1
 
@@ -44,10 +49,13 @@ Rules:
 
 1. Existing `lifevault:v1:item-wrap` domain is immutable wire format. Do not
    rename. New compartments use `safeory:v1:*`.
-2. Phase 1 (this increment): all new Ownership kinds reuse the existing
-   per-item envelope. No format bump. Compartments land as policy labels first,
-   key separation second, with migration that re-wraps without deleting old
-   records on failure.
+2. All Ownership kinds reuse the existing per-item envelope. The encrypted item
+   payload schema is now v4 to carry the required per-item legacy-planning
+   disposition. Readers explicitly decode v1-v3 as `Unspecified`; older builds
+   that only understand through v3 reject v4 rather than silently dropping the
+   field. The SQLite schema does not change for this payload-only migration.
+   Compartments remain future work, with key separation requiring its own
+   reviewed migration.
 3. Per-item keys stay random per revision. Sharing wraps only the item key to
    the recipient device public key; never the root/compartment key.
 4. Destroying a compartment/item key makes its blobs cryptographically
@@ -111,3 +119,7 @@ must be messaged as such in UI copy.
    default, explicit grants, approvals, waiting periods, private-forever and
    destruction winning over release. Session/IPC wiring and the Durable
    Object release coordinator come after this.
+5. Per-record legacy planning disposition — DONE locally as encrypted payload
+   metadata with exact-revision IPC and reader UX. It is deliberately separate
+   from the Trust Engine policy object until trusted-person identity/grant
+   persistence and real enforcement are implemented.
