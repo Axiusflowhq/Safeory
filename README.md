@@ -72,10 +72,14 @@ Implemented now:
   validated encrypted SQLite snapshot, both written atomically through
   Rust-owned native save dialogs to user-chosen locations; the renderer cannot
   supply arbitrary export paths, and the active vault database is rejected as
-  an output target; encrypted backups can be restored transactionally from Settings
-  or during first-run setup using either the backup master passphrase or the
-  recovery key captured by that backup, without overwriting device-only
-  preferences,
+  an output target; after a validated encrypted backup is successfully written,
+  Safeory attempts to record only that creation time in device-local settings
+  (not the path or file identity, and not a claim that the file still exists or
+  is current); a backup can still succeed if that secondary activity record
+  cannot be updated;
+  encrypted backups can be restored transactionally from Settings or during
+  first-run setup using either the backup master passphrase or the recovery key
+  captured by that backup, without overwriting device-only preferences,
 - encrypted local file attachments with per-file keys, authenticated 1 MiB
   chunks, metadata-only renderer IPC, Trash/restore lifecycle preservation,
   tombstone-based permanent deletion, and attachment-complete encrypted

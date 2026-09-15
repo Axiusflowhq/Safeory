@@ -368,6 +368,8 @@ impl PlatformClipboard for TauriClipboard {
 struct DeviceSettings {
     auto_lock_minutes: u64,
     lock_on_background: bool,
+    #[serde(default)]
+    last_successful_encrypted_backup_at_ms: Option<u64>,
 }
 
 impl Default for DeviceSettings {
@@ -375,6 +377,7 @@ impl Default for DeviceSettings {
         Self {
             auto_lock_minutes: 10,
             lock_on_background: true,
+            last_successful_encrypted_backup_at_ms: None,
         }
     }
 }
@@ -852,8 +855,13 @@ struct ExportView {
 }
 
 #[derive(serde::Serialize)]
-struct PathView {
-    path: String,
+struct BackupCreationView {
+    settings: Option<DeviceSettings>,
+    status_recorded: bool,
+}
+
+struct BackupCopyResult {
+    settings: Option<DeviceSettings>,
 }
 
 #[derive(serde::Serialize)]
@@ -2004,7 +2012,7 @@ async fn export_human_readable(
 async fn backup_database_copy(
     app: tauri::AppHandle,
     state: State<'_, VaultRuntime>,
-) -> Result<bool, String> {
+) -> Result<Option<BackupCreationView>, String> {
     let generation = capture_export_generation(&state, "backing up the vault")?;
     let selected = tauri::async_runtime::spawn_blocking(move || {
         app.dialog()
@@ -2015,7 +2023,7 @@ async fn backup_database_copy(
     .await
     .map_err(|_| "Unable to open the encrypted-backup save dialog.".to_owned())?;
     let Some(selected) = selected else {
-        return Ok(false);
+        return Ok(None);
     };
     let destination = selected
         .into_path()
@@ -2025,7 +2033,13 @@ async fn backup_database_copy(
         destination.to_string_lossy().to_string(),
         generation,
     )
-    .map(|_| true)
+    .map(|result| {
+        let status_recorded = result.settings.is_some();
+        Some(BackupCreationView {
+            settings: result.settings,
+            status_recorded,
+        })
+    })
 }
 
 #[tauri::command]
@@ -2135,20 +2149,11 @@ fn update_device_settings_impl(
     if lock_session(state)?.is_none() {
         return Err("Unlock the vault before changing device settings.".to_owned());
     }
-    let settings = DeviceSettings {
+    mutate_device_settings(state, |current| DeviceSettings {
         auto_lock_minutes,
         lock_on_background,
-    };
-    validate_device_settings(settings)?;
-    let encoded = serde_json::to_vec_pretty(&settings)
-        .map_err(|_| "Unable to encode local device settings.".to_owned())?;
-    fs::write(&state.settings_path, encoded)
-        .map_err(|_| "Unable to save local device settings.".to_owned())?;
-    *state
-        .settings
-        .lock()
-        .map_err(|_| "The local device settings are unavailable.".to_owned())? = settings;
-    Ok(settings)
+        last_successful_encrypted_backup_at_ms: current.last_successful_encrypted_backup_at_ms,
+    })
 }
 
 fn change_master_passphrase_impl(
@@ -2180,16 +2185,169 @@ fn validate_device_settings(settings: DeviceSettings) -> Result<(), String> {
     Ok(())
 }
 
+fn mutate_device_settings(
+    state: &VaultRuntime,
+    mutate: impl FnOnce(DeviceSettings) -> DeviceSettings,
+) -> Result<DeviceSettings, String> {
+    let mut current = state
+        .settings
+        .lock()
+        .map_err(|_| "The local device settings are unavailable.".to_owned())?;
+    let updated = mutate(*current);
+    validate_device_settings(updated)?;
+    persist_device_settings(&state.settings_path, *current, updated)?;
+    *current = updated;
+    Ok(updated)
+}
+
+fn persist_device_settings(
+    path: &Path,
+    previous: DeviceSettings,
+    settings: DeviceSettings,
+) -> Result<(), String> {
+    ensure_device_settings_canonical_durable(path)?;
+    let previous_encoded = serde_json::to_vec_pretty(&previous)
+        .map_err(|_| "Unable to encode local device settings.".to_owned())?;
+    let encoded = serde_json::to_vec_pretty(&settings)
+        .map_err(|_| "Unable to encode local device settings.".to_owned())?;
+    let recovery = device_settings_recovery_path(path);
+    let mut recovery_file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&recovery)
+        .map_err(|_| "Unable to save local device settings.".to_owned())?;
+    if recovery_file.write_all(&previous_encoded).is_err() || recovery_file.sync_all().is_err() {
+        return Err("Unable to save local device settings.".to_owned());
+    }
+    drop(recovery_file);
+    sync_device_settings_parent(&recovery)?;
+
+    let staged = temporary_sibling_path(path, "settings")?;
+    let mut staged_file = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged)
+    {
+        Ok(file) => file,
+        Err(_) => return Err("Unable to save local device settings.".to_owned()),
+    };
+    if staged_file.write_all(&encoded).is_err() || staged_file.sync_all().is_err() {
+        drop(staged_file);
+        let _ = fs::remove_file(&staged);
+        return Err("Unable to save local device settings.".to_owned());
+    }
+    drop(staged_file);
+
+    if path.exists() && fs::remove_file(path).is_err() {
+        let _ = fs::remove_file(&staged);
+        return Err("Unable to save local device settings.".to_owned());
+    }
+    if fs::rename(&staged, path).is_err() {
+        let _ = fs::copy(&recovery, path);
+        let _ = fs::remove_file(&staged);
+        return Err("Unable to save local device settings.".to_owned());
+    }
+    if sync_device_settings_parent(path).is_err() {
+        let _ = fs::remove_file(path);
+        let _ = fs::copy(&recovery, path);
+        let _ = sync_device_settings_parent(path);
+        return Err("Unable to save local device settings.".to_owned());
+    }
+    Ok(())
+}
+
+fn device_settings_recovery_path(path: &Path) -> PathBuf {
+    let mut file_name = path
+        .file_name()
+        .unwrap_or_else(|| std::ffi::OsStr::new("device-settings.json"))
+        .to_os_string();
+    file_name.push(".previous");
+    path.with_file_name(file_name)
+}
+
+fn sync_device_settings_parent(path: &Path) -> Result<(), String> {
+    sync_parent_directory(path).map_err(|_| "Unable to save local device settings.".to_owned())
+}
+
 fn load_device_settings(path: &Path) -> DeviceSettings {
-    let Ok(bytes) = fs::read(path) else {
-        return DeviceSettings::default();
+    let recovery = device_settings_recovery_path(path);
+    if let Some(settings) = read_valid_device_settings(path) {
+        if sync_existing_file(path).is_ok() && sync_parent_directory(path).is_ok() {
+            let _ = fs::remove_file(&recovery);
+            let _ = sync_parent_directory(path);
+        }
+        return settings;
+    }
+    if let Some(settings) = read_valid_device_settings(&recovery) {
+        if fs::copy(&recovery, path).is_ok() {
+            let _ = sync_existing_file(path);
+            let _ = sync_parent_directory(path);
+        }
+        return settings;
+    }
+    DeviceSettings::default()
+}
+
+fn read_valid_device_settings(path: &Path) -> Option<DeviceSettings> {
+    let bytes = fs::read(path).ok()?;
+    let settings = serde_json::from_slice::<DeviceSettings>(&bytes).ok()?;
+    validate_device_settings(settings).ok()?;
+    Some(settings)
+}
+
+fn ensure_device_settings_canonical_durable(path: &Path) -> Result<(), String> {
+    if read_valid_device_settings(path).is_some() {
+        sync_existing_file(path)
+            .and_then(|()| sync_parent_directory(path))
+            .map_err(|_| "Unable to save local device settings.".to_owned())?;
+        return Ok(());
+    }
+
+    let recovery = device_settings_recovery_path(path);
+    if read_valid_device_settings(&recovery).is_some() {
+        fs::copy(&recovery, path)
+            .and_then(|_| sync_existing_file(path))
+            .and_then(|()| sync_parent_directory(path))
+            .map_err(|_| "Unable to save local device settings.".to_owned())?;
+    }
+    Ok(())
+}
+
+fn sync_existing_file(path: &Path) -> Result<(), std::io::Error> {
+    fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .and_then(|file| file.sync_all())
+}
+
+fn record_successful_backup_creation(state: &VaultRuntime) -> Result<DeviceSettings, String> {
+    let mut current = state
+        .settings
+        .lock()
+        .map_err(|_| "The local device settings are unavailable.".to_owned())?;
+    let clock_ms = u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| "The system clock is unavailable.".to_owned())?
+            .as_millis(),
+    )
+    .map_err(|_| "The system clock is unavailable.".to_owned())?;
+    let recorded_at_ms = monotonic_backup_creation_timestamp(
+        current.last_successful_encrypted_backup_at_ms,
+        clock_ms,
+    );
+    let updated = DeviceSettings {
+        last_successful_encrypted_backup_at_ms: Some(recorded_at_ms),
+        ..*current
     };
-    let Ok(settings) = serde_json::from_slice::<DeviceSettings>(&bytes) else {
-        return DeviceSettings::default();
-    };
-    validate_device_settings(settings)
-        .map(|()| settings)
-        .unwrap_or_default()
+    persist_device_settings(&state.settings_path, *current, updated)?;
+    *current = updated;
+    Ok(updated)
+}
+
+fn monotonic_backup_creation_timestamp(existing: Option<u64>, candidate: u64) -> u64 {
+    existing.map_or(candidate, |existing| existing.max(candidate))
 }
 
 fn spawn_auto_lock_watchdog(
@@ -4416,21 +4574,22 @@ fn save_recovery_secret_impl_for_generation(
 }
 
 fn sync_recovery_secret_parent(destination: &Path) -> Result<(), String> {
+    sync_parent_directory(destination)
+        .map_err(|_| "Unable to durably save the recovery-key file in this location.".to_owned())
+}
+
+fn sync_parent_directory(path: &Path) -> Result<(), std::io::Error> {
     #[cfg(unix)]
     {
-        let parent = destination.parent().ok_or_else(|| {
-            "Unable to durably save the recovery-key file in this location.".to_owned()
+        let parent = path.parent().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no parent")
         })?;
-        fs::File::open(parent)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|_| {
-                "Unable to durably save the recovery-key file in this location.".to_owned()
-            })
+        fs::File::open(parent)?.sync_all()
     }
 
     #[cfg(not(unix))]
     {
-        let _ = destination;
+        let _ = path;
         Ok(())
     }
 }
@@ -4778,7 +4937,10 @@ fn commit_human_readable_export(
 }
 
 #[cfg(test)]
-fn backup_database_copy_impl(state: &VaultRuntime, path: String) -> Result<PathView, String> {
+fn backup_database_copy_impl(
+    state: &VaultRuntime,
+    path: String,
+) -> Result<BackupCopyResult, String> {
     let generation = capture_export_generation(state, "backing up the vault")?;
     backup_database_copy_impl_for_generation(state, path, generation)
 }
@@ -4787,7 +4949,7 @@ fn backup_database_copy_impl_for_generation(
     state: &VaultRuntime,
     path: String,
     expected_generation: u64,
-) -> Result<PathView, String> {
+) -> Result<BackupCopyResult, String> {
     let destination = PathBuf::from(path.trim());
     if path.trim().is_empty() {
         return Err("Choose a location for the encrypted backup.".to_owned());
@@ -4819,7 +4981,8 @@ fn backup_database_copy_impl_for_generation(
         ));
     }
     commit_database_backup_copy(state, generation, &staged, &destination)?;
-    Ok(PathView { path })
+    let settings = record_successful_backup_creation(state).ok();
+    Ok(BackupCopyResult { settings })
 }
 
 fn capture_export_generation(state: &VaultRuntime, action: &str) -> Result<u64, String> {
@@ -6854,9 +7017,11 @@ mod tests {
             update_device_settings_impl(&runtime, 15, false).expect("update device settings");
         assert_eq!(settings.auto_lock_minutes, 15);
         assert!(!settings.lock_on_background);
+        assert_eq!(settings.last_successful_encrypted_backup_at_ms, None);
         let persisted = load_device_settings(&runtime.settings_path);
         assert_eq!(persisted.auto_lock_minutes, 15);
         assert!(!persisted.lock_on_background);
+        assert_eq!(persisted.last_successful_encrypted_backup_at_ms, None);
         assert!(update_device_settings_impl(&runtime, 2, true).is_err());
 
         let wrong = change_master_passphrase_impl(
@@ -6880,6 +7045,122 @@ mod tests {
         assert!(unlock_vault_impl(&runtime, PASSPHRASE.to_owned()).is_err());
         unlock_vault_impl(&runtime, "a new long local passphrase".to_owned())
             .expect("unlock with new passphrase");
+    }
+
+    #[test]
+    fn legacy_device_settings_without_backup_timestamp_preserve_lock_preferences() {
+        let directory = tempdir().expect("temp directory");
+        let settings_path = directory.path().join("device-settings.json");
+        fs::write(
+            &settings_path,
+            br#"{
+  "auto_lock_minutes": 30,
+  "lock_on_background": false
+}"#,
+        )
+        .expect("write legacy settings");
+
+        let settings = load_device_settings(&settings_path);
+        assert_eq!(settings.auto_lock_minutes, 30);
+        assert!(!settings.lock_on_background);
+        assert_eq!(settings.last_successful_encrypted_backup_at_ms, None);
+    }
+
+    #[test]
+    fn device_settings_recover_from_interrupted_install_journal() {
+        let directory = tempdir().expect("temp directory");
+        let settings_path = directory.path().join("device-settings.json");
+        let recovery_path = device_settings_recovery_path(&settings_path);
+        let expected = DeviceSettings {
+            auto_lock_minutes: 1,
+            lock_on_background: false,
+            last_successful_encrypted_backup_at_ms: Some(42),
+        };
+        fs::write(
+            &recovery_path,
+            serde_json::to_vec_pretty(&expected).expect("encode recovery settings"),
+        )
+        .expect("write recovery settings");
+        assert!(!settings_path.exists());
+
+        let recovered = load_device_settings(&settings_path);
+        assert_eq!(recovered.auto_lock_minutes, 1);
+        assert!(!recovered.lock_on_background);
+        assert_eq!(recovered.last_successful_encrypted_backup_at_ms, Some(42));
+        assert!(settings_path.exists());
+        let restored =
+            read_valid_device_settings(&settings_path).expect("restored canonical settings");
+        assert_eq!(restored.auto_lock_minutes, 1);
+        assert!(!restored.lock_on_background);
+        assert_eq!(restored.last_successful_encrypted_backup_at_ms, Some(42));
+
+        let updated = DeviceSettings {
+            auto_lock_minutes: 5,
+            lock_on_background: true,
+            last_successful_encrypted_backup_at_ms: Some(84),
+        };
+        persist_device_settings(&settings_path, recovered, updated)
+            .expect("mutate after recovery without destroying the journal chain");
+        let reloaded = load_device_settings(&settings_path);
+        assert_eq!(reloaded.auto_lock_minutes, 5);
+        assert!(reloaded.lock_on_background);
+        assert_eq!(reloaded.last_successful_encrypted_backup_at_ms, Some(84));
+    }
+
+    #[test]
+    fn device_settings_install_failure_does_not_advance_in_memory_settings() {
+        let (directory, mut runtime) = runtime();
+        initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
+        runtime.settings_path = directory.path().join("settings-install-blocker");
+        fs::create_dir(&runtime.settings_path).expect("create settings blocker directory");
+        let before = get_device_settings_impl(&runtime).expect("settings before failed install");
+
+        assert!(update_device_settings_impl(&runtime, 1, false).is_err());
+        let after = get_device_settings_impl(&runtime).expect("settings after failed install");
+        assert_eq!(after.auto_lock_minutes, before.auto_lock_minutes);
+        assert_eq!(after.lock_on_background, before.lock_on_background);
+        assert_eq!(
+            after.last_successful_encrypted_backup_at_ms,
+            before.last_successful_encrypted_backup_at_ms
+        );
+    }
+
+    #[test]
+    fn backup_creation_timestamp_merge_never_regresses() {
+        assert_eq!(monotonic_backup_creation_timestamp(None, 100), 100);
+        assert_eq!(monotonic_backup_creation_timestamp(Some(100), 200), 200);
+        assert_eq!(monotonic_backup_creation_timestamp(Some(200), 100), 200);
+    }
+
+    #[test]
+    fn lock_settings_update_preserves_recorded_backup_timestamp_across_restart() {
+        let (directory, runtime) = runtime();
+        initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
+        create_note_impl(&runtime, "Backup marker".to_owned(), "Body".to_owned())
+            .expect("create record");
+        let backup_path = directory.path().join("settings-preservation.sqlite3");
+        let after_backup =
+            backup_database_copy_impl(&runtime, backup_path.to_string_lossy().to_string())
+                .expect("create backup");
+        let recorded = after_backup
+            .settings
+            .expect("backup status recorded")
+            .last_successful_encrypted_backup_at_ms
+            .expect("backup timestamp recorded");
+
+        let updated =
+            update_device_settings_impl(&runtime, 30, false).expect("update lock settings");
+        assert_eq!(
+            updated.last_successful_encrypted_backup_at_ms,
+            Some(recorded)
+        );
+        let reloaded = load_device_settings(&runtime.settings_path);
+        assert_eq!(reloaded.auto_lock_minutes, 30);
+        assert!(!reloaded.lock_on_background);
+        assert_eq!(
+            reloaded.last_successful_encrypted_backup_at_ms,
+            Some(recorded)
+        );
     }
 
     #[test]
@@ -9355,6 +9636,12 @@ mod tests {
             export_human_readable_impl(&runtime, export_path.clone()).expect("export vault");
         assert_eq!(exported.path, export_path);
         assert!(exported.items >= 1);
+        assert_eq!(
+            get_device_settings_impl(&runtime)
+                .expect("settings after readable export")
+                .last_successful_encrypted_backup_at_ms,
+            None
+        );
         let bytes = fs::read(&export_path).expect("read export");
         let parsed: serde_json::Value =
             serde_json::from_slice(&bytes).expect("export is valid JSON");
@@ -9376,9 +9663,31 @@ mod tests {
             .join("backup.sqlite3")
             .to_string_lossy()
             .to_string();
+        let before_backup_ms = u64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock before backup")
+                .as_millis(),
+        )
+        .expect("backup time fits u64");
         let backed_up =
             backup_database_copy_impl(&runtime, backup_path.clone()).expect("backup database");
-        assert_eq!(backed_up.path, backup_path);
+        let after_backup_ms = u64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock after backup")
+                .as_millis(),
+        )
+        .expect("backup time fits u64");
+        let recorded_backup_ms = backed_up
+            .settings
+            .expect("backup status recorded")
+            .last_successful_encrypted_backup_at_ms
+            .expect("backup timestamp recorded");
+        assert!((before_backup_ms..=after_backup_ms).contains(&recorded_backup_ms));
+        let settings_text = fs::read_to_string(&runtime.settings_path).expect("read settings");
+        assert!(!settings_text.contains(&backup_path));
+        assert!(!settings_text.contains("backup.sqlite3"));
         let backup_bytes = fs::read(&backup_path).expect("read backup");
         assert!(!backup_bytes.is_empty());
         assert!(backup_bytes.len() >= 16);
@@ -9515,6 +9824,12 @@ mod tests {
             backup_error,
             "Choose a backup path other than the active Safeory database."
         );
+        assert_eq!(
+            get_device_settings_impl(&runtime)
+                .expect("settings after rejected backup")
+                .last_successful_encrypted_backup_at_ms,
+            None
+        );
 
         let bytes = fs::read(&database_path).expect("read live database after rejected exports");
         assert!(bytes.len() >= 16);
@@ -9554,6 +9869,12 @@ mod tests {
         assert!(!readable_destination.exists());
 
         let backup_destination = directory.path().join("stale-encrypted-backup.sqlite3");
+        assert_eq!(
+            get_device_settings_impl(&runtime)
+                .expect("settings before stale backup")
+                .last_successful_encrypted_backup_at_ms,
+            None
+        );
         assert!(
             backup_database_copy_impl_for_generation(
                 &runtime,
@@ -9563,6 +9884,44 @@ mod tests {
             .is_err()
         );
         assert!(!backup_destination.exists());
+        assert_eq!(
+            get_device_settings_impl(&runtime)
+                .expect("settings after stale backup")
+                .last_successful_encrypted_backup_at_ms,
+            None
+        );
+    }
+
+    #[test]
+    fn backup_status_persistence_failure_keeps_created_backup_and_old_status() {
+        let (directory, mut runtime) = runtime();
+        initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
+        create_note_impl(
+            &runtime,
+            "Partial success marker".to_owned(),
+            "Body".to_owned(),
+        )
+        .expect("create record");
+        runtime.settings_path = directory
+            .path()
+            .join("missing-settings-parent")
+            .join("device-settings.json");
+        let destination = directory.path().join("partial-success-backup.sqlite3");
+
+        let result = backup_database_copy_impl(&runtime, destination.to_string_lossy().to_string())
+            .expect("backup creation itself succeeds");
+        assert!(result.settings.is_none());
+        assert!(destination.exists());
+        VaultSession::unlock(&destination, PASSPHRASE)
+            .expect("published backup remains valid")
+            .validate_persisted_state()
+            .expect("published backup fully validates");
+        assert_eq!(
+            get_device_settings_impl(&runtime)
+                .expect("in-memory settings remain readable")
+                .last_successful_encrypted_backup_at_ms,
+            None
+        );
     }
 
     #[test]
@@ -9641,6 +10000,12 @@ mod tests {
         let (_target_directory, target) = runtime();
         initialize_vault_impl(&target, TARGET_PASSPHRASE.to_owned())
             .expect("initialize existing target vault");
+        update_device_settings_impl(&target, 30, false).expect("set target lock preferences");
+        let target_settings = mutate_device_settings(&target, |current| DeviceSettings {
+            last_successful_encrypted_backup_at_ms: Some(123_456_789),
+            ..current
+        })
+        .expect("seed target device backup activity");
         create_note_impl(
             &target,
             "Target-only record".to_owned(),
@@ -9656,6 +10021,18 @@ mod tests {
         .expect("restore encrypted backup");
         assert!(restored.initialized);
         assert!(!restored.unlocked);
+        assert_eq!(
+            get_device_settings_impl(&target)
+                .expect("device settings survive restore")
+                .last_successful_encrypted_backup_at_ms,
+            target_settings.last_successful_encrypted_backup_at_ms
+        );
+        assert_eq!(
+            get_device_settings_impl(&target)
+                .expect("lock settings survive restore")
+                .auto_lock_minutes,
+            30
+        );
         assert!(list_vault_items_impl(&target).is_err());
         assert!(unlock_vault_impl(&target, TARGET_PASSPHRASE.to_owned()).is_err());
         unlock_vault_impl(&target, PASSPHRASE.to_owned()).expect("unlock restored vault");

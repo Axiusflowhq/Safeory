@@ -42,6 +42,12 @@ type VaultStatus = {
 type DeviceSettings = {
   auto_lock_minutes: number;
   lock_on_background: boolean;
+  last_successful_encrypted_backup_at_ms?: number | null;
+};
+
+type BackupCreationResult = {
+  settings: DeviceSettings | null;
+  status_recorded: boolean;
 };
 
 type GeneratedRecoverySecret = {
@@ -2731,6 +2737,9 @@ function SettingsPanel({
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const restoreBlockedBySettingsOperation =
     savingSettings || changingPassphrase || recoveryBusy || backupBusy;
+  const lastBackupCreation = formatBackupCreationTime(
+    settings.last_successful_encrypted_backup_at_ms,
+  );
 
   dismissBlockedRef.current = restoreBusy || backupBusy;
 
@@ -2917,10 +2926,17 @@ function SettingsPanel({
     setBackupStatus(null);
     setBackupError(null);
     try {
-      const saved = await invoke<boolean>("backup_database_copy");
-      if (!saved) return;
+      const result = await invoke<BackupCreationResult | null>(
+        "backup_database_copy",
+      );
+      if (result === null) return;
       if (!isGenerationCurrent(generation)) return;
-      setBackupStatus("Encrypted database backup written successfully.");
+      if (result.settings !== null) onSettingsSaved(result.settings);
+      setBackupStatus(
+        result.status_recorded
+          ? "Encrypted database backup written successfully."
+          : "Encrypted database backup created successfully, but Safeory could not update this device’s backup-activity record. Safeory does not track the created file afterward.",
+      );
     } catch (reason) {
       if (isGenerationCurrent(generation)) setBackupError(readError(reason));
     } finally {
@@ -3411,6 +3427,33 @@ function SettingsPanel({
             the complete local vault, including attachments, Trash, tombstones,
             and recovery configuration.
           </p>
+          <div className="mt-4 rounded-2xl border border-[var(--border)] bg-[var(--surface-secondary)] p-4">
+            <div className="text-sm font-medium text-[var(--text-primary)]">
+              Last recorded successful encrypted backup creation on this device
+            </div>
+            {settings.last_successful_encrypted_backup_at_ms === undefined ? (
+              <p className="mt-1 text-sm text-[var(--text-secondary)]">
+                Loading device backup activity…
+              </p>
+            ) : lastBackupCreation ? (
+              <p className="mt-1 text-sm text-[var(--text-secondary)]">
+                <time dateTime={lastBackupCreation.iso}>
+                  {lastBackupCreation.label}
+                </time>
+              </p>
+            ) : (
+              <p className="mt-1 text-sm text-[var(--text-secondary)]">
+                No successful encrypted backup creation has been recorded on
+                this device.
+              </p>
+            )}
+            <p className="mt-2 text-xs leading-5 text-[var(--text-muted)]">
+              Recorded only after Safeory successfully writes and validates an
+              encrypted backup. Safeory does not track the saved file afterward,
+              so it may have been moved or deleted and may not include later
+              vault changes.
+            </p>
+          </div>
           <div className="mt-4 flex flex-wrap gap-2">
             <button
               type="button"
@@ -3472,8 +3515,9 @@ function SettingsPanel({
                 </div>
                 <p className="mt-1 text-xs leading-5 text-[var(--text-muted)]">
                   Safeory validates the selected backup before atomically
-                  replacing encrypted vault data. Device-only lock settings are
-                  kept. A successful restore ends locked.
+                  replacing encrypted vault data. Device-only settings,
+                  including backup activity, are kept. A successful restore ends
+                  locked.
                 </p>
               </div>
             </div>
@@ -9665,6 +9709,18 @@ function itemPreview(item: VaultItem) {
     );
   }
   return item.provider || item.plan || item.next_renewal || "Subscription";
+}
+
+function formatBackupCreationTime(timestampMs: number | null | undefined) {
+  if (timestampMs == null || !Number.isFinite(timestampMs) || timestampMs < 0) {
+    return null;
+  }
+  const date = new Date(timestampMs);
+  if (Number.isNaN(date.getTime())) return null;
+  return {
+    iso: date.toISOString(),
+    label: date.toLocaleString(),
+  };
 }
 
 function receiptTrackingLabel(status: string) {
