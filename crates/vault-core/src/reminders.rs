@@ -105,6 +105,7 @@ pub fn civil_from_days(z: i64) -> (i32, u32, u32) {
 /// - `Receipt` → `return_by` ("Return deadline") or `refund_due` ("Refund due")
 /// - `Vehicle` → `renewal` ("Vehicle renewal")
 /// - `Possession` → `warranty_expiry` ("Warranty expiry")
+/// - `Subscription` → `next_renewal` ("Subscription renewal")
 ///
 /// Items with missing, empty, or unparseable dates are skipped.
 /// Results are sorted ascending by `(days_until, title, item_id)` with no
@@ -130,6 +131,7 @@ pub fn collect_deadlines(items: &[VaultItem], today: (i32, u32, u32)) -> Vec<Dea
             }
             ItemKind::Vehicle => ("renewal", "Vehicle renewal"),
             ItemKind::Possession => ("warranty_expiry", "Warranty expiry"),
+            ItemKind::Subscription => ("next_renewal", "Subscription renewal"),
             _ => continue,
         };
         let raw = item.fields.get(field).map_or("", String::as_str);
@@ -358,6 +360,25 @@ mod tests {
         assert_eq!(days_since_civil(1970, 1, 1), 0);
         assert_eq!(days_since_civil(1970, 1, 2), 1);
         assert_eq!(days_since_civil(1969, 12, 31), -1);
+    }
+
+    #[test]
+    fn subscription_renewal_is_a_deadline() {
+        let subscription = VaultItem::subscription(
+            "Streaming",
+            "Provider",
+            "Standard",
+            "9.99",
+            "USD",
+            "monthly",
+            "2024-05-12",
+            "",
+        );
+        let deadlines = collect_deadlines(&[subscription], today());
+        assert_eq!(deadlines.len(), 1);
+        assert_eq!(deadlines[0].label, "Subscription renewal");
+        assert_eq!(deadlines[0].date, "2024-05-12");
+        assert_eq!(deadlines[0].days_until, 2);
     }
 
     #[test]

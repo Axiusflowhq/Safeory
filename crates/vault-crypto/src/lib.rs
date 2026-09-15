@@ -29,10 +29,42 @@ const RECOVERY_WRAP_INFO: &[u8] = b"safeory:v1:recovery-wrap";
 const RECOVERY_WRAP_AAD: &[u8] = b"safeory:recovery-wrap:v1";
 
 #[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PreSubscriptionItemKind {
+    SecureNote,
+    Password,
+    Insurance,
+    Financial,
+    Property,
+    Document,
+    Receipt,
+    Vehicle,
+    Possession,
+    EmergencyInstruction,
+}
+
+impl From<PreSubscriptionItemKind> for ItemKind {
+    fn from(kind: PreSubscriptionItemKind) -> Self {
+        match kind {
+            PreSubscriptionItemKind::SecureNote => Self::SecureNote,
+            PreSubscriptionItemKind::Password => Self::Password,
+            PreSubscriptionItemKind::Insurance => Self::Insurance,
+            PreSubscriptionItemKind::Financial => Self::Financial,
+            PreSubscriptionItemKind::Property => Self::Property,
+            PreSubscriptionItemKind::Document => Self::Document,
+            PreSubscriptionItemKind::Receipt => Self::Receipt,
+            PreSubscriptionItemKind::Vehicle => Self::Vehicle,
+            PreSubscriptionItemKind::Possession => Self::Possession,
+            PreSubscriptionItemKind::EmergencyInstruction => Self::EmergencyInstruction,
+        }
+    }
+}
+
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PreDispositionVaultItem {
     id: Uuid,
-    kind: ItemKind,
+    kind: PreSubscriptionItemKind,
     title: String,
     #[serde(default)]
     links: Vec<Uuid>,
@@ -54,7 +86,7 @@ impl From<PreDispositionVaultItem> for VaultItem {
     fn from(item: PreDispositionVaultItem) -> Self {
         Self {
             id: item.id,
-            kind: item.kind,
+            kind: item.kind.into(),
             title: item.title,
             links: item.links,
             attachments: item.attachments,
@@ -70,7 +102,7 @@ impl From<PreDispositionVaultItem> for VaultItem {
 #[serde(deny_unknown_fields)]
 struct PreClosureVaultItem {
     id: Uuid,
-    kind: ItemKind,
+    kind: PreSubscriptionItemKind,
     title: String,
     links: Vec<Uuid>,
     attachments: Vec<Uuid>,
@@ -84,7 +116,7 @@ impl From<PreClosureVaultItem> for VaultItem {
     fn from(item: PreClosureVaultItem) -> Self {
         Self {
             id: item.id,
-            kind: item.kind,
+            kind: item.kind.into(),
             title: item.title,
             links: item.links,
             attachments: item.attachments,
@@ -1384,6 +1416,99 @@ mod tests {
             LegacyDisposition::PrivateForever
         );
         assert_eq!(restored.account_closure_plan, item.account_closure_plan);
+    }
+
+    #[test]
+    fn subscription_uses_existing_strict_payload_v5_shape() {
+        let root = AccountRootKey::generate().expect("root key");
+        let item = VaultItem::subscription(
+            "Streaming",
+            "Example Media",
+            "Family",
+            "19.99",
+            "USD",
+            "monthly",
+            "2026-10-15",
+            "local tracking only",
+        );
+
+        let encrypted = encrypt_item(&root, &item, 1).expect("encrypt subscription payload");
+        assert_eq!(
+            encrypted.payload_schema_version,
+            ITEM_PAYLOAD_SCHEMA_VERSION
+        );
+        assert_eq!(ITEM_PAYLOAD_SCHEMA_VERSION, 5);
+        let restored = decrypt_item(&root, &encrypted).expect("decrypt subscription payload");
+        assert_eq!(restored.kind, ItemKind::Subscription);
+        assert_eq!(restored.fields, item.fields);
+        assert_eq!(restored.notes, item.notes);
+    }
+
+    #[test]
+    fn legacy_item_payload_schemas_reject_subscription_kind() {
+        let root = AccountRootKey::generate().expect("root key");
+        for schema_version in [
+            LEGACY_ITEM_PAYLOAD_SCHEMA_VERSION,
+            LIFECYCLE_ITEM_PAYLOAD_SCHEMA_VERSION,
+            ATTACHMENT_ITEM_PAYLOAD_SCHEMA_VERSION,
+            LEGACY_DISPOSITION_ITEM_PAYLOAD_SCHEMA_VERSION,
+        ] {
+            let object_id = Uuid::new_v4();
+            let item = match schema_version {
+                LEGACY_ITEM_PAYLOAD_SCHEMA_VERSION => serde_json::json!({
+                    "id": object_id,
+                    "kind": "subscription",
+                    "title": "impossible legacy subscription",
+                    "fields": {},
+                    "notes": null
+                }),
+                LIFECYCLE_ITEM_PAYLOAD_SCHEMA_VERSION => serde_json::json!({
+                    "state": "active",
+                    "item": {
+                        "id": object_id,
+                        "kind": "subscription",
+                        "title": "impossible legacy subscription",
+                        "links": [],
+                        "fields": {},
+                        "notes": null
+                    }
+                }),
+                ATTACHMENT_ITEM_PAYLOAD_SCHEMA_VERSION => serde_json::json!({
+                    "state": "active",
+                    "item": {
+                        "id": object_id,
+                        "kind": "subscription",
+                        "title": "impossible legacy subscription",
+                        "links": [],
+                        "attachments": [],
+                        "fields": {},
+                        "notes": null
+                    }
+                }),
+                LEGACY_DISPOSITION_ITEM_PAYLOAD_SCHEMA_VERSION => serde_json::json!({
+                    "state": "active",
+                    "item": {
+                        "id": object_id,
+                        "kind": "subscription",
+                        "title": "impossible legacy subscription",
+                        "links": [],
+                        "attachments": [],
+                        "legacy_disposition": "unspecified",
+                        "fields": {},
+                        "notes": null
+                    }
+                }),
+                _ => unreachable!(),
+            };
+            let plaintext = serde_json::to_vec(&item).expect("serialize legacy payload");
+            let encrypted = encrypt_payload(&root, object_id, &plaintext, 1, schema_version)
+                .expect("encrypt legacy payload");
+
+            assert!(
+                decrypt_item_state(&root, &encrypted).is_err(),
+                "legacy schema {schema_version} unexpectedly accepted subscription"
+            );
+        }
     }
 
     #[test]

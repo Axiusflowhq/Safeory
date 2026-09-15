@@ -252,6 +252,22 @@ type PossessionDetailView = {
   notes: string;
 };
 
+type SubscriptionView = {
+  id: string;
+  revision: number;
+  title: string;
+  provider: string;
+  plan: string;
+  amount: string;
+  currency: string;
+  billing_cycle: string;
+  next_renewal: string;
+  notes: string;
+  links: string[];
+};
+
+type SubscriptionDetailView = Omit<SubscriptionView, "links">;
+
 type VaultItem =
   | ({ kind: "secure_note" } & NoteView)
   | ({ kind: "password" } & CredentialView)
@@ -261,7 +277,8 @@ type VaultItem =
   | ({ kind: "financial" } & FinancialView)
   | ({ kind: "property" } & PropertyView)
   | ({ kind: "vehicle" } & VehicleView)
-  | ({ kind: "possession" } & PossessionView);
+  | ({ kind: "possession" } & PossessionView)
+  | ({ kind: "subscription" } & SubscriptionView);
 
 type Section =
   | "secure_note"
@@ -272,7 +289,8 @@ type Section =
   | "financial"
   | "property"
   | "vehicle"
-  | "possession";
+  | "possession"
+  | "subscription";
 type Screen = "loading" | "setup" | "locked" | "vault";
 type EditorState =
   | { kind: "secure_note"; item: NoteView | null }
@@ -283,7 +301,8 @@ type EditorState =
   | { kind: "financial"; item: FinancialView | null }
   | { kind: "property"; item: PropertyView | null }
   | { kind: "vehicle"; item: VehicleView | null }
-  | { kind: "possession"; item: PossessionView | null };
+  | { kind: "possession"; item: PossessionView | null }
+  | { kind: "subscription"; item: SubscriptionView | null };
 
 type TrashedItemView = {
   id: string;
@@ -448,6 +467,16 @@ type ItemHistoryDetail =
       warranty_expiry: string;
       notes: string;
       has_serial_number: boolean;
+    } & ItemHistoryBase)
+  | ({
+      kind: "subscription";
+      provider: string;
+      plan: string;
+      amount: string;
+      currency: string;
+      billing_cycle: string;
+      next_renewal: string;
+      notes: string;
     } & ItemHistoryBase);
 
 type ItemHistorySensitiveField =
@@ -816,6 +845,9 @@ export default function App() {
   const possessionCount = items.filter(
     (item) => item.kind === "possession",
   ).length;
+  const subscriptionCount = items.filter(
+    (item) => item.kind === "subscription",
+  ).length;
   const selected = items.find((item) => item.id === selectedId) ?? null;
   const needle = query.trim().toLocaleLowerCase();
   const visibleItems = items.filter(
@@ -1010,8 +1042,10 @@ export default function App() {
       setEditor({ kind: "property", item: null });
     } else if (section === "vehicle") {
       setEditor({ kind: "vehicle", item: null });
-    } else {
+    } else if (section === "possession") {
       setEditor({ kind: "possession", item: null });
+    } else {
+      setEditor({ kind: "subscription", item: null });
     }
   };
 
@@ -1199,6 +1233,9 @@ export default function App() {
                 <option value="vehicle">Vehicles ({vehicleCount})</option>
                 <option value="possession">
                   Possessions ({possessionCount})
+                </option>
+                <option value="subscription">
+                  Subscriptions ({subscriptionCount})
                 </option>
               </select>
             </label>
@@ -1455,6 +1492,22 @@ export default function App() {
               }
               onError={setError}
             />
+          ) : editor?.kind === "subscription" ? (
+            <SubscriptionComposer
+              key={`subscription:${editor.item?.id ?? "new"}`}
+              subscription={editor.item}
+              generation={sessionFence.token()}
+              isGenerationCurrent={isSessionGenerationCurrent}
+              onCancel={() => setEditor(null)}
+              onSaved={(subscription, created, token) =>
+                saveItem(
+                  token,
+                  { kind: "subscription", ...subscription },
+                  created,
+                )
+              }
+              onError={setError}
+            />
           ) : selected?.kind === "secure_note" ? (
             <NoteReader
               key={selected.id}
@@ -1626,6 +1679,28 @@ export default function App() {
                 if (!canLeaveSelectedRecord()) return;
                 setError(null);
                 setEditor({ kind: "possession", item: withoutKind(selected) });
+              }}
+              onError={setError}
+            />
+          ) : selected?.kind === "subscription" ? (
+            <SubscriptionReader
+              key={selected.id}
+              subscription={selected}
+              linkedTitles={linkedTitles}
+              allItems={items}
+              onJump={jumpToRecord}
+              onLinksChanged={handleRecordSupportChanged}
+              supportMutationBusy={recordSupportMutationBusy}
+              onSupportMutationBusyChange={setRecordSupportMutationBusy}
+              generation={sessionFence.token()}
+              isGenerationCurrent={isSessionGenerationCurrent}
+              onEdit={() => {
+                if (!canLeaveSelectedRecord()) return;
+                setError(null);
+                setEditor({
+                  kind: "subscription",
+                  item: withoutKind(selected),
+                });
               }}
               onError={setError}
             />
@@ -5140,6 +5215,197 @@ function PossessionComposer({
   );
 }
 
+function SubscriptionComposer({
+  subscription,
+  generation,
+  isGenerationCurrent,
+  onCancel,
+  onSaved,
+  onError,
+}: {
+  subscription: SubscriptionView | null;
+  generation: number;
+  isGenerationCurrent: (generation: number) => boolean;
+  onCancel: () => void;
+  onSaved: (
+    subscription: SubscriptionView,
+    created: boolean,
+    generation: number,
+  ) => void;
+  onError: (message: string | null) => void;
+}) {
+  const [title, setTitle] = useState(subscription?.title ?? "");
+  const [provider, setProvider] = useState(subscription?.provider ?? "");
+  const [plan, setPlan] = useState(subscription?.plan ?? "");
+  const [amount, setAmount] = useState(subscription?.amount ?? "");
+  const [currency, setCurrency] = useState(subscription?.currency ?? "");
+  const [billingCycle, setBillingCycle] = useState(
+    subscription?.billing_cycle ?? "",
+  );
+  const [nextRenewal, setNextRenewal] = useState(
+    subscription?.next_renewal ?? "",
+  );
+  const [notes, setNotes] = useState(subscription?.notes ?? "");
+  const [saving, setSaving] = useState(false);
+  const editing = subscription !== null;
+  const [detailReady, setDetailReady] = useState(!editing);
+
+  useEffect(() => {
+    if (!subscription) return;
+    let active = true;
+    void invoke<SubscriptionDetailView>("get_subscription", {
+      id: subscription.id,
+      revision: subscription.revision,
+    })
+      .then((detail) => {
+        if (!active || !isGenerationCurrent(generation)) return;
+        setProvider(detail.provider);
+        setPlan(detail.plan);
+        setAmount(detail.amount);
+        setCurrency(detail.currency);
+        setBillingCycle(detail.billing_cycle);
+        setNextRenewal(detail.next_renewal);
+        setNotes(detail.notes);
+        setDetailReady(true);
+      })
+      .catch((reason: unknown) => {
+        if (active && isGenerationCurrent(generation))
+          onError(readError(reason));
+      });
+    return () => {
+      active = false;
+    };
+  }, [subscription, generation, isGenerationCurrent, onError]);
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (!title.trim() || !detailReady) return;
+    setSaving(true);
+    onError(null);
+    try {
+      const input = {
+        title,
+        provider,
+        plan,
+        amount,
+        currency,
+        billingCycle,
+        nextRenewal,
+        notes,
+      };
+      const saved = editing
+        ? await invoke<SubscriptionView>("update_subscription", {
+            id: subscription.id,
+            revision: subscription.revision,
+            ...input,
+          })
+        : await invoke<SubscriptionView>("create_subscription", input);
+      onSaved(saved, !editing, generation);
+    } catch (reason) {
+      if (isGenerationCurrent(generation)) onError(readError(reason));
+    } finally {
+      if (isGenerationCurrent(generation)) setSaving(false);
+    }
+  }
+
+  return (
+    <EditorFrame
+      title={editing ? "Edit subscription" : "New subscription"}
+      onCancel={onCancel}
+    >
+      <form onSubmit={submit} autoComplete="off">
+        <input
+          autoFocus
+          value={title}
+          onChange={(event) => setTitle(event.target.value)}
+          placeholder="Streaming, software, membershipâ€¦"
+          aria-label="Subscription title"
+          className="editor-title"
+        />
+        <div className="mt-8 grid gap-5 sm:grid-cols-2">
+          <Field label="Provider">
+            <input
+              value={provider}
+              onChange={(event) => setProvider(event.target.value)}
+              className="field-input"
+              placeholder="Service or company"
+            />
+          </Field>
+          <Field label="Plan">
+            <input
+              value={plan}
+              onChange={(event) => setPlan(event.target.value)}
+              className="field-input"
+              placeholder="Family, Pro, Annualâ€¦"
+            />
+          </Field>
+        </div>
+        <div className="mt-5 grid gap-5 sm:grid-cols-2">
+          <Field label="Amount">
+            <input
+              value={amount}
+              onChange={(event) => setAmount(event.target.value)}
+              className="field-input"
+              placeholder="19.99"
+              inputMode="decimal"
+            />
+          </Field>
+          <Field label="Currency">
+            <input
+              value={currency}
+              onChange={(event) => setCurrency(event.target.value)}
+              className="field-input"
+              placeholder="USD, INRâ€¦"
+            />
+          </Field>
+        </div>
+        <div className="mt-5 grid gap-5 sm:grid-cols-2">
+          <Field label="Billing cycle">
+            <select
+              value={billingCycle}
+              onChange={(event) => setBillingCycle(event.target.value)}
+              className="field-input"
+            >
+              <option value="">Not set</option>
+              <option value="monthly">Monthly</option>
+              <option value="quarterly">Quarterly</option>
+              <option value="yearly">Yearly</option>
+              <option value="custom">Custom</option>
+            </select>
+          </Field>
+          <Field label="Next renewal">
+            <input
+              type="date"
+              value={nextRenewal}
+              onChange={(event) => setNextRenewal(event.target.value)}
+              className="field-input"
+            />
+          </Field>
+        </div>
+        <div className="mt-5">
+          <Field label="Notes">
+            <textarea
+              value={notes}
+              onChange={(event) => setNotes(event.target.value)}
+              className="field-input min-h-28 resize-y"
+              placeholder="Cancellation notes or other private context"
+            />
+          </Field>
+        </div>
+        <p className="mt-5 text-xs leading-5 text-[var(--text-muted)]">
+          Safeory tracks this locally. It does not contact the provider, charge
+          a payment method, or cancel the subscription.
+        </p>
+        <EditorFooter
+          saving={saving}
+          disabled={!title.trim() || !detailReady}
+          action={editing ? "Save changes" : "Save subscription"}
+        />
+      </form>
+    </EditorFrame>
+  );
+}
+
 type RevisionMutationCoordinator = {
   revision: number;
   mutationBusy: boolean;
@@ -5715,6 +5981,22 @@ function ItemHistorySnapshot({
         present: detail.has_serial_number,
         monospace: true,
       });
+      notes = detail.notes;
+      break;
+    case "subscription":
+      rows.push(
+        { label: "Provider", value: detail.provider },
+        { label: "Plan", value: detail.plan },
+        {
+          label: "Amount",
+          value: [detail.amount, detail.currency].filter(Boolean).join(" "),
+        },
+        {
+          label: "Billing cycle",
+          value: subscriptionBillingCycleLabel(detail.billing_cycle),
+        },
+        { label: "Next renewal", value: detail.next_renewal },
+      );
       notes = detail.notes;
       break;
   }
@@ -7924,6 +8206,90 @@ function PossessionReader({
   );
 }
 
+function SubscriptionReader({
+  subscription,
+  generation,
+  isGenerationCurrent,
+  linkedTitles,
+  allItems,
+  onJump,
+  onLinksChanged,
+  supportMutationBusy,
+  onSupportMutationBusyChange,
+  onEdit,
+  onError,
+}: {
+  subscription: SubscriptionView;
+  generation: number;
+  isGenerationCurrent: (generation: number) => boolean;
+  onEdit: () => void;
+  onError: (message: string | null) => void;
+} & LinkedSectionProps) {
+  return (
+    <article className="mx-auto max-w-3xl px-8 py-12">
+      <ReaderHeader
+        icon={FileTextIcon}
+        label="Subscription"
+        onEdit={onEdit}
+        editDisabled={supportMutationBusy}
+      />
+      <h1 className="text-3xl font-semibold tracking-[-0.035em]">
+        {subscription.title}
+      </h1>
+      <div className="mt-8 overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface-secondary)]">
+        <CredentialRow
+          label="Provider"
+          value={subscription.provider || "Not set"}
+        />
+        <CredentialRow label="Plan" value={subscription.plan || "Not set"} />
+        <CredentialRow
+          label="Amount"
+          value={
+            [subscription.amount, subscription.currency]
+              .filter(Boolean)
+              .join(" ") || "Not set"
+          }
+        />
+        <CredentialRow
+          label="Billing cycle"
+          value={subscriptionBillingCycleLabel(subscription.billing_cycle)}
+        />
+        <CredentialRow
+          label="Next renewal"
+          value={subscription.next_renewal || "Not set"}
+        />
+      </div>
+      {subscription.notes ? (
+        <div className="mt-8">
+          <div className="text-xs font-medium uppercase tracking-[0.12em] text-[var(--text-muted)]">
+            Notes
+          </div>
+          <div className="mt-3 whitespace-pre-wrap text-[15px] leading-7 text-[var(--text-secondary)]">
+            {subscription.notes}
+          </div>
+        </div>
+      ) : null}
+      <p className="mt-6 text-xs leading-5 text-[var(--text-muted)]">
+        Tracking only. Safeory does not contact the provider, charge a payment
+        method, or cancel this subscription.
+      </p>
+      <RecordSupportSections
+        itemId={subscription.id}
+        revision={subscription.revision}
+        links={subscription.links ?? []}
+        onMutationBusyChange={onSupportMutationBusyChange}
+        generation={generation}
+        isGenerationCurrent={isGenerationCurrent}
+        linkedTitles={linkedTitles}
+        allItems={allItems}
+        onJump={onJump}
+        onChanged={onLinksChanged}
+        onError={onError}
+      />
+    </article>
+  );
+}
+
 function ReaderHeader({
   icon,
   label,
@@ -8319,7 +8685,8 @@ function sectionLabel(section: Section) {
   if (section === "financial") return "Financial";
   if (section === "property") return "Property";
   if (section === "vehicle") return "Vehicles";
-  return "Possessions";
+  if (section === "possession") return "Possessions";
+  return "Subscriptions";
 }
 
 function newItemLabel(section: Section) {
@@ -8331,7 +8698,8 @@ function newItemLabel(section: Section) {
   if (section === "financial") return "New financial record";
   if (section === "property") return "New property";
   if (section === "vehicle") return "New vehicle";
-  return "New possession";
+  if (section === "possession") return "New possession";
+  return "New subscription";
 }
 
 function sectionIcon(section: Section) {
@@ -8343,7 +8711,8 @@ function sectionIcon(section: Section) {
   if (section === "financial") return BankIcon;
   if (section === "property") return Building03Icon;
   if (section === "vehicle") return Car01Icon;
-  return PackageIcon;
+  if (section === "possession") return PackageIcon;
+  return FileTextIcon;
 }
 
 const SECTION_ORDER: Section[] = [
@@ -8356,6 +8725,7 @@ const SECTION_ORDER: Section[] = [
   "property",
   "vehicle",
   "possession",
+  "subscription",
 ];
 
 function kindToSection(kind: string): Section | null {
@@ -8368,7 +8738,8 @@ function kindToSection(kind: string): Section | null {
     kind === "financial" ||
     kind === "property" ||
     kind === "vehicle" ||
-    kind === "possession"
+    kind === "possession" ||
+    kind === "subscription"
   ) {
     return kind;
   }
@@ -8409,6 +8780,7 @@ function EmptyVault({
   const financial = section === "financial";
   const property = section === "property";
   const vehicle = section === "vehicle";
+  const possession = section === "possession";
   return (
     <div className="grid min-h-[calc(100vh-13rem)] place-items-center px-8">
       <div className="max-w-sm text-center">
@@ -8431,7 +8803,9 @@ function EmptyVault({
                             ? Building03Icon
                             : vehicle
                               ? Car01Icon
-                              : PackageIcon
+                              : possession
+                                ? PackageIcon
+                                : FileTextIcon
             }
             className="size-5"
             aria-hidden="true"
@@ -8456,7 +8830,9 @@ function EmptyVault({
                           ? "No property records yet"
                           : vehicle
                             ? "No vehicle records yet"
-                            : "No possession records yet"}
+                            : possession
+                              ? "No possession records yet"
+                              : "No subscriptions yet"}
         </h1>
         <p className="mt-2 text-sm leading-6 text-[var(--text-muted)]">
           {browserPreview
@@ -8477,7 +8853,9 @@ function EmptyVault({
                           ? "Store property metadata locally while keeping addresses and property references hidden until you reveal them."
                           : vehicle
                             ? "Store vehicle details locally with registration numbers and VINs hidden until you reveal them."
-                            : "Store possession details locally with serial numbers hidden until you reveal them."}
+                            : possession
+                              ? "Store possession details locally with serial numbers hidden until you reveal them."
+                              : "Track subscriptions locally with billing context and renewal dates. Safeory does not contact providers or process payments."}
         </p>
       </div>
     </div>
@@ -8513,6 +8891,7 @@ async function fetchVaultItems() {
   const firstProperty = sorted.find((item) => item.kind === "property");
   const firstVehicle = sorted.find((item) => item.kind === "vehicle");
   const firstPossession = sorted.find((item) => item.kind === "possession");
+  const firstSubscription = sorted.find((item) => item.kind === "subscription");
   const initialSection: Section = firstNote
     ? "secure_note"
     : firstCredential
@@ -8531,7 +8910,9 @@ async function fetchVaultItems() {
                   ? "vehicle"
                   : firstPossession
                     ? "possession"
-                    : "secure_note";
+                    : firstSubscription
+                      ? "subscription"
+                      : "secure_note";
   return {
     items: sorted,
     initialSection,
@@ -8586,6 +8967,17 @@ function itemMatchesSearch(item: VaultItem, needle: string) {
       (value) => value.toLocaleLowerCase().includes(needle),
     );
   }
+  if (item.kind === "subscription") {
+    return [
+      item.provider,
+      item.plan,
+      item.amount,
+      item.currency,
+      item.billing_cycle,
+      item.next_renewal,
+      item.notes,
+    ].some((value) => value.toLocaleLowerCase().includes(needle));
+  }
   return [
     item.brand,
     item.model,
@@ -8614,7 +9006,9 @@ function itemPreview(item: VaultItem) {
     return item.property_type || item.ownership || "Property";
   if (item.kind === "vehicle")
     return item.make || item.model || item.year || "Vehicle";
-  return item.brand || item.model || item.store || "Possession";
+  if (item.kind === "possession")
+    return item.brand || item.model || item.store || "Possession";
+  return item.provider || item.plan || item.next_renewal || "Subscription";
 }
 
 function receiptTrackingLabel(status: string) {
@@ -8624,6 +9018,14 @@ function receiptTrackingLabel(status: string) {
   if (status === "refund_pending") return "Refund pending";
   if (status === "refunded") return "Refunded";
   return "Not tracking";
+}
+
+function subscriptionBillingCycleLabel(cycle: string) {
+  if (cycle === "monthly") return "Monthly";
+  if (cycle === "quarterly") return "Quarterly";
+  if (cycle === "yearly") return "Yearly";
+  if (cycle === "custom") return "Custom";
+  return "Not set";
 }
 
 function withoutKind<T extends VaultItem>(item: T): Omit<T, "kind"> {
@@ -8705,6 +9107,9 @@ function collectTodayEntries(items: VaultItem[]): TodayEntry[] {
     } else if (item.kind === "possession") {
       date = item.warranty_expiry;
       label = "Warranty expiry";
+    } else if (item.kind === "subscription") {
+      date = item.next_renewal;
+      label = "Subscription renewal";
     } else {
       continue;
     }

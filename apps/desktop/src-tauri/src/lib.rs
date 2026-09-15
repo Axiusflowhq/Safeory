@@ -612,6 +612,35 @@ struct PossessionDetailView {
 }
 
 #[derive(serde::Serialize)]
+struct SubscriptionView {
+    id: String,
+    revision: u64,
+    title: String,
+    provider: String,
+    plan: String,
+    amount: String,
+    currency: String,
+    billing_cycle: String,
+    next_renewal: String,
+    notes: String,
+    links: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+struct SubscriptionDetailView {
+    id: String,
+    revision: u64,
+    title: String,
+    provider: String,
+    plan: String,
+    amount: String,
+    currency: String,
+    billing_cycle: String,
+    next_renewal: String,
+    notes: String,
+}
+
+#[derive(serde::Serialize)]
 struct TrashedItemView {
     id: String,
     revision: u64,
@@ -720,6 +749,19 @@ enum VaultItemView {
         warranty_expiry: String,
         notes: String,
         has_serial_number: bool,
+        links: Vec<String>,
+    },
+    Subscription {
+        id: String,
+        revision: u64,
+        title: String,
+        provider: String,
+        plan: String,
+        amount: String,
+        currency: String,
+        billing_cycle: String,
+        next_renewal: String,
+        notes: String,
         links: Vec<String>,
     },
 }
@@ -933,6 +975,19 @@ enum ItemHistoryDetailView {
         warranty_expiry: String,
         notes: String,
         has_serial_number: bool,
+        support: ItemHistorySupportView,
+    },
+    Subscription {
+        id: String,
+        revision: u64,
+        title: String,
+        provider: String,
+        plan: String,
+        amount: String,
+        currency: String,
+        billing_cycle: String,
+        next_renewal: String,
+        notes: String,
         support: ItemHistorySupportView,
     },
 }
@@ -1574,6 +1629,71 @@ fn update_possession(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn create_subscription(
+    state: State<'_, VaultRuntime>,
+    title: String,
+    provider: String,
+    plan: String,
+    amount: String,
+    currency: String,
+    billing_cycle: String,
+    next_renewal: String,
+    notes: String,
+) -> Result<SubscriptionView, String> {
+    create_subscription_impl(
+        &state,
+        title,
+        provider,
+        plan,
+        amount,
+        currency,
+        billing_cycle,
+        next_renewal,
+        notes,
+    )
+}
+
+#[tauri::command]
+fn get_subscription(
+    state: State<'_, VaultRuntime>,
+    id: String,
+    revision: u64,
+) -> Result<SubscriptionDetailView, String> {
+    get_subscription_impl(&state, id, revision)
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn update_subscription(
+    state: State<'_, VaultRuntime>,
+    id: String,
+    revision: u64,
+    title: String,
+    provider: String,
+    plan: String,
+    amount: String,
+    currency: String,
+    billing_cycle: String,
+    next_renewal: String,
+    notes: String,
+) -> Result<SubscriptionView, String> {
+    update_subscription_impl(
+        &state,
+        id,
+        revision,
+        title,
+        provider,
+        plan,
+        amount,
+        currency,
+        billing_cycle,
+        next_renewal,
+        notes,
+    )
+}
+
+#[tauri::command]
 fn get_emergency_card(state: State<'_, VaultRuntime>) -> Result<Option<EmergencyCardView>, String> {
     get_emergency_card_impl(&state)
 }
@@ -2167,6 +2287,22 @@ fn list_vault_items_impl(state: &VaultRuntime) -> Result<Vec<VaultItemView>, Str
                     notes: possession.notes,
                     has_serial_number: possession.has_serial_number,
                     links: possession.links,
+                });
+            }
+            ItemKind::Subscription => {
+                let subscription = subscription_view(item, revision)?;
+                views.push(VaultItemView::Subscription {
+                    id: subscription.id,
+                    revision: subscription.revision,
+                    title: subscription.title,
+                    provider: subscription.provider,
+                    plan: subscription.plan,
+                    amount: subscription.amount,
+                    currency: subscription.currency,
+                    billing_cycle: subscription.billing_cycle,
+                    next_renewal: subscription.next_renewal,
+                    notes: subscription.notes,
+                    links: subscription.links,
                 });
             }
             ItemKind::EmergencyInstruction => {
@@ -3288,6 +3424,136 @@ fn update_possession_impl(
             other => safe_vault_error(other),
         })?;
     possession_view(item, revision)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_subscription_impl(
+    state: &VaultRuntime,
+    title: String,
+    provider: String,
+    plan: String,
+    amount: String,
+    currency: String,
+    billing_cycle: String,
+    next_renewal: String,
+    notes: String,
+) -> Result<SubscriptionView, String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("A subscription title is required.".to_owned());
+    }
+    validate_subscription_billing_cycle(&billing_cycle)?;
+    validate_optional_date("Next renewal", &next_renewal)?;
+    let session = lock_session(state)?;
+    let session = session
+        .as_ref()
+        .ok_or_else(|| "Unlock the vault before creating a subscription.".to_owned())?;
+    let item = VaultItem::subscription(
+        title,
+        provider,
+        plan,
+        amount,
+        currency,
+        billing_cycle,
+        next_renewal,
+        notes,
+    );
+    session.put_item(&item, 1).map_err(safe_vault_error)?;
+    subscription_view(item, 1)
+}
+
+fn get_subscription_impl(
+    state: &VaultRuntime,
+    id: String,
+    revision: u64,
+) -> Result<SubscriptionDetailView, String> {
+    let id = id
+        .parse()
+        .map_err(|_| "The subscription identifier is invalid.".to_owned())?;
+    let session = lock_session(state)?;
+    let session = session
+        .as_ref()
+        .ok_or_else(|| "Unlock the vault before reading a subscription.".to_owned())?;
+    let (item, current_revision) = session
+        .get_item_with_revision(id)
+        .map_err(safe_vault_error)?;
+    if current_revision != revision {
+        return Err(
+            "This subscription changed since you opened it. Reload it before continuing."
+                .to_owned(),
+        );
+    }
+    if item.kind != ItemKind::Subscription {
+        return Err("Only subscription records can be opened from this view.".to_owned());
+    }
+    subscription_detail_view(item, current_revision)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn update_subscription_impl(
+    state: &VaultRuntime,
+    id: String,
+    revision: u64,
+    title: String,
+    provider: String,
+    plan: String,
+    amount: String,
+    currency: String,
+    billing_cycle: String,
+    next_renewal: String,
+    notes: String,
+) -> Result<SubscriptionView, String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("A subscription title is required.".to_owned());
+    }
+    validate_subscription_billing_cycle(&billing_cycle)?;
+    validate_optional_date("Next renewal", &next_renewal)?;
+    let id = id
+        .parse()
+        .map_err(|_| "The subscription identifier is invalid.".to_owned())?;
+    let session = lock_session(state)?;
+    let session = session
+        .as_ref()
+        .ok_or_else(|| "Unlock the vault before editing a subscription.".to_owned())?;
+    let (existing, current_revision) = session
+        .get_item_with_revision(id)
+        .map_err(safe_vault_error)?;
+    if current_revision != revision {
+        return Err(
+            "This subscription changed since you opened it. Reload it before saving.".to_owned(),
+        );
+    }
+    if existing.kind != ItemKind::Subscription {
+        return Err("Only subscription records can be edited from this view.".to_owned());
+    }
+    let mut fields = BTreeMap::new();
+    fields.insert("provider".to_owned(), provider);
+    fields.insert("plan".to_owned(), plan);
+    fields.insert("amount".to_owned(), amount);
+    fields.insert("currency".to_owned(), currency);
+    fields.insert("billing_cycle".to_owned(), billing_cycle);
+    fields.insert("next_renewal".to_owned(), next_renewal);
+    let item = VaultItem {
+        id,
+        kind: ItemKind::Subscription,
+        title: title.to_owned(),
+        links: existing.links.clone(),
+        attachments: existing.attachments.clone(),
+        legacy_disposition: existing.legacy_disposition,
+        account_closure_plan: existing.account_closure_plan.clone(),
+        fields,
+        notes: (!notes.is_empty()).then_some(notes),
+    };
+    let revision = session
+        .update_item(&item, revision)
+        .map_err(|error| match error {
+            vault_core::VaultError::Storage(vault_storage::StorageError::StaleRevision) => {
+                "This subscription changed since you opened it. Reload it before saving.".to_owned()
+            }
+            other => safe_vault_error(other),
+        })?;
+    subscription_view(item, revision)
 }
 
 fn emergency_card_payload(card: EmergencyCard) -> EmergencyCardPayload {
@@ -4804,6 +5070,22 @@ fn item_history_detail_view(
                 support,
             })
         }
+        ItemKind::Subscription => {
+            let view = subscription_view(item, revision)?;
+            Ok(ItemHistoryDetailView::Subscription {
+                id: view.id,
+                revision,
+                title: view.title,
+                provider: view.provider,
+                plan: view.plan,
+                amount: view.amount,
+                currency: view.currency,
+                billing_cycle: view.billing_cycle,
+                next_renewal: view.next_renewal,
+                notes: view.notes,
+                support,
+            })
+        }
         ItemKind::EmergencyInstruction => {
             Err("Version history is unavailable for emergency instructions.".to_owned())
         }
@@ -5414,6 +5696,64 @@ fn possession_detail_view(item: VaultItem, revision: u64) -> Result<PossessionDe
     })
 }
 
+fn subscription_view(item: VaultItem, revision: u64) -> Result<SubscriptionView, String> {
+    let provider = required_subscription_field(&item, "provider", "provider")?;
+    let plan = required_subscription_field(&item, "plan", "plan")?;
+    let amount = required_subscription_field(&item, "amount", "amount")?;
+    let currency = required_subscription_field(&item, "currency", "currency")?;
+    let billing_cycle = required_subscription_field(&item, "billing_cycle", "billing cycle")?;
+    let next_renewal = required_subscription_field(&item, "next_renewal", "next renewal")?;
+    validate_subscription_billing_cycle(&billing_cycle)?;
+    validate_optional_date("Next renewal", &next_renewal)?;
+    let links = item.links.iter().map(ToString::to_string).collect();
+    Ok(SubscriptionView {
+        id: item.id.to_string(),
+        revision,
+        title: item.title,
+        provider,
+        plan,
+        amount,
+        currency,
+        billing_cycle,
+        next_renewal,
+        notes: item.notes.unwrap_or_default(),
+        links,
+    })
+}
+
+fn subscription_detail_view(
+    item: VaultItem,
+    revision: u64,
+) -> Result<SubscriptionDetailView, String> {
+    let provider = required_subscription_field(&item, "provider", "provider")?;
+    let plan = required_subscription_field(&item, "plan", "plan")?;
+    let amount = required_subscription_field(&item, "amount", "amount")?;
+    let currency = required_subscription_field(&item, "currency", "currency")?;
+    let billing_cycle = required_subscription_field(&item, "billing_cycle", "billing cycle")?;
+    let next_renewal = required_subscription_field(&item, "next_renewal", "next renewal")?;
+    validate_subscription_billing_cycle(&billing_cycle)?;
+    validate_optional_date("Next renewal", &next_renewal)?;
+    Ok(SubscriptionDetailView {
+        id: item.id.to_string(),
+        revision,
+        title: item.title,
+        provider,
+        plan,
+        amount,
+        currency,
+        billing_cycle,
+        next_renewal,
+        notes: item.notes.unwrap_or_default(),
+    })
+}
+
+fn required_subscription_field(item: &VaultItem, key: &str, label: &str) -> Result<String, String> {
+    item.fields
+        .get(key)
+        .cloned()
+        .ok_or_else(|| format!("The encrypted subscription record is missing its {label} field."))
+}
+
 fn validate_property_ownership(value: &str) -> Result<(), String> {
     match value {
         "" | "Owned" | "Rented" | "Leased" | "Shared" | "Other" => Ok(()),
@@ -5425,6 +5765,21 @@ fn validate_receipt_tracking_status(value: &str) -> Result<(), String> {
     match value {
         "" | "kept" | "return_planned" | "returned" | "refund_pending" | "refunded" => Ok(()),
         _ => Err("Choose a supported receipt tracking status.".to_owned()),
+    }
+}
+
+fn validate_subscription_billing_cycle(value: &str) -> Result<(), String> {
+    match value {
+        "" | "monthly" | "quarterly" | "yearly" | "custom" => Ok(()),
+        _ => Err("Choose a supported subscription billing cycle.".to_owned()),
+    }
+}
+
+fn validate_optional_date(label: &str, value: &str) -> Result<(), String> {
+    if value.is_empty() || vault_core::reminders::parse_ymd(value).is_some() {
+        Ok(())
+    } else {
+        Err(format!("{label} must use YYYY-MM-DD."))
     }
 }
 
@@ -5636,6 +5991,9 @@ pub fn run() {
             create_possession,
             get_possession,
             update_possession,
+            create_subscription,
+            get_subscription,
+            update_subscription,
             get_emergency_card,
             update_emergency_card,
             get_item_titles,
@@ -6611,7 +6969,8 @@ mod tests {
                 | VaultItemView::Financial { .. }
                 | VaultItemView::Property { .. }
                 | VaultItemView::Vehicle { .. }
-                | VaultItemView::Possession { .. } => None,
+                | VaultItemView::Possession { .. }
+                | VaultItemView::Subscription { .. } => None,
             })
             .expect("listed credential");
         assert_eq!(credential.0, 2);
@@ -8058,6 +8417,150 @@ mod tests {
     }
 
     #[test]
+    fn subscription_is_local_revision_safe_historical_and_deadline_aware() {
+        let (_directory, runtime) = runtime();
+        initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
+
+        assert!(
+            create_subscription_impl(
+                &runtime,
+                " ".to_owned(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+            )
+            .is_err()
+        );
+        assert!(
+            create_subscription_impl(
+                &runtime,
+                "Bad cycle".to_owned(),
+                "Provider".to_owned(),
+                "Plan".to_owned(),
+                "10".to_owned(),
+                "USD".to_owned(),
+                "weekly".to_owned(),
+                "2099-01-15".to_owned(),
+                String::new(),
+            )
+            .is_err()
+        );
+        assert!(
+            create_subscription_impl(
+                &runtime,
+                "Bad date".to_owned(),
+                "Provider".to_owned(),
+                "Plan".to_owned(),
+                "10".to_owned(),
+                "USD".to_owned(),
+                "monthly".to_owned(),
+                "2099-02-30".to_owned(),
+                String::new(),
+            )
+            .is_err()
+        );
+
+        let created = create_subscription_impl(
+            &runtime,
+            "Local streaming".to_owned(),
+            "Example Media".to_owned(),
+            "Family".to_owned(),
+            "19.99".to_owned(),
+            "USD".to_owned(),
+            "monthly".to_owned(),
+            "2099-01-15".to_owned(),
+            "Cancel manually if no longer needed.".to_owned(),
+        )
+        .expect("create subscription");
+        assert_eq!(created.revision, 1);
+        assert_eq!(created.provider, "Example Media");
+
+        let serialized = serde_json::to_string(
+            &list_vault_items_impl(&runtime).expect("list items with subscription"),
+        )
+        .expect("serialize item list");
+        assert!(serialized.contains("\"kind\":\"subscription\""));
+        assert!(serialized.contains("Local streaming"));
+
+        let updated = update_subscription_impl(
+            &runtime,
+            created.id.clone(),
+            created.revision,
+            "Local streaming".to_owned(),
+            "Example Media".to_owned(),
+            "Family Plus".to_owned(),
+            "24.99".to_owned(),
+            "USD".to_owned(),
+            "yearly".to_owned(),
+            "2099-02-15".to_owned(),
+            "Still tracked locally only.".to_owned(),
+        )
+        .expect("update subscription");
+        assert_eq!(updated.revision, 2);
+        assert_eq!(updated.plan, "Family Plus");
+        assert!(
+            update_subscription_impl(
+                &runtime,
+                created.id.clone(),
+                1,
+                "Stale".to_owned(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+            )
+            .is_err()
+        );
+
+        assert_eq!(
+            list_item_history_impl(&runtime, created.id.clone(), updated.revision)
+                .expect("subscription history"),
+            vec![1]
+        );
+        let historical =
+            get_item_history_detail_impl(&runtime, created.id.clone(), updated.revision, 1)
+                .expect("historical subscription detail");
+        let historical = serde_json::to_string(&historical).expect("serialize history");
+        assert!(historical.contains("\"kind\":\"subscription\""));
+        assert!(historical.contains("Family"));
+
+        let trashed_revision = trash_item_impl(&runtime, updated.id.clone(), updated.revision)
+            .expect("trash subscription");
+        assert!(get_subscription_impl(&runtime, updated.id.clone(), trashed_revision).is_err());
+        let restored_revision =
+            restore_trashed_item_impl(&runtime, updated.id.clone(), trashed_revision)
+                .expect("restore subscription");
+        let restored = get_subscription_impl(&runtime, updated.id.clone(), restored_revision)
+            .expect("get restored subscription");
+        assert_eq!(restored.plan, "Family Plus");
+        assert_eq!(restored.next_renewal, "2099-02-15");
+        assert_eq!(
+            list_item_history_impl(&runtime, updated.id.clone(), restored_revision)
+                .expect("restored subscription history"),
+            vec![1]
+        );
+
+        let deadlines = list_deadlines_impl(&runtime, 2099, 2, 14).expect("list deadlines");
+        let renewal = deadlines
+            .iter()
+            .find(|deadline| deadline.item_id == updated.id)
+            .expect("subscription renewal deadline");
+        assert_eq!(renewal.label, "Subscription renewal");
+        assert_eq!(renewal.date, "2099-02-15");
+        assert_eq!(renewal.days_until, 1);
+
+        lock_vault_impl(&runtime).expect("lock vault");
+        assert!(get_subscription_impl(&runtime, updated.id, restored_revision).is_err());
+    }
+
+    #[test]
     fn deadlines_use_supplied_device_local_calendar_day() {
         let (_directory, runtime) = runtime();
         initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
@@ -8348,6 +8851,18 @@ mod tests {
             },
         )
         .expect("set export account closure plan");
+        create_subscription_impl(
+            &runtime,
+            "Export subscription".to_owned(),
+            "EXPORT-SUBSCRIPTION-PROVIDER".to_owned(),
+            "Annual".to_owned(),
+            "99".to_owned(),
+            "USD".to_owned(),
+            "yearly".to_owned(),
+            "2099-12-31".to_owned(),
+            "Export subscription note".to_owned(),
+        )
+        .expect("create export subscription");
         update_emergency_card_impl(
             &runtime,
             None,
@@ -8377,6 +8892,8 @@ mod tests {
         assert!(serialized.contains("selected_for_legacy"));
         assert!(serialized.contains("EXPORT-CLOSURE-MARKER"));
         assert!(serialized.contains("review_manually"));
+        assert!(serialized.contains("EXPORT-SUBSCRIPTION-PROVIDER"));
+        assert!(serialized.contains("\"kind\":\"subscription\""));
 
         let backup_path = directory
             .path()
@@ -8395,6 +8912,13 @@ mod tests {
         backup_session
             .validate_persisted_state()
             .expect("encrypted backup validates completely");
+        assert!(
+            backup_session
+                .list_items()
+                .expect("list backup items")
+                .iter()
+                .any(|item| item.kind == ItemKind::Subscription)
+        );
     }
 
     #[test]
@@ -8734,6 +9258,18 @@ mod tests {
         initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
         let note = create_note_impl(&runtime, "Locked gate".to_owned(), "Body".to_owned())
             .expect("create note");
+        let subscription = create_subscription_impl(
+            &runtime,
+            "Locked subscription".to_owned(),
+            "Provider".to_owned(),
+            "Plan".to_owned(),
+            "10".to_owned(),
+            "USD".to_owned(),
+            "monthly".to_owned(),
+            "2099-01-15".to_owned(),
+            String::new(),
+        )
+        .expect("create subscription before lock");
         let source_path = directory.path().join("locked-attachment.txt");
         fs::write(&source_path, b"locked attachment bytes").expect("write locked attachment");
         let destination_path = directory.path().join("locked-export.txt");
@@ -8771,6 +9307,24 @@ mod tests {
             .is_err()
         );
         assert!(list_deadlines_impl(&runtime, 2026, 9, 15).is_err());
+        assert!(
+            get_subscription_impl(&runtime, subscription.id.clone(), subscription.revision)
+                .is_err()
+        );
+        assert!(
+            create_subscription_impl(
+                &runtime,
+                "Locked create".to_owned(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+            )
+            .is_err()
+        );
         assert!(generate_recovery_secret_impl(&runtime).is_err());
         assert!(confirm_recovery_secret_impl(&runtime, "secret".to_owned(), 0).is_err());
         assert!(

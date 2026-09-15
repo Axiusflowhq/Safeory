@@ -16,6 +16,7 @@ pub enum ItemKind {
     Receipt,
     Vehicle,
     Possession,
+    Subscription,
     EmergencyInstruction,
 }
 
@@ -356,6 +357,38 @@ impl VaultItem {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn subscription(
+        title: impl Into<String>,
+        provider: impl Into<String>,
+        plan: impl Into<String>,
+        amount: impl Into<String>,
+        currency: impl Into<String>,
+        billing_cycle: impl Into<String>,
+        next_renewal: impl Into<String>,
+        notes: impl Into<String>,
+    ) -> Self {
+        let mut fields = BTreeMap::new();
+        fields.insert("provider".to_owned(), provider.into());
+        fields.insert("plan".to_owned(), plan.into());
+        fields.insert("amount".to_owned(), amount.into());
+        fields.insert("currency".to_owned(), currency.into());
+        fields.insert("billing_cycle".to_owned(), billing_cycle.into());
+        fields.insert("next_renewal".to_owned(), next_renewal.into());
+        let notes = notes.into();
+        Self {
+            id: Uuid::new_v4(),
+            kind: ItemKind::Subscription,
+            title: title.into(),
+            links: Vec::new(),
+            attachments: Vec::new(),
+            legacy_disposition: LegacyDisposition::Unspecified,
+            account_closure_plan: AccountClosurePlan::default(),
+            fields,
+            notes: (!notes.is_empty()).then_some(notes),
+        }
+    }
+
     pub fn emergency_card(card: &EmergencyCard) -> Self {
         let mut fields = BTreeMap::new();
         fields.insert(
@@ -430,6 +463,34 @@ mod tests {
             item.fields.get("warranty_expiry").map(String::as_str),
             Some("2027-01-15")
         );
+    }
+
+    #[test]
+    fn subscription_constructor_sets_tracking_fields() {
+        let item = VaultItem::subscription(
+            "Music",
+            "Example Media",
+            "Family",
+            "19.99",
+            "USD",
+            "monthly",
+            "2026-10-15",
+            "cancel before travel",
+        );
+        assert_eq!(item.kind, ItemKind::Subscription);
+        assert_eq!(
+            item.fields.get("provider").map(String::as_str),
+            Some("Example Media")
+        );
+        assert_eq!(
+            item.fields.get("billing_cycle").map(String::as_str),
+            Some("monthly")
+        );
+        assert_eq!(
+            item.fields.get("next_renewal").map(String::as_str),
+            Some("2026-10-15")
+        );
+        assert_eq!(item.notes.as_deref(), Some("cancel before travel"));
     }
 
     #[test]

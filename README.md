@@ -59,6 +59,10 @@ Implemented now:
   active record detail, protected fields require explicit reveal, historical
   attachment references are metadata only, purge erases retained history, and
   encrypted backups preserve it,
+- encrypted local subscription tracking with provider/plan/cost context, a
+  bounded billing-cycle vocabulary, optional next-renewal dates surfaced in
+  Today, revision history/backup/lifecycle preservation, and no provider login,
+  payment processing, automatic renewal, or cancellation action,
 - Trust Engine core: conditional access policies with fail-closed local
   evaluation (destruction/deny wins, private-forever, multi-approval,
   waiting periods as documented server-enforced policy, not time-lock crypto),
