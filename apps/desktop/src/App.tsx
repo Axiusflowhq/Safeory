@@ -543,6 +543,8 @@ export default function App() {
   const [deadlines, setDeadlines] = useState<TodayEntry[] | null>(null);
   const [linkedTitles, setLinkedTitles] = useState<ItemTitle[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const findInputRef = useRef<HTMLInputElement | null>(null);
+  const findSelectionPending = useRef(false);
   const [sessionFence] = useState(() => new SessionFence());
   const isSessionGenerationCurrent = useCallback(
     (token: number) => sessionFence.accepts(token),
@@ -796,6 +798,88 @@ export default function App() {
     };
   }, [deviceSettings, lockVault, screen]);
 
+  useEffect(() => {
+    if (
+      !findSelectionPending.current ||
+      screen !== "vault" ||
+      selectedId === null
+    )
+      return;
+    findSelectionPending.current = false;
+    const frame = window.requestAnimationFrame(() => {
+      const heading = document.querySelector<HTMLElement>("article h1");
+      if (!heading) return;
+      heading.tabIndex = -1;
+      heading.focus();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [screen, selectedId]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const findShortcut =
+        (event.ctrlKey || event.metaKey) &&
+        event.key.toLocaleLowerCase() === "f";
+      if (findShortcut) {
+        if (
+          screen !== "vault" ||
+          vaultView !== "active" ||
+          editor !== null ||
+          settingsOpen ||
+          cardOpen ||
+          planOpen ||
+          recordSupportMutationBusy
+        ) {
+          return;
+        }
+        event.preventDefault();
+        findInputRef.current?.focus();
+        findInputRef.current?.select();
+        return;
+      }
+
+      if (
+        event.key !== "Escape" ||
+        screen !== "vault" ||
+        vaultView !== "active" ||
+        editor !== null ||
+        settingsOpen ||
+        cardOpen ||
+        planOpen ||
+        query.trim().length === 0 ||
+        recordSupportMutationBusy
+      ) {
+        return;
+      }
+      if (
+        selectedId !== null &&
+        accountClosureDraftDirty &&
+        !window.confirm("Discard unsaved account closure plan changes?")
+      ) {
+        return;
+      }
+      event.preventDefault();
+      setQuery("");
+      setSelectedId(null);
+      setError(null);
+      window.requestAnimationFrame(() => findInputRef.current?.focus());
+    };
+
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [
+    accountClosureDraftDirty,
+    cardOpen,
+    editor,
+    planOpen,
+    query,
+    recordSupportMutationBusy,
+    screen,
+    selectedId,
+    settingsOpen,
+    vaultView,
+  ]);
+
   if (screen === "loading") {
     return (
       <main className="grid min-h-screen place-items-center bg-[var(--surface)] text-[var(--text-primary)]">
@@ -856,9 +940,10 @@ export default function App() {
   ).length;
   const selected = items.find((item) => item.id === selectedId) ?? null;
   const needle = query.trim().toLocaleLowerCase();
-  const visibleItems = items.filter(
-    (item) => item.kind === section && itemMatchesSearch(item, needle),
-  );
+  const finding = vaultView === "active" && needle.length > 0;
+  const visibleItems = finding
+    ? items.filter((item) => itemMatchesSearch(item, needle))
+    : items.filter((item) => item.kind === section);
   const visibleTrashItems = trashItems.filter(
     (item) =>
       item.kind === section &&
@@ -873,19 +958,21 @@ export default function App() {
   const switchSection = (next: Section) => {
     if (!canLeaveSelectedRecord()) return;
     setSection(next);
+    if (finding) setQuery("");
     setEditor(null);
     setError(null);
     setSelectedId(null);
   };
 
   const jumpToRecord = (kind: string, id: string) => {
-    if (id !== selectedId && !canLeaveSelectedRecord()) return;
+    if (id !== selectedId && !canLeaveSelectedRecord()) return false;
     setCardOpen(false);
     setEditor(null);
     setError(null);
     const target = kindToSection(kind);
     if (target) setSection(target);
     setSelectedId(id);
+    return true;
   };
 
   const refreshVaultItems = async () => {
@@ -1223,7 +1310,7 @@ export default function App() {
           <div className="flex min-w-0 flex-1 flex-wrap items-end gap-3">
             <label className="block min-w-[190px]">
               <span className="mb-1.5 block text-[11px] font-medium uppercase tracking-[0.1em] text-[var(--text-muted)]">
-                Record type
+                {vaultView === "active" ? "Browse type" : "Record type"}
               </span>
               <select
                 value={section}
@@ -1254,7 +1341,7 @@ export default function App() {
 
             <label className="block min-w-[240px] flex-1 sm:max-w-md">
               <span className="mb-1.5 block text-[11px] font-medium uppercase tracking-[0.1em] text-[var(--text-muted)]">
-                Search
+                {vaultView === "active" ? "Find" : "Search Trash"}
               </span>
               <span className="relative block">
                 <HugeiconsIcon
@@ -1263,8 +1350,17 @@ export default function App() {
                   aria-hidden="true"
                 />
                 <input
-                  aria-label={`Search ${sectionLabel(section).toLocaleLowerCase()}`}
-                  placeholder={`Search ${sectionLabel(section).toLocaleLowerCase()}`}
+                  ref={findInputRef}
+                  aria-label={
+                    vaultView === "active"
+                      ? "Find across all records"
+                      : `Search ${sectionLabel(section).toLocaleLowerCase()} in Trash`
+                  }
+                  placeholder={
+                    vaultView === "active"
+                      ? "Find across all records"
+                      : `Search ${sectionLabel(section).toLocaleLowerCase()} in Trash`
+                  }
                   value={query}
                   disabled={editor !== null || recordSupportMutationBusy}
                   onChange={(event) => {
@@ -1284,6 +1380,11 @@ export default function App() {
                 onClick={() => {
                   if (!canLeaveSelectedRecord()) return;
                   setSelectedId(null);
+                  if (finding) {
+                    window.requestAnimationFrame(() =>
+                      findInputRef.current?.focus(),
+                    );
+                  }
                 }}
                 disabled={recordSupportMutationBusy}
                 className="flex h-10 items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] px-3 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--selected)] disabled:cursor-not-allowed disabled:opacity-55"
@@ -1385,7 +1486,7 @@ export default function App() {
         ) : null}
 
         <div className="mt-6">
-          {vaultView === "active" && editor === null ? (
+          {vaultView === "active" && editor === null && !finding ? (
             <TodayPanel items={items} deadlines={deadlines} />
           ) : null}
           {vaultView === "trash" ? (
@@ -1716,19 +1817,29 @@ export default function App() {
               }}
               onError={setError}
             />
+          ) : finding && visibleItems.length > 0 ? (
+            <VaultFindResults
+              items={visibleItems}
+              query={query}
+              onSelect={(item) => {
+                if (jumpToRecord(item.kind, item.id)) {
+                  findSelectionPending.current = true;
+                }
+              }}
+            />
           ) : visibleItems.length > 0 ? (
             <VaultCollection
               items={visibleItems}
               section={section}
-              query={query}
+              query=""
               onSelect={(item) => {
                 setSelectedId(item.id);
                 setEditor(null);
                 setError(null);
               }}
             />
-          ) : query ? (
-            <NoSearchResults section={section} query={query} />
+          ) : finding ? (
+            <NoFindResults query={query} />
           ) : (
             <EmptyVault section={section} browserPreview={!desktopRuntime} />
           )}
@@ -8948,6 +9059,95 @@ function VaultCollection({
   );
 }
 
+function VaultFindResults({
+  items,
+  query,
+  onSelect,
+}: {
+  items: VaultItem[];
+  query: string;
+  onSelect: (item: VaultItem) => void;
+}) {
+  const needle = query.trim().toLocaleLowerCase();
+  const groups = SECTION_ORDER.map((section) => ({
+    section,
+    items: items.filter((item) => item.kind === section),
+  })).filter((group) => group.items.length > 0);
+
+  return (
+    <div>
+      <div>
+        <div className="text-[11px] font-medium uppercase tracking-[0.12em] text-[var(--text-muted)]">
+          All records
+        </div>
+        <h1 className="mt-1 text-2xl font-semibold tracking-[-0.03em]">
+          Find results
+        </h1>
+        <p
+          role="status"
+          aria-live="polite"
+          className="mt-1 text-sm text-[var(--text-muted)]"
+        >
+          {items.length} {items.length === 1 ? "record" : "records"} matching “
+          {query.trim()}”
+        </p>
+      </div>
+
+      <div className="mt-6 space-y-6">
+        {groups.map((group) => (
+          <section
+            key={group.section}
+            aria-labelledby={`find-${group.section}`}
+          >
+            <div className="flex items-center justify-between gap-3">
+              <h2
+                id={`find-${group.section}`}
+                className="text-xs font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]"
+              >
+                {sectionLabel(group.section)}
+              </h2>
+              <span className="text-xs text-[var(--text-muted)]">
+                {group.items.length}
+              </span>
+            </div>
+            <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+              {group.items.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => onSelect(item)}
+                  className="group rounded-2xl border border-[var(--border)] bg-[var(--surface-secondary)] p-4 text-left transition hover:-translate-y-px hover:bg-[var(--selected)]"
+                >
+                  <div className="flex items-start gap-3">
+                    <div className="grid size-9 shrink-0 place-items-center rounded-xl border border-[var(--border)] bg-[var(--surface)] text-[var(--icon)]">
+                      <HugeiconsIcon
+                        icon={sectionIcon(item.kind)}
+                        className="size-4"
+                        aria-hidden="true"
+                      />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="text-[10px] font-medium uppercase tracking-[0.08em] text-[var(--text-muted)]">
+                        {recordKindLabel(item.kind)}
+                      </div>
+                      <div className="mt-0.5 truncate text-sm font-medium text-[var(--text-primary)]">
+                        {item.title}
+                      </div>
+                      <div className="mt-1 line-clamp-2 text-xs leading-5 text-[var(--text-muted)]">
+                        {itemFindPreview(item, needle)}
+                      </div>
+                    </div>
+                  </div>
+                </button>
+              ))}
+            </div>
+          </section>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function TrashCollection({
   items,
   section,
@@ -9068,16 +9268,10 @@ function TrashCollection({
   );
 }
 
-function NoSearchResults({
-  section,
-  query,
-}: {
-  section: Section;
-  query: string;
-}) {
+function NoFindResults({ query }: { query: string }) {
   return (
     <div className="grid min-h-[calc(100vh-13rem)] place-items-center px-8">
-      <div className="max-w-sm text-center">
+      <div role="status" aria-live="polite" className="max-w-sm text-center">
         <div className="mx-auto mb-5 grid size-12 place-items-center rounded-2xl border border-[var(--border)] bg-[var(--surface-secondary)] text-[var(--icon)]">
           <HugeiconsIcon
             icon={Search01Icon}
@@ -9086,11 +9280,11 @@ function NoSearchResults({
           />
         </div>
         <h1 className="text-xl font-semibold tracking-[-0.02em]">
-          No matching {sectionLabel(section).toLocaleLowerCase()}
+          No records match across the vault
         </h1>
         <p className="mt-2 text-sm leading-6 text-[var(--text-muted)]">
-          Nothing in this record type matches “{query.trim()}”. Try another
-          search or change the record-type filter.
+          No active record matches “{query.trim()}”. Try a different Find term
+          or clear it to return to record-type browsing.
         </p>
       </div>
     </div>
@@ -9170,6 +9364,20 @@ function kindToSection(kind: string): Section | null {
 function kindLabel(kind: string): string {
   const section = kindToSection(kind);
   return section ? sectionLabel(section) : kind;
+}
+
+function recordKindLabel(kind: string): string {
+  if (kind === "secure_note") return "Secure note";
+  if (kind === "password") return "Credential";
+  if (kind === "document") return "Document";
+  if (kind === "receipt") return "Receipt";
+  if (kind === "insurance") return "Insurance";
+  if (kind === "financial") return "Financial";
+  if (kind === "property") return "Property";
+  if (kind === "vehicle") return "Vehicle";
+  if (kind === "possession") return "Possession";
+  if (kind === "subscription") return "Subscription";
+  return kind;
 }
 
 function groupItemsByKind(
@@ -9341,24 +9549,20 @@ async function fetchVaultItems() {
   };
 }
 
-function itemMatchesSearch(item: VaultItem, needle: string) {
-  if (!needle) return true;
-  if (item.title.toLocaleLowerCase().includes(needle)) return true;
+function itemSearchValues(item: VaultItem): string[] {
+  const values = [item.title];
   if (item.kind === "secure_note") {
-    return item.body.toLocaleLowerCase().includes(needle);
+    return [...values, item.body];
   }
   if (item.kind === "password") {
-    return [item.username, item.website, item.notes].some((value) =>
-      value.toLocaleLowerCase().includes(needle),
-    );
+    return [...values, item.username, item.website, item.notes];
   }
   if (item.kind === "document") {
-    return [item.issuer, item.expiry, item.notes].some((value) =>
-      value.toLocaleLowerCase().includes(needle),
-    );
+    return [...values, item.issuer, item.expiry, item.notes];
   }
   if (item.kind === "receipt") {
     return [
+      ...values,
       item.merchant,
       item.purchase_date,
       item.amount,
@@ -9366,30 +9570,36 @@ function itemMatchesSearch(item: VaultItem, needle: string) {
       item.tracking_status,
       item.return_by,
       item.refund_due,
-    ].some((value) => value.toLocaleLowerCase().includes(needle));
+    ];
   }
   if (item.kind === "insurance") {
-    return [item.provider, item.policy_type, item.renewal, item.notes].some(
-      (value) => value.toLocaleLowerCase().includes(needle),
-    );
+    return [
+      ...values,
+      item.provider,
+      item.policy_type,
+      item.renewal,
+      item.notes,
+    ];
   }
   if (item.kind === "financial") {
-    return [item.institution, item.account_type, item.currency].some((value) =>
-      value.toLocaleLowerCase().includes(needle),
-    );
+    return [...values, item.institution, item.account_type, item.currency];
   }
   if (item.kind === "property") {
-    return [item.property_type, item.ownership].some((value) =>
-      value.toLocaleLowerCase().includes(needle),
-    );
+    return [...values, item.property_type, item.ownership];
   }
   if (item.kind === "vehicle") {
-    return [item.make, item.model, item.year, item.renewal, item.notes].some(
-      (value) => value.toLocaleLowerCase().includes(needle),
-    );
+    return [
+      ...values,
+      item.make,
+      item.model,
+      item.year,
+      item.renewal,
+      item.notes,
+    ];
   }
   if (item.kind === "subscription") {
     return [
+      ...values,
       item.provider,
       item.plan,
       item.amount,
@@ -9397,9 +9607,10 @@ function itemMatchesSearch(item: VaultItem, needle: string) {
       item.billing_cycle,
       item.next_renewal,
       item.notes,
-    ].some((value) => value.toLocaleLowerCase().includes(needle));
+    ];
   }
   return [
+    ...values,
     item.category,
     item.location,
     item.brand,
@@ -9409,7 +9620,23 @@ function itemMatchesSearch(item: VaultItem, needle: string) {
     item.store,
     item.warranty_expiry,
     item.notes,
-  ].some((value) => value.toLocaleLowerCase().includes(needle));
+  ];
+}
+
+function itemMatchesSearch(item: VaultItem, needle: string) {
+  if (!needle) return true;
+  return itemSearchValues(item).some((value) =>
+    value.toLocaleLowerCase().includes(needle),
+  );
+}
+
+function itemFindPreview(item: VaultItem, needle: string) {
+  const matched = itemSearchValues(item)
+    .slice(1)
+    .find(
+      (value) => value.length > 0 && value.toLocaleLowerCase().includes(needle),
+    );
+  return matched || itemPreview(item);
 }
 
 function itemPreview(item: VaultItem) {

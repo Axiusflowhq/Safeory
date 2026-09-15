@@ -30,8 +30,9 @@ Implemented now:
   backend-owned credential password copy with conditional 30-second clipboard
   clearing that never exposes generic clipboard access to the renderer,
   encrypted cross-item links with title resolution and jump navigation,
-  CSPRNG-backed strong-password generation, record-type filtering, local
-  search, a Today panel driven by a tested local deadlines engine, trash with
+  CSPRNG-backed strong-password generation, record-type browsing, vault-wide
+  local Find over already-loaded safe list projections, a Today panel driven by
+  a tested local deadlines engine, trash with
   restore/permanent-delete, and a 10-minute inactivity lock,
 - encrypted Emergency Card: selected records, emergency contacts, and
   instructions in one singleton record, hidden from lists, with stale-edit
