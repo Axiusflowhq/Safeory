@@ -1957,16 +1957,59 @@ fn unlock_vault_with_recovery_kit(
 }
 
 #[tauri::command]
-fn export_human_readable(
+async fn export_human_readable(
+    app: tauri::AppHandle,
     state: State<'_, VaultRuntime>,
-    path: String,
-) -> Result<ExportView, String> {
-    export_human_readable_impl(&state, path)
+) -> Result<Option<u64>, String> {
+    let generation = capture_export_generation(&state, "exporting records")?;
+    let selected = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .set_file_name("safeory-export.json")
+            .blocking_save_file()
+    })
+    .await
+    .map_err(|_| "Unable to open the readable-export save dialog.".to_owned())?;
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    let destination = selected
+        .into_path()
+        .map_err(|_| "The selected export destination is unavailable.".to_owned())?;
+    export_human_readable_impl_for_generation(
+        &state,
+        destination.to_string_lossy().to_string(),
+        generation,
+    )
+    .map(|exported| Some(exported.items))
 }
 
 #[tauri::command]
-fn backup_database_copy(state: State<'_, VaultRuntime>, path: String) -> Result<PathView, String> {
-    backup_database_copy_impl(&state, path)
+async fn backup_database_copy(
+    app: tauri::AppHandle,
+    state: State<'_, VaultRuntime>,
+) -> Result<bool, String> {
+    let generation = capture_export_generation(&state, "backing up the vault")?;
+    let selected = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .set_file_name("safeory-backup.sqlite3")
+            .blocking_save_file()
+    })
+    .await
+    .map_err(|_| "Unable to open the encrypted-backup save dialog.".to_owned())?;
+    let Some(selected) = selected else {
+        return Ok(false);
+    };
+    let destination = selected
+        .into_path()
+        .map_err(|_| "The selected backup destination is unavailable.".to_owned())?;
+    backup_database_copy_impl_for_generation(
+        &state,
+        destination.to_string_lossy().to_string(),
+        generation,
+    )
+    .map(|_| true)
 }
 
 #[tauri::command]
@@ -4479,17 +4522,41 @@ struct HumanReadableExportSnapshot {
     generation: u64,
 }
 
+#[cfg(test)]
 fn export_human_readable_impl(state: &VaultRuntime, path: String) -> Result<ExportView, String> {
+    let generation = capture_export_generation(state, "exporting records")?;
+    export_human_readable_impl_for_generation(state, path, generation)
+}
+
+fn export_human_readable_impl_for_generation(
+    state: &VaultRuntime,
+    path: String,
+    expected_generation: u64,
+) -> Result<ExportView, String> {
     if path.trim().is_empty() {
         return Err("Choose a location for the export.".to_owned());
     }
     let destination = PathBuf::from(&path);
+    reject_active_database_destination(
+        state,
+        &destination,
+        "Choose an export path other than the active Safeory database.",
+    )?;
+    if !is_session_generation_current(state, expected_generation) {
+        return Err("The vault session changed while creating the export. Try again.".to_owned());
+    }
     let HumanReadableExportSnapshot {
         items,
         emergency_card,
         generation,
     } = capture_human_readable_export(state)?;
-    let (staged, item_count) = stage_human_readable_export(&items, emergency_card, &destination)?;
+    if generation != expected_generation {
+        return Err("The vault session changed while creating the export. Try again.".to_owned());
+    }
+    let (staged, item_count) =
+        stage_human_readable_export_with_cancel(&items, emergency_card, &destination, || {
+            !is_session_generation_current(state, generation)
+        })?;
     commit_human_readable_export(state, generation, &staged, &destination)?;
     Ok(ExportView {
         items: item_count,
@@ -4516,11 +4583,32 @@ fn capture_human_readable_export(
     })
 }
 
+#[cfg(test)]
 fn stage_human_readable_export(
     items: &[(VaultItem, u64)],
     card: Option<(EmergencyCard, u64)>,
     destination: &Path,
 ) -> Result<(PathBuf, u64), String> {
+    stage_human_readable_export_with_cancel(items, card, destination, || false)
+}
+
+fn stage_human_readable_export_with_cancel<F>(
+    items: &[(VaultItem, u64)],
+    card: Option<(EmergencyCard, u64)>,
+    destination: &Path,
+    should_cancel: F,
+) -> Result<(PathBuf, u64), String>
+where
+    F: Fn() -> bool,
+{
+    const SESSION_CHANGED: &str = "The vault session changed while creating the export. Try again.";
+    const WRITE_FAILED: &str =
+        "Unable to write the export file. Choose a different location and try again.";
+    const WRITE_CHUNK_BYTES: usize = 64 * 1024;
+
+    if should_cancel() {
+        return Err(SESSION_CHANGED.to_owned());
+    }
     let item_count = u64::try_from(
         items
             .iter()
@@ -4556,6 +4644,9 @@ fn stage_human_readable_export(
         .transpose()
         .map_err(safe_vault_error)?
         .unwrap_or(serde_json::Value::Null);
+    if should_cancel() {
+        return Err(SESSION_CHANGED.to_owned());
+    }
     let document = serde_json::json!({
         "app": "safeory",
         "format": 1,
@@ -4566,13 +4657,40 @@ fn stage_human_readable_export(
         "emergency_card": emergency_card,
     });
     let encoded = serde_json::to_vec_pretty(&document).map_err(safe_vault_error)?;
+    if should_cancel() {
+        return Err(SESSION_CHANGED.to_owned());
+    }
     let staged = temporary_sibling_path(destination, "export")?;
-    if fs::write(&staged, encoded).is_err() {
+    let mut staged_file = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged)
+    {
+        Ok(file) => file,
+        Err(_) => return Err(WRITE_FAILED.to_owned()),
+    };
+    let write_result = (|| -> Result<(), String> {
+        for chunk in encoded.chunks(WRITE_CHUNK_BYTES) {
+            if should_cancel() {
+                return Err(SESSION_CHANGED.to_owned());
+            }
+            staged_file
+                .write_all(chunk)
+                .map_err(|_| WRITE_FAILED.to_owned())?;
+            if should_cancel() {
+                return Err(SESSION_CHANGED.to_owned());
+            }
+        }
+        staged_file.flush().map_err(|_| WRITE_FAILED.to_owned())?;
+        if should_cancel() {
+            return Err(SESSION_CHANGED.to_owned());
+        }
+        Ok(())
+    })();
+    drop(staged_file);
+    if let Err(error) = write_result {
         let _ = fs::remove_file(&staged);
-        return Err(
-            "Unable to write the export file. Choose a different location and try again."
-                .to_owned(),
-        );
+        return Err(error);
     }
     Ok((staged, item_count))
 }
@@ -4633,19 +4751,34 @@ fn commit_human_readable_export(
     Ok(())
 }
 
+#[cfg(test)]
 fn backup_database_copy_impl(state: &VaultRuntime, path: String) -> Result<PathView, String> {
+    let generation = capture_export_generation(state, "backing up the vault")?;
+    backup_database_copy_impl_for_generation(state, path, generation)
+}
+
+fn backup_database_copy_impl_for_generation(
+    state: &VaultRuntime,
+    path: String,
+    expected_generation: u64,
+) -> Result<PathView, String> {
     let destination = PathBuf::from(path.trim());
     if path.trim().is_empty() {
         return Err("Choose a location for the encrypted backup.".to_owned());
     }
-    if state.database_path.exists()
-        && destination.exists()
-        && fs::canonicalize(&destination).ok() == fs::canonicalize(&state.database_path).ok()
-    {
-        return Err("Choose a backup path other than the active Safeory database.".to_owned());
+    reject_active_database_destination(
+        state,
+        &destination,
+        "Choose a backup path other than the active Safeory database.",
+    )?;
+    if !is_session_generation_current(state, expected_generation) {
+        return Err("The vault session changed while creating the backup. Try again.".to_owned());
+    }
+    let (plan, generation) = capture_database_backup_plan(state)?;
+    if generation != expected_generation {
+        return Err("The vault session changed while creating the backup. Try again.".to_owned());
     }
     let staged = temporary_sibling_path(&destination, "backup")?;
-    let (plan, generation) = capture_database_backup_plan(state)?;
     if let Err(error) = plan.write_validated_to(&staged, || {
         !is_session_generation_current(state, generation)
     }) {
@@ -4661,6 +4794,28 @@ fn backup_database_copy_impl(state: &VaultRuntime, path: String) -> Result<PathV
     }
     commit_database_backup_copy(state, generation, &staged, &destination)?;
     Ok(PathView { path })
+}
+
+fn capture_export_generation(state: &VaultRuntime, action: &str) -> Result<u64, String> {
+    let session = lock_session(state)?;
+    if session.is_none() {
+        return Err(format!("Unlock the vault before {action}."));
+    }
+    Ok(capture_session_generation(state))
+}
+
+fn reject_active_database_destination(
+    state: &VaultRuntime,
+    destination: &Path,
+    message: &str,
+) -> Result<(), String> {
+    if state.database_path.exists()
+        && destination.exists()
+        && fs::canonicalize(destination).ok() == fs::canonicalize(&state.database_path).ok()
+    {
+        return Err(message.to_owned());
+    }
+    Ok(())
 }
 
 fn capture_database_backup_plan(state: &VaultRuntime) -> Result<(VaultBackupPlan, u64), String> {
@@ -9077,6 +9232,132 @@ mod tests {
         );
         assert!(!staged.exists());
         assert!(!destination.exists());
+    }
+
+    #[test]
+    fn human_readable_export_cancels_and_cleans_partial_plaintext_stage() {
+        let (directory, runtime) = runtime();
+        initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
+        create_note_impl(
+            &runtime,
+            "Cancellation marker".to_owned(),
+            "Plaintext must not survive a stale generation.".to_owned(),
+        )
+        .expect("create export marker");
+        let destination = directory.path().join("cancelled-readable-export.json");
+        let HumanReadableExportSnapshot {
+            items,
+            emergency_card,
+            generation,
+        } = capture_human_readable_export(&runtime).expect("capture export snapshot");
+        let checks = std::cell::Cell::new(0usize);
+
+        let result =
+            stage_human_readable_export_with_cancel(&items, emergency_card, &destination, || {
+                let next = checks.get() + 1;
+                checks.set(next);
+                if next == 5 {
+                    advance_session_generation(&runtime.session_generation);
+                }
+                !is_session_generation_current(&runtime, generation)
+            });
+
+        assert_eq!(
+            result.expect_err("stale generation must cancel plaintext staging"),
+            "The vault session changed while creating the export. Try again."
+        );
+        assert!(checks.get() >= 5);
+        assert!(!destination.exists());
+        let stage_prefix = ".cancelled-readable-export.json.export-";
+        assert!(
+            fs::read_dir(directory.path())
+                .expect("list export directory")
+                .filter_map(Result::ok)
+                .all(|entry| {
+                    !entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(stage_prefix)
+                })
+        );
+    }
+
+    #[test]
+    fn export_paths_cannot_replace_the_active_database() {
+        let (_directory, runtime) = runtime();
+        initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
+        create_note_impl(
+            &runtime,
+            "Self-target guard".to_owned(),
+            "Still encrypted".to_owned(),
+        )
+        .expect("create guarded record");
+        let database_path = runtime.database_path.to_string_lossy().to_string();
+
+        let readable_error = match export_human_readable_impl(&runtime, database_path.clone()) {
+            Ok(_) => panic!("readable export must reject active database"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            readable_error,
+            "Choose an export path other than the active Safeory database."
+        );
+        let backup_error = match backup_database_copy_impl(&runtime, database_path.clone()) {
+            Ok(_) => panic!("encrypted backup must reject active database"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            backup_error,
+            "Choose a backup path other than the active Safeory database."
+        );
+
+        let bytes = fs::read(&database_path).expect("read live database after rejected exports");
+        assert!(bytes.len() >= 16);
+        assert_eq!(&bytes[..16], b"SQLite format 3\0");
+        assert!(
+            list_vault_items_impl(&runtime)
+                .expect("live vault remains readable")
+                .iter()
+                .any(|item| matches!(item, VaultItemView::SecureNote { title, .. } if title == "Self-target guard"))
+        );
+    }
+
+    #[test]
+    fn export_selection_generation_is_fenced_before_capture() {
+        let (directory, runtime) = runtime();
+        initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
+        create_note_impl(
+            &runtime,
+            "Generation-fenced save dialog".to_owned(),
+            "Body".to_owned(),
+        )
+        .expect("create record");
+        let stale_generation =
+            capture_export_generation(&runtime, "exporting records").expect("capture generation");
+        lock_vault_impl(&runtime).expect("lock before simulated dialog selection");
+        unlock_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("reunlock after dialog opened");
+
+        let readable_destination = directory.path().join("stale-readable-export.json");
+        assert!(
+            export_human_readable_impl_for_generation(
+                &runtime,
+                readable_destination.to_string_lossy().to_string(),
+                stale_generation,
+            )
+            .is_err()
+        );
+        assert!(!readable_destination.exists());
+
+        let backup_destination = directory.path().join("stale-encrypted-backup.sqlite3");
+        assert!(
+            backup_database_copy_impl_for_generation(
+                &runtime,
+                backup_destination.to_string_lossy().to_string(),
+                stale_generation,
+            )
+            .is_err()
+        );
+        assert!(!backup_destination.exists());
     }
 
     #[test]

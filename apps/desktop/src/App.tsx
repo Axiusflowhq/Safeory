@@ -29,7 +29,7 @@ import {
 import { HugeiconsIcon } from "@hugeicons/react";
 import { ShieldKeyholeBoldIcon } from "@solar-icons/react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
-import { open, save } from "@tauri-apps/plugin-dialog";
+import { open } from "@tauri-apps/plugin-dialog";
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { SessionFence } from "./sessionFence";
 
@@ -2596,6 +2596,8 @@ function SettingsPanel({
   const [recoveryConfirm, setRecoveryConfirm] = useState("");
   const [recoveryBusy, setRecoveryBusy] = useState(false);
   const [backupBusy, setBackupBusy] = useState(false);
+  const [backupStatus, setBackupStatus] = useState<string | null>(null);
+  const [backupError, setBackupError] = useState<string | null>(null);
   const [restorePath, setRestorePath] = useState<string | null>(null);
   const [restoreCredential, setRestoreCredential] = useState<
     "passphrase" | "recovery"
@@ -2607,13 +2609,13 @@ function SettingsPanel({
     useState("");
   const [restoreError, setRestoreError] = useState<string | null>(null);
   const [restoreBusy, setRestoreBusy] = useState(false);
-  const restoreBusyRef = useRef(false);
+  const dismissBlockedRef = useRef(false);
   const dialogRef = useRef<HTMLElement | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const restoreBlockedBySettingsOperation =
     savingSettings || changingPassphrase || recoveryBusy || backupBusy;
 
-  restoreBusyRef.current = restoreBusy;
+  dismissBlockedRef.current = restoreBusy || backupBusy;
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -2625,7 +2627,7 @@ function SettingsPanel({
     closeButtonRef.current?.focus();
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        if (restoreBusyRef.current) return;
+        if (dismissBlockedRef.current) return;
         event.preventDefault();
         onClose();
         return;
@@ -2775,20 +2777,16 @@ function SettingsPanel({
     if (backupBusy || restoreBusy) return;
     setBackupBusy(true);
     setPanelError(null);
+    setStatus(null);
+    setBackupStatus(null);
+    setBackupError(null);
     try {
-      const path = await save({
-        defaultPath: "safeory-export.json",
-        filters: [{ name: "JSON", extensions: ["json"] }],
-      });
-      if (path === null) return;
-      const result = await invoke<{ items: number; path: string }>(
-        "export_human_readable",
-        { path },
-      );
+      const itemCount = await invoke<number | null>("export_human_readable");
+      if (itemCount === null) return;
       if (!isGenerationCurrent(generation)) return;
-      setStatus(`Exported ${result.items} records to ${result.path}`);
+      setBackupStatus(`Exported ${itemCount} active records.`);
     } catch (reason) {
-      if (isGenerationCurrent(generation)) setPanelError(readError(reason));
+      if (isGenerationCurrent(generation)) setBackupError(readError(reason));
     } finally {
       if (isGenerationCurrent(generation)) setBackupBusy(false);
     }
@@ -2798,16 +2796,16 @@ function SettingsPanel({
     if (backupBusy || restoreBusy) return;
     setBackupBusy(true);
     setPanelError(null);
+    setStatus(null);
+    setBackupStatus(null);
+    setBackupError(null);
     try {
-      const path = await save({ defaultPath: "safeory-backup.sqlite3" });
-      if (path === null) return;
-      const result = await invoke<{ path: string }>("backup_database_copy", {
-        path,
-      });
+      const saved = await invoke<boolean>("backup_database_copy");
+      if (!saved) return;
       if (!isGenerationCurrent(generation)) return;
-      setStatus(`Encrypted database backup written to ${result.path}`);
+      setBackupStatus("Encrypted database backup written successfully.");
     } catch (reason) {
-      if (isGenerationCurrent(generation)) setPanelError(readError(reason));
+      if (isGenerationCurrent(generation)) setBackupError(readError(reason));
     } finally {
       if (isGenerationCurrent(generation)) setBackupBusy(false);
     }
@@ -2992,7 +2990,7 @@ function SettingsPanel({
           <button
             ref={closeButtonRef}
             type="button"
-            disabled={restoreBusy}
+            disabled={restoreBusy || backupBusy}
             onClick={onClose}
             className="flex items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] px-3 py-2 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--selected)] disabled:cursor-not-allowed disabled:opacity-55"
           >
@@ -3324,6 +3322,22 @@ function SettingsPanel({
               {backupBusy ? "Working…" : "Backup encrypted database"}
             </button>
           </div>
+          {backupError ? (
+            <div
+              role="alert"
+              className="mt-4 rounded-xl border border-[var(--danger-border)] bg-[var(--danger-soft)] px-4 py-3 text-sm text-[var(--danger)]"
+            >
+              {backupError}
+            </div>
+          ) : backupStatus ? (
+            <div
+              role="status"
+              aria-live="polite"
+              className="mt-4 rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] px-4 py-3 text-sm text-[var(--text-secondary)]"
+            >
+              {backupStatus}
+            </div>
+          ) : null}
 
           <form
             onSubmit={restoreDatabase}

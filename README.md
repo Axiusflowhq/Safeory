@@ -68,8 +68,10 @@ Implemented now:
   evaluation (destruction/deny wins, private-forever, multi-approval,
   waiting periods as documented server-enforced policy, not time-lock crypto),
 - portable export and recovery: human-readable active-record JSON plus a
-  validated encrypted SQLite snapshot, both written atomically to user-chosen
-  locations; encrypted backups can be restored transactionally from Settings
+  validated encrypted SQLite snapshot, both written atomically through
+  Rust-owned native save dialogs to user-chosen locations; the renderer cannot
+  supply arbitrary export paths, and the active vault database is rejected as
+  an output target; encrypted backups can be restored transactionally from Settings
   or during first-run setup using either the backup master passphrase or the
   recovery key captured by that backup, without overwriting device-only
   preferences,
