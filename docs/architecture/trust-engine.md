@@ -49,11 +49,13 @@ Rules:
 
 1. Existing `lifevault:v1:item-wrap` domain is immutable wire format. Do not
    rename. New compartments use `safeory:v1:*`.
-2. All Ownership kinds reuse the existing per-item envelope. The encrypted item
-   payload schema is now v4 to carry the required per-item legacy-planning
-   disposition. Readers explicitly decode v1-v3 as `Unspecified`; older builds
-   that only understand through v3 reject v4 rather than silently dropping the
-   field. The SQLite schema does not change for this payload-only migration.
+2. All Ownership kinds reuse the existing per-item envelope. Item payload schema
+   v4 introduced the required per-item legacy-planning disposition. Readers
+   explicitly decode v1-v3 as `Unspecified`; older builds that only understand
+   through v3 reject v4 rather than silently dropping the field. Later payload
+   versions retain that boundary; the current write version and compatibility
+   matrix are maintained in `docs/security/cryptography.md`. The SQLite schema
+   did not change for the v4 payload-only migration.
    Compartments remain future work, with key separation requiring its own
    reviewed migration.
 3. Per-item keys stay random per revision. Sharing wraps only the item key to
@@ -74,7 +76,8 @@ Rules:
 
 ## Trust Engine (V1 policy model, enforcement local-first)
 
-Per-object policy (encrypted payload, evaluated in Rust core):
+Target per-object policy (future encrypted payload; currently evaluated in the
+Rust core only):
 
 ```text
 Policy {
@@ -92,8 +95,9 @@ cannot decrypt (documented limitation, no fake time-lock crypto claims).
 
 V1 enforcement order: owner-only + explicit per-item grants + waiting period +
 deny/revoke wins over release. 2-of-3 threshold uses standard Shamir sharing
-over the capsule key, not custom crypto. Library choice + audit happens before
-`vault-sharing`/`vault-emergency` leave stub state.
+over the capsule key, not custom crypto. The portable `vault-sharing` and
+`vault-emergency` cores are implemented and tested; grant persistence,
+IPC/session wiring, and timed-release coordination remain pending.
 
 ## Recovery (no backdoor)
 
