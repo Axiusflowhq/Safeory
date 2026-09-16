@@ -1508,6 +1508,7 @@ fn validate_emergency_card(card: &EmergencyCard) -> Result<(), VaultError> {
         if contact.name.chars().count() > MAX_ITEM_TITLE_CHARS
             || contact.relation.chars().count() > MAX_ITEM_TITLE_CHARS
             || contact.phone.chars().count() > MAX_ITEM_TITLE_CHARS
+            || contact.email.chars().count() > MAX_ITEM_TITLE_CHARS
             || contact.notes.chars().count() > MAX_ITEM_NOTES_CHARS
         {
             return Err(VaultError::ItemTooLarge);
@@ -1993,6 +1994,7 @@ mod tests {
                 name: "Ada".to_owned(),
                 relation: "Sibling".to_owned(),
                 phone: "+1-555-0100".to_owned(),
+                email: String::new(),
                 notes: String::new(),
             }],
             instructions: "Call first.".to_owned(),
@@ -3040,6 +3042,7 @@ mod tests {
                 name: "Ada".to_owned(),
                 relation: "Sibling".to_owned(),
                 phone: "+1-555-0100".to_owned(),
+                email: "ada@example.test".to_owned(),
                 notes: "Call first".to_owned(),
             }],
             instructions: "Follow the printed steps".to_owned(),
@@ -3089,6 +3092,7 @@ mod tests {
                     name: format!("Contact {index}"),
                     relation: "Friend".to_owned(),
                     phone: "123".to_owned(),
+                    email: String::new(),
                     notes: String::new(),
                 })
                 .collect(),
@@ -3096,6 +3100,22 @@ mod tests {
         };
         assert!(matches!(
             session.set_emergency_card(&too_many_contacts),
+            Err(VaultError::ItemTooLarge)
+        ));
+
+        let oversized_email = EmergencyCard {
+            selected_item_ids: Vec::new(),
+            contacts: vec![EmergencyContact {
+                name: "Ada".to_owned(),
+                relation: "Sibling".to_owned(),
+                phone: String::new(),
+                email: "x".repeat(MAX_ITEM_TITLE_CHARS + 1),
+                notes: String::new(),
+            }],
+            instructions: String::new(),
+        };
+        assert!(matches!(
+            session.set_emergency_card(&oversized_email),
             Err(VaultError::ItemTooLarge)
         ));
     }

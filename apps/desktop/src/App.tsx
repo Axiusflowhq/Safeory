@@ -326,6 +326,7 @@ type EmergencyContact = {
   name: string;
   relation: string;
   phone: string;
+  email: string;
   notes: string;
 };
 
@@ -1996,8 +1997,8 @@ function PlanTestPanel({
           ready: readiness.has_contacts,
           label: "Emergency contact added",
           detail: readiness.has_contacts
-            ? "At least one named contact with a phone number is present."
-            : "Add a named contact with a phone number to the Emergency Card.",
+            ? "At least one named contact has a phone number or email address."
+            : "Add a named contact with a phone number or email address to the Emergency Card.",
         },
         {
           ready: readiness.has_instructions,
@@ -2436,6 +2437,20 @@ function EmergencyCardScreen({
                               placeholder="+91 …"
                             />
                           </Field>
+                          <Field label="Email">
+                            <input
+                              value={contact.email}
+                              autoComplete="off"
+                              inputMode="email"
+                              onChange={(event) =>
+                                updateContact(index, {
+                                  email: event.target.value,
+                                })
+                              }
+                              className="field-input"
+                              placeholder="name@example.com"
+                            />
+                          </Field>
                           <Field label="Notes">
                             <input
                               value={contact.notes}
@@ -2474,7 +2489,13 @@ function EmergencyCardScreen({
                   onClick={() =>
                     setContacts((current) => [
                       ...current,
-                      { name: "", relation: "", phone: "", notes: "" },
+                      {
+                        name: "",
+                        relation: "",
+                        phone: "",
+                        email: "",
+                        notes: "",
+                      },
                     ])
                   }
                   className="mt-3 flex items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] px-3 py-2 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--selected)]"
@@ -2600,6 +2621,11 @@ function EmergencyCardScreen({
                           {contact.phone ? (
                             <div className="text-[var(--text-secondary)]">
                               {contact.phone}
+                            </div>
+                          ) : null}
+                          {contact.email ? (
+                            <div className="break-all text-[var(--text-secondary)]">
+                              {contact.email}
                             </div>
                           ) : null}
                           {contact.notes ? (

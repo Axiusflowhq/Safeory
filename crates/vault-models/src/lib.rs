@@ -79,6 +79,8 @@ pub struct EmergencyContact {
     pub name: String,
     pub relation: String,
     pub phone: String,
+    #[serde(default)]
+    pub email: String,
     pub notes: String,
 }
 
@@ -649,6 +651,7 @@ mod tests {
                 name: "Ada".to_owned(),
                 relation: "Sibling".to_owned(),
                 phone: "+1-555-0100".to_owned(),
+                email: "ada@example.test".to_owned(),
                 notes: "Call first".to_owned(),
             }],
             instructions: "Follow the printed steps".to_owned(),
@@ -658,6 +661,29 @@ mod tests {
         assert_eq!(item.kind, ItemKind::EmergencyInstruction);
         assert_eq!(item.title, "Emergency Card");
         assert_eq!(item.parse_emergency_card(), Some(card));
+    }
+
+    #[test]
+    fn emergency_card_missing_contact_email_defaults_empty() {
+        let mut item = VaultItem::emergency_card(&EmergencyCard::empty());
+        item.fields.insert(
+            "card".to_owned(),
+            serde_json::json!({
+                "selected_item_ids": [],
+                "contacts": [{
+                    "name": "Ada",
+                    "relation": "Sibling",
+                    "phone": "+1-555-0100",
+                    "notes": "Call first"
+                }],
+                "instructions": "Use the phone."
+            })
+            .to_string(),
+        );
+        let card = item
+            .parse_emergency_card()
+            .expect("parse legacy emergency card");
+        assert_eq!(card.contacts[0].email, "");
     }
 
     #[test]

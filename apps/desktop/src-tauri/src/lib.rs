@@ -780,6 +780,7 @@ struct ContactPayload {
     name: String,
     relation: String,
     phone: String,
+    email: String,
     notes: String,
 }
 
@@ -3807,6 +3808,7 @@ fn emergency_card_payload(card: EmergencyCard) -> EmergencyCardPayload {
                 name: contact.name,
                 relation: contact.relation,
                 phone: contact.phone,
+                email: contact.email,
                 notes: contact.notes,
             })
             .collect(),
@@ -3852,6 +3854,7 @@ fn update_emergency_card_impl(
                 name: contact.name,
                 relation: contact.relation,
                 phone: contact.phone,
+                email: contact.email,
                 notes: contact.notes,
             })
             .collect(),
@@ -4668,10 +4671,10 @@ fn get_plan_readiness_impl(state: &VaultRuntime) -> Result<PlanReadinessView, St
     Ok(PlanReadinessView {
         recovery_configured,
         has_selected_records,
-        has_contacts: card
-            .contacts
-            .iter()
-            .any(|contact| !contact.name.trim().is_empty() && !contact.phone.trim().is_empty()),
+        has_contacts: card.contacts.iter().any(|contact| {
+            !contact.name.trim().is_empty()
+                && (!contact.phone.trim().is_empty() || !contact.email.trim().is_empty())
+        }),
         has_instructions: !card.instructions.trim().is_empty(),
         has_stale_selected_records,
         has_legacy_preferences,
@@ -8764,6 +8767,7 @@ mod tests {
             name: "Ada".to_owned(),
             relation: "Sibling".to_owned(),
             phone: "+1-555-0100".to_owned(),
+            email: "ada@example.test".to_owned(),
             notes: "Call first".to_owned(),
         };
         let rev1 = update_emergency_card_impl(
@@ -8783,6 +8787,7 @@ mod tests {
         assert_eq!(loaded.card.selected_item_ids, vec![note.id.clone()]);
         assert_eq!(loaded.card.contacts.len(), 1);
         assert_eq!(loaded.card.contacts[0].name, "Ada");
+        assert_eq!(loaded.card.contacts[0].email, "ada@example.test");
         assert_eq!(loaded.card.instructions, "Follow the printed steps");
 
         let second = create_note_impl(&runtime, "Second target".to_owned(), "Body".to_owned())
@@ -8791,6 +8796,7 @@ mod tests {
             name: "Bob".to_owned(),
             relation: "Friend".to_owned(),
             phone: "+1-555-0200".to_owned(),
+            email: String::new(),
             notes: String::new(),
         };
         let rev2 = update_emergency_card_impl(
@@ -9500,6 +9506,7 @@ mod tests {
                 name: "Private Contact Name".to_owned(),
                 relation: "Sibling".to_owned(),
                 phone: "+1-555-0199".to_owned(),
+                email: "private@example.test".to_owned(),
                 notes: "Private contact notes".to_owned(),
             }],
             "Private emergency instructions".to_owned(),
@@ -9544,6 +9551,7 @@ mod tests {
                 name: String::new(),
                 relation: String::new(),
                 phone: String::new(),
+                email: String::new(),
                 notes: String::new(),
             }],
             String::new(),
@@ -9552,6 +9560,31 @@ mod tests {
 
         let readiness = get_plan_readiness_impl(&runtime).expect("plan readiness");
         assert!(!readiness.has_contacts);
+    }
+
+    #[test]
+    fn plan_readiness_counts_named_email_only_emergency_contact() {
+        let (_directory, runtime) = runtime();
+        initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
+        update_emergency_card_impl(
+            &runtime,
+            None,
+            Vec::new(),
+            vec![ContactPayload {
+                name: "Email Contact".to_owned(),
+                relation: "Friend".to_owned(),
+                phone: String::new(),
+                email: "helper@example.test".to_owned(),
+                notes: String::new(),
+            }],
+            String::new(),
+        )
+        .expect("set email-only emergency contact");
+
+        let readiness = get_plan_readiness_impl(&runtime).expect("plan readiness");
+        assert!(readiness.has_contacts);
+        let serialized = serde_json::to_string(&readiness).expect("serialize readiness");
+        assert!(!serialized.contains("helper@example.test"));
     }
 
     #[test]
@@ -9622,7 +9655,13 @@ mod tests {
             &runtime,
             None,
             vec![note.id.clone()],
-            Vec::new(),
+            vec![ContactPayload {
+                name: "Export Contact".to_owned(),
+                relation: "Sibling".to_owned(),
+                phone: String::new(),
+                email: "export-contact@example.test".to_owned(),
+                notes: String::new(),
+            }],
             "Export card instructions".to_owned(),
         )
         .expect("create card");
@@ -9650,6 +9689,7 @@ mod tests {
         let serialized = serde_json::to_string(&parsed).expect("serialize export");
         assert!(serialized.contains("Seeded Export Title"));
         assert!(serialized.contains("Export card instructions"));
+        assert!(serialized.contains("export-contact@example.test"));
         assert!(serialized.contains("selected_for_legacy"));
         assert!(serialized.contains("EXPORT-CLOSURE-MARKER"));
         assert!(serialized.contains("review_manually"));
@@ -9713,6 +9753,12 @@ mod tests {
                     && item.fields.get("category").map(String::as_str) == Some("Photography")
                     && item.fields.get("location").map(String::as_str) == Some("Display cabinet"))
         );
+        let backup_card = backup_session
+            .get_emergency_card()
+            .expect("read backup emergency card")
+            .expect("backup emergency card present")
+            .0;
+        assert_eq!(backup_card.contacts[0].email, "export-contact@example.test");
     }
 
     #[test]
