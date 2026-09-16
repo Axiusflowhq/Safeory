@@ -26,7 +26,7 @@ Implemented now:
 - local desktop vault setup, lock/unlock, secure notes, masked credentials,
   encrypted document-metadata, receipt, insurance, financial, property, vehicle,
   and possession records, revisioned editing, stale-edit conflict protection,
-  metadata-only list projections with narrow on-demand secret reveal/edit,
+  safe redacted list projections with narrow on-demand protected-field reveal/edit,
   backend-owned credential password copy with conditional 30-second clipboard
   clearing that never exposes generic clipboard access to the renderer,
   encrypted cross-item links with title resolution and jump navigation,
