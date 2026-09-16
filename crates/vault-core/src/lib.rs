@@ -341,6 +341,9 @@ impl AttachmentExportPlan {
                 return Err(VaultError::AttachmentOperationCancelled);
             }
             output.sync_all()?;
+            if cancelled() {
+                return Err(VaultError::AttachmentOperationCancelled);
+            }
             Ok(())
         })();
         drop(output);
@@ -2656,6 +2659,38 @@ mod tests {
             Err(VaultError::AttachmentOperationCancelled)
         ));
         assert!(checks.get() >= 4);
+        assert!(!export_path.exists());
+    }
+
+    #[test]
+    fn cancelled_attachment_export_after_final_sync_removes_output() {
+        let dir = tempdir().expect("temp directory");
+        let database = dir.path().join("vault.sqlite3");
+        let source_path = dir.path().join("cancel-after-sync-source.bin");
+        let export_path = dir.path().join("cancel-after-sync.bin");
+        fs::write(&source_path, vec![0x5C; 17]).expect("write source attachment");
+        let session = VaultSession::create(&database, TEST_PASSPHRASE).expect("create vault");
+        let item = VaultItem::secure_note("attachment owner", "body");
+        session.put_item(&item, 1).expect("store owner");
+        let (summary, _) = session
+            .add_attachment_from_path(item.id, 1, &source_path)
+            .expect("add attachment");
+        let plan = session
+            .prepare_attachment_export(item.id, summary.id)
+            .expect("prepare export");
+        let checks = Cell::new(0usize);
+
+        let result = plan.write_to_path(&export_path, || {
+            let next = checks.get() + 1;
+            checks.set(next);
+            next >= 5
+        });
+
+        assert!(matches!(
+            result,
+            Err(VaultError::AttachmentOperationCancelled)
+        ));
+        assert_eq!(checks.get(), 5);
         assert!(!export_path.exists());
     }
 
