@@ -577,6 +577,7 @@ export default function App() {
           setDeadlines(
             rows.slice(0, 8).map((row) => ({
               id: row.item_id,
+              kind: row.kind,
               title: row.title,
               label: row.label,
               date: row.date,
@@ -1493,7 +1494,11 @@ export default function App() {
 
         <div className="mt-6">
           {vaultView === "active" && editor === null && !finding ? (
-            <TodayPanel items={items} deadlines={deadlines} />
+            <TodayPanel
+              items={items}
+              deadlines={deadlines}
+              onJump={jumpToRecord}
+            />
           ) : null}
           {vaultView === "trash" ? (
             <TrashCollection
@@ -8970,9 +8975,11 @@ function EditorFooter({
 function TodayPanel({
   items,
   deadlines,
+  onJump,
 }: {
   items: VaultItem[];
   deadlines: TodayEntry[] | null;
+  onJump: (kind: string, id: string) => boolean;
 }) {
   // IPC-backed deadlines when available; the local parse below is the advisory
   // fallback used while loading or when list_deadlines fails.
@@ -9001,9 +9008,11 @@ function TodayPanel({
           const overdue = entry.daysUntil < 0;
           const dueSoon = entry.daysUntil >= 0 && entry.daysUntil <= 30;
           return (
-            <div
+            <button
               key={`${entry.id}:${entry.date}`}
-              className={`flex items-center justify-between gap-3 rounded-xl border px-3 py-2.5 ${
+              type="button"
+              onClick={() => onJump(entry.kind, entry.id)}
+              className={`flex w-full items-center justify-between gap-3 rounded-xl border px-3 py-2.5 text-left transition hover:-translate-y-px hover:bg-[var(--selected)] ${
                 overdue
                   ? "border-[var(--danger-border)] bg-[var(--danger-soft)]"
                   : dueSoon
@@ -9035,7 +9044,7 @@ function TodayPanel({
                   {formatDaysUntil(entry.daysUntil)}
                 </div>
               </div>
-            </div>
+            </button>
           );
         })}
       </div>
@@ -9747,6 +9756,7 @@ function withoutKind<T extends VaultItem>(item: T): Omit<T, "kind"> {
 
 type TodayEntry = {
   id: string;
+  kind: string;
   title: string;
   label: string;
   date: string;
@@ -9829,7 +9839,14 @@ function collectTodayEntries(items: VaultItem[]): TodayEntry[] {
     const targetMs = parseStrictYYYYMMDD(date);
     if (targetMs === null) continue;
     const daysUntil = Math.round((targetMs - todayMs) / 86_400_000);
-    entries.push({ id: item.id, title: item.title, label, date, daysUntil });
+    entries.push({
+      id: item.id,
+      kind: item.kind,
+      title: item.title,
+      label,
+      date,
+      daysUntil,
+    });
   }
   entries.sort(
     (left, right) =>
