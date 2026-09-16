@@ -2823,9 +2823,11 @@ fn copy_credential_password_impl(
     }
     let generation = capture_session_generation(state);
     drop(item);
+    let copy_result = state.clipboard_cleaner.copy_secret(&password, generation);
+    // Keep the vault session guard through clipboard publication so a lock
+    // cannot linearize before plaintext from this session reaches the OS.
     drop(session);
-
-    state.clipboard_cleaner.copy_secret(&password, generation)?;
+    copy_result?;
     Ok(CopyCredentialPasswordStatus {
         clears_in_seconds: CREDENTIAL_CLIPBOARD_TTL_SECONDS,
     })
@@ -6566,7 +6568,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::{atomic::AtomicUsize, mpsc};
     use tempfile::tempdir;
 
     const PASSPHRASE: &str = "a long adapter test passphrase";
@@ -6858,6 +6860,76 @@ mod tests {
         assert_eq!(clipboard.text(), "clear-on-lock");
 
         lock_vault_impl(&runtime).expect("lock vault");
+
+        assert!(wait_until(Duration::from_secs(2), || clipboard
+            .text()
+            .is_empty()));
+        assert_eq!(clipboard.clears(), 1);
+    }
+
+    #[test]
+    fn credential_password_publication_finishes_before_lock() {
+        let clipboard = Arc::new(FakeClipboard::default());
+        let (_directory, runtime) =
+            runtime_with_clipboard(clipboard.clone(), Duration::from_secs(5));
+        let runtime = Arc::new(runtime);
+        initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
+        let credential = create_credential_impl(
+            &runtime,
+            "Email".to_owned(),
+            String::new(),
+            "publish-before-lock".to_owned(),
+            String::new(),
+            String::new(),
+        )
+        .expect("create credential");
+
+        let io_gate = runtime
+            .clipboard_cleaner
+            .shared
+            .io_gate
+            .lock()
+            .expect("clipboard io gate");
+        let copy_runtime = Arc::clone(&runtime);
+        let (copy_done_tx, copy_done_rx) = mpsc::channel();
+        let copy_thread = std::thread::spawn(move || {
+            let result =
+                copy_credential_password_impl(&copy_runtime, credential.id, credential.revision);
+            copy_done_tx.send(result).expect("report copy result");
+        });
+        assert!(wait_until(Duration::from_secs(2), || matches!(
+            runtime.session.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        )));
+
+        let lock_runtime = Arc::clone(&runtime);
+        let (lock_started_tx, lock_started_rx) = mpsc::channel();
+        let (lock_done_tx, lock_done_rx) = mpsc::channel();
+        let lock_thread = std::thread::spawn(move || {
+            lock_started_tx.send(()).expect("report lock start");
+            let result = lock_vault_impl(&lock_runtime);
+            lock_done_tx.send(result).expect("report lock result");
+        });
+
+        lock_started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("lock starts");
+        assert!(matches!(
+            lock_done_rx.recv_timeout(Duration::from_millis(150)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        drop(io_gate);
+
+        copy_done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("copy completes")
+            .expect("copy password");
+        lock_done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("lock completes")
+            .expect("lock vault");
+        copy_thread.join().expect("copy thread");
+        lock_thread.join().expect("lock thread");
 
         assert!(wait_until(Duration::from_secs(2), || clipboard
             .text()
