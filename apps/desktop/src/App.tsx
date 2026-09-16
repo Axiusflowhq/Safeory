@@ -1285,6 +1285,7 @@ export default function App() {
           canReplaceVault={() => editor === null && canLeaveSelectedRecord()}
           onClose={() => setSettingsOpen(false)}
           onSettingsSaved={setDeviceSettings}
+          onLockVault={lockVault}
           onVaultRestored={() => {
             sessionFence.invalidate();
             clearPlaintextUi();
@@ -2791,6 +2792,7 @@ function SettingsPanel({
   canReplaceVault,
   onClose,
   onSettingsSaved,
+  onLockVault,
   onVaultRestored,
   onError,
 }: {
@@ -2800,6 +2802,7 @@ function SettingsPanel({
   canReplaceVault: () => boolean;
   onClose: () => void;
   onSettingsSaved: (settings: DeviceSettings) => void;
+  onLockVault: () => Promise<void>;
   onVaultRestored: () => void;
   onError: (message: string | null) => void;
 }) {
@@ -2810,6 +2813,7 @@ function SettingsPanel({
     settings.lock_on_background,
   );
   const [savingSettings, setSavingSettings] = useState(false);
+  const [strictLockBusy, setStrictLockBusy] = useState(false);
   const [currentPassphrase, setCurrentPassphrase] = useState("");
   const [newPassphrase, setNewPassphrase] = useState("");
   const [confirmation, setConfirmation] = useState("");
@@ -2842,12 +2846,16 @@ function SettingsPanel({
   const dialogRef = useRef<HTMLElement | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const restoreBlockedBySettingsOperation =
-    savingSettings || changingPassphrase || recoveryBusy || backupBusy;
+    savingSettings ||
+    strictLockBusy ||
+    changingPassphrase ||
+    recoveryBusy ||
+    backupBusy;
   const lastBackupCreation = formatBackupCreationTime(
     settings.last_successful_encrypted_backup_at_ms,
   );
 
-  dismissBlockedRef.current = restoreBusy || backupBusy;
+  dismissBlockedRef.current = restoreBusy || backupBusy || strictLockBusy;
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -2919,7 +2927,7 @@ function SettingsPanel({
   }, [generation, isGenerationCurrent]);
 
   async function generateRecoverySecret(replacing: boolean) {
-    if (recoveryBusy || restoreBusy) return;
+    if (recoveryBusy || restoreBusy || strictLockBusy) return;
     setRecoveryBusy(true);
     setPanelError(null);
     setStatus(null);
@@ -2939,7 +2947,8 @@ function SettingsPanel({
 
   async function confirmRecoverySecret(event: FormEvent) {
     event.preventDefault();
-    if (recoveryBusy || restoreBusy || !generatedRecovery) return;
+    if (recoveryBusy || restoreBusy || strictLockBusy || !generatedRecovery)
+      return;
     if (recoveryConfirm !== generatedRecovery.secret) {
       setPanelError(
         "The re-entered secret does not match the generated secret. Copy it carefully and try again.",
@@ -2976,7 +2985,8 @@ function SettingsPanel({
   }
 
   async function saveRecoverySecret() {
-    if (recoveryBusy || restoreBusy || !generatedRecovery) return;
+    if (recoveryBusy || restoreBusy || strictLockBusy || !generatedRecovery)
+      return;
     setRecoveryBusy(true);
     setPanelError(null);
     setStatus(null);
@@ -3006,7 +3016,7 @@ function SettingsPanel({
   }
 
   async function exportReadable() {
-    if (backupBusy || restoreBusy) return;
+    if (backupBusy || restoreBusy || strictLockBusy) return;
     setBackupBusy(true);
     setPanelError(null);
     setStatus(null);
@@ -3025,7 +3035,7 @@ function SettingsPanel({
   }
 
   async function backupDatabase() {
-    if (backupBusy || restoreBusy) return;
+    if (backupBusy || restoreBusy || strictLockBusy) return;
     setBackupBusy(true);
     setPanelError(null);
     setStatus(null);
@@ -3145,7 +3155,7 @@ function SettingsPanel({
 
   async function saveSettings(event: FormEvent) {
     event.preventDefault();
-    if (savingSettings || restoreBusy) return;
+    if (savingSettings || restoreBusy || strictLockBusy) return;
     setSavingSettings(true);
     setPanelError(null);
     setStatus(null);
@@ -3167,7 +3177,7 @@ function SettingsPanel({
 
   async function changePassphrase(event: FormEvent) {
     event.preventDefault();
-    if (changingPassphrase || restoreBusy) return;
+    if (changingPassphrase || restoreBusy || strictLockBusy) return;
     if (Array.from(newPassphrase).length < 12) {
       setPanelError(
         "Use at least 12 characters for the new master passphrase.",
@@ -3201,6 +3211,38 @@ function SettingsPanel({
     }
   }
 
+  async function applyStrictLocalLock() {
+    if (
+      strictLockBusy ||
+      savingSettings ||
+      changingPassphrase ||
+      recoveryBusy ||
+      backupBusy ||
+      restoreBusy
+    ) {
+      return;
+    }
+    setStrictLockBusy(true);
+    setPanelError(null);
+    setStatus(null);
+    onError(null);
+    try {
+      const saved = await invoke<DeviceSettings>("update_device_settings", {
+        autoLockMinutes: 1,
+        lockOnBackground: true,
+      });
+      if (!isGenerationCurrent(generation)) return;
+      setAutoLockMinutes(saved.auto_lock_minutes);
+      setLockOnBackground(saved.lock_on_background);
+      onSettingsSaved(saved);
+      await onLockVault();
+    } catch (reason) {
+      if (isGenerationCurrent(generation)) setPanelError(readError(reason));
+    } finally {
+      if (isGenerationCurrent(generation)) setStrictLockBusy(false);
+    }
+  }
+
   return (
     <div
       className="fixed inset-0 z-50 flex justify-end bg-black/20"
@@ -3229,7 +3271,7 @@ function SettingsPanel({
           <button
             ref={closeButtonRef}
             type="button"
-            disabled={restoreBusy || backupBusy}
+            disabled={restoreBusy || backupBusy || strictLockBusy}
             onClick={onClose}
             className="flex items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] px-3 py-2 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--selected)] disabled:cursor-not-allowed disabled:opacity-55"
           >
@@ -3269,7 +3311,7 @@ function SettingsPanel({
           <div className="mt-4">
             <Field label="Lock after inactivity">
               <select
-                disabled={restoreBusy}
+                disabled={restoreBusy || strictLockBusy}
                 value={autoLockMinutes}
                 onChange={(event) =>
                   setAutoLockMinutes(Number(event.target.value))
@@ -3287,7 +3329,7 @@ function SettingsPanel({
           <label className="mt-4 flex items-start gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] p-4">
             <input
               type="checkbox"
-              disabled={restoreBusy}
+              disabled={restoreBusy || strictLockBusy}
               checked={lockOnBackground}
               onChange={(event) => setLockOnBackground(event.target.checked)}
               className="mt-1"
@@ -3305,13 +3347,41 @@ function SettingsPanel({
           <div className="mt-4 flex justify-end">
             <button
               type="submit"
-              disabled={savingSettings || restoreBusy}
+              disabled={savingSettings || restoreBusy || strictLockBusy}
               className="rounded-xl bg-[var(--primary)] px-4 py-2.5 text-sm font-medium text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-55"
             >
               {savingSettings ? "Saving…" : "Save lock settings"}
             </button>
           </div>
         </form>
+
+        <section className="mt-9 border-t border-[var(--border)] pt-8">
+          <h2 className="text-base font-semibold">Strict local lock</h2>
+          <p className="mt-1 text-sm leading-6 text-[var(--text-muted)]">
+            Set auto-lock to 1 minute, turn on lock when Safeory goes to the
+            background, and lock the vault now. These settings stay in effect
+            until you change them.
+          </p>
+          <div className="mt-4 flex justify-end">
+            <button
+              type="button"
+              disabled={
+                strictLockBusy ||
+                savingSettings ||
+                changingPassphrase ||
+                recoveryBusy ||
+                backupBusy ||
+                restoreBusy
+              }
+              onClick={() => void applyStrictLocalLock()}
+              className="rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] px-4 py-2.5 text-sm font-medium text-[var(--text-primary)] transition hover:bg-[var(--selected)] disabled:cursor-not-allowed disabled:opacity-55"
+            >
+              {strictLockBusy
+                ? "Applying…"
+                : "Apply strict lock settings and lock now"}
+            </button>
+          </div>
+        </section>
 
         <form
           onSubmit={changePassphrase}
@@ -3326,7 +3396,7 @@ function SettingsPanel({
             <Field label="Current master passphrase">
               <input
                 type="password"
-                disabled={restoreBusy}
+                disabled={restoreBusy || strictLockBusy}
                 autoComplete="current-password"
                 value={currentPassphrase}
                 onChange={(event) => setCurrentPassphrase(event.target.value)}
@@ -3336,7 +3406,7 @@ function SettingsPanel({
             <Field label="New master passphrase">
               <input
                 type="password"
-                disabled={restoreBusy}
+                disabled={restoreBusy || strictLockBusy}
                 autoComplete="new-password"
                 value={newPassphrase}
                 onChange={(event) => setNewPassphrase(event.target.value)}
@@ -3347,7 +3417,7 @@ function SettingsPanel({
             <Field label="Confirm new passphrase">
               <input
                 type="password"
-                disabled={restoreBusy}
+                disabled={restoreBusy || strictLockBusy}
                 autoComplete="new-password"
                 value={confirmation}
                 onChange={(event) => setConfirmation(event.target.value)}
@@ -3361,6 +3431,7 @@ function SettingsPanel({
               disabled={
                 changingPassphrase ||
                 restoreBusy ||
+                strictLockBusy ||
                 !currentPassphrase ||
                 !newPassphrase ||
                 !confirmation
@@ -3373,7 +3444,7 @@ function SettingsPanel({
         </form>
 
         <fieldset
-          disabled={restoreBusy}
+          disabled={restoreBusy || strictLockBusy}
           className="mt-9 min-w-0 border-0 border-t border-[var(--border)] p-0 pt-8"
         >
           <h2 className="text-base font-semibold">Recovery kit</h2>
@@ -3564,7 +3635,7 @@ function SettingsPanel({
             <button
               type="button"
               onClick={() => void exportReadable()}
-              disabled={backupBusy || restoreBusy}
+              disabled={backupBusy || restoreBusy || strictLockBusy}
               className="flex items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] px-4 py-2.5 text-sm font-medium text-[var(--text-primary)] transition hover:bg-[var(--selected)] disabled:cursor-not-allowed disabled:opacity-55"
             >
               <HugeiconsIcon
@@ -3577,7 +3648,7 @@ function SettingsPanel({
             <button
               type="button"
               onClick={() => void backupDatabase()}
-              disabled={backupBusy || restoreBusy}
+              disabled={backupBusy || restoreBusy || strictLockBusy}
               className="flex items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] px-4 py-2.5 text-sm font-medium text-[var(--text-primary)] transition hover:bg-[var(--selected)] disabled:cursor-not-allowed disabled:opacity-55"
             >
               <HugeiconsIcon
