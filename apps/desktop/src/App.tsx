@@ -542,6 +542,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [cardOpen, setCardOpen] = useState(false);
   const [planOpen, setPlanOpen] = useState(false);
+  const closeEmergencyCard = useCallback(() => setCardOpen(false), []);
   const closePlanTest = useCallback(() => setPlanOpen(false), []);
   const [accountClosureDraftDirty, setAccountClosureDraftDirty] =
     useState(false);
@@ -1298,6 +1299,20 @@ export default function App() {
         <PlanTestPanel
           generation={sessionFence.token()}
           isGenerationCurrent={isSessionGenerationCurrent}
+          canOpenSettings={editor === null}
+          onOpenSettings={() => {
+            if (editor !== null) return;
+            setPlanOpen(false);
+            setCardOpen(false);
+            setSettingsOpen(true);
+            setError(null);
+          }}
+          onOpenEmergencyCard={() => {
+            setPlanOpen(false);
+            setSettingsOpen(false);
+            setCardOpen(true);
+            setError(null);
+          }}
           onClose={closePlanTest}
         />
       ) : null}
@@ -1308,7 +1323,7 @@ export default function App() {
           isGenerationCurrent={isSessionGenerationCurrent}
           items={items}
           onJump={jumpToRecord}
-          onClose={() => setCardOpen(false)}
+          onClose={closeEmergencyCard}
           onError={setError}
         />
       ) : null}
@@ -1864,10 +1879,16 @@ export default function App() {
 function PlanTestPanel({
   generation,
   isGenerationCurrent,
+  canOpenSettings,
+  onOpenSettings,
+  onOpenEmergencyCard,
   onClose,
 }: {
   generation: number;
   isGenerationCurrent: (generation: number) => boolean;
+  canOpenSettings: boolean;
+  onOpenSettings: () => void;
+  onOpenEmergencyCard: () => void;
   onClose: () => void;
 }) {
   const [readiness, setReadiness] = useState<PlanReadiness | null>(null);
@@ -1975,7 +1996,12 @@ function PlanTestPanel({
   const recordsReady =
     readiness?.has_selected_records === true &&
     readiness.has_stale_selected_records === false;
-  const checks = readiness
+  const checks: {
+    ready: boolean;
+    label: string;
+    detail: string;
+    action: "settings" | "card" | null;
+  }[] = readiness
     ? [
         {
           ready: readiness.recovery_configured,
@@ -1983,6 +2009,7 @@ function PlanTestPanel({
           detail: readiness.recovery_configured
             ? "The current vault has a recovery wrap."
             : "Set up a recovery kit in Settings.",
+          action: "settings",
         },
         {
           ready: recordsReady,
@@ -1992,6 +2019,7 @@ function PlanTestPanel({
             : readiness.has_selected_records
               ? "At least one active record is selected."
               : "Select at least one active record in the Emergency Card.",
+          action: "card",
         },
         {
           ready: readiness.has_contacts,
@@ -1999,6 +2027,7 @@ function PlanTestPanel({
           detail: readiness.has_contacts
             ? "At least one named contact has a phone number or email address."
             : "Add a named contact with a phone number or email address to the Emergency Card.",
+          action: "card",
         },
         {
           ready: readiness.has_instructions,
@@ -2006,6 +2035,7 @@ function PlanTestPanel({
           detail: readiness.has_instructions
             ? "The Emergency Card includes instructions."
             : "Add instructions to the Emergency Card.",
+          action: "card",
         },
         {
           ready: verification === "verified",
@@ -2016,6 +2046,7 @@ function PlanTestPanel({
               : verification === "mismatch"
                 ? "Safeory could not verify this key against the current recovery wrap."
                 : "Enter your saved or printed recovery key below to test it.",
+          action: null,
         },
       ]
     : [];
@@ -2115,6 +2146,37 @@ function PlanTestPanel({
                         <div className="mt-0.5 text-xs leading-5 text-[var(--text-muted)]">
                           {check.detail}
                         </div>
+                        {!check.ready && check.action === "settings" ? (
+                          <>
+                            <button
+                              type="button"
+                              disabled={!canOpenSettings}
+                              title={
+                                canOpenSettings
+                                  ? undefined
+                                  : "Finish or cancel the open editor before opening Settings."
+                              }
+                              onClick={onOpenSettings}
+                              className="mt-2 rounded-lg border border-[var(--border)] bg-[var(--surface-secondary)] px-3 py-1.5 text-xs font-medium text-[var(--text-secondary)] transition hover:bg-[var(--selected)] disabled:cursor-not-allowed disabled:opacity-55"
+                            >
+                              Open Settings
+                            </button>
+                            {!canOpenSettings ? (
+                              <div className="mt-1 text-xs leading-5 text-[var(--text-muted)]">
+                                Finish or cancel the open editor before opening
+                                Settings.
+                              </div>
+                            ) : null}
+                          </>
+                        ) : !check.ready && check.action === "card" ? (
+                          <button
+                            type="button"
+                            onClick={onOpenEmergencyCard}
+                            className="mt-2 rounded-lg border border-[var(--border)] bg-[var(--surface-secondary)] px-3 py-1.5 text-xs font-medium text-[var(--text-secondary)] transition hover:bg-[var(--selected)]"
+                          >
+                            Open Emergency Card
+                          </button>
+                        ) : null}
                       </div>
                     </div>
                   ))}
@@ -2212,6 +2274,18 @@ function EmergencyCardScreen({
   const [pickerQuery, setPickerQuery] = useState("");
   const [titles, setTitles] = useState<ItemTitle[]>([]);
   const [saving, setSaving] = useState(false);
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    const previousFocus =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    closeButtonRef.current?.focus();
+    return () => {
+      previousFocus?.focus();
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -2355,6 +2429,7 @@ function EmergencyCardScreen({
               </p>
             </div>
             <button
+              ref={closeButtonRef}
               type="button"
               onClick={onClose}
               className="flex shrink-0 items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] px-3 py-2 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--selected)]"
