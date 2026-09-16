@@ -2275,18 +2275,59 @@ function EmergencyCardScreen({
   const [pickerQuery, setPickerQuery] = useState("");
   const [titles, setTitles] = useState<ItemTitle[]>([]);
   const [saving, setSaving] = useState(false);
+  const dialogRef = useRef<HTMLElement | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+  const instructionsRef = useRef<HTMLTextAreaElement | null>(null);
+  const editButtonRef = useRef<HTMLButtonElement | null>(null);
 
   useEffect(() => {
+    const dialog = dialogRef.current;
+    if (dialog === null) return;
     const previousFocus =
       document.activeElement instanceof HTMLElement
         ? document.activeElement
         : null;
     closeButtonRef.current?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Tab") return;
+      const focusable = Array.from(
+        dialog.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
+        ),
+      );
+      if (focusable.length === 0) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = focusable[0]!;
+      const last = focusable[focusable.length - 1]!;
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      } else if (!dialog.contains(document.activeElement)) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
     return () => {
+      document.removeEventListener("keydown", onKeyDown);
       previousFocus?.focus();
     };
   }, []);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      const dialog = dialogRef.current;
+      if (dialog === null || dialog.contains(document.activeElement)) return;
+      (editing ? instructionsRef.current : editButtonRef.current)?.focus();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [editing, loading]);
 
   useEffect(() => {
     let active = true;
@@ -2408,6 +2449,8 @@ function EmergencyCardScreen({
     >
       <div className="mx-auto my-10 w-full max-w-2xl px-4">
         <section
+          ref={dialogRef}
+          tabIndex={-1}
           role="dialog"
           aria-modal="true"
           aria-labelledby="emergency-card-title"
@@ -2452,6 +2495,7 @@ function EmergencyCardScreen({
             <form onSubmit={saveCard} className="mt-8 space-y-6">
               <Field label="Instructions">
                 <textarea
+                  ref={instructionsRef}
                   value={instructions}
                   onChange={(event) => setInstructions(event.target.value)}
                   className="field-input min-h-28 resize-y"
@@ -2765,6 +2809,7 @@ function EmergencyCardScreen({
 
               <div className="flex justify-end border-t border-[var(--border)] pt-5">
                 <button
+                  ref={editButtonRef}
                   type="button"
                   onClick={startEdit}
                   className="flex items-center gap-2 rounded-xl bg-[var(--primary)] px-4 py-2.5 text-sm font-medium text-white transition hover:opacity-90"
