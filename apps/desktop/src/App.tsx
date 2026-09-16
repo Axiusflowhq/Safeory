@@ -2304,7 +2304,7 @@ function EmergencyCardScreen({
         dialog.querySelectorAll<HTMLElement>(
           'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
         ),
-      );
+      ).filter((element) => element.closest("[inert]") === null);
       if (focusable.length === 0) {
         event.preventDefault();
         dialog.focus();
@@ -2333,11 +2333,20 @@ function EmergencyCardScreen({
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
       const dialog = dialogRef.current;
-      if (dialog === null || dialog.contains(document.activeElement)) return;
+      if (dialog === null) return;
+      if (saving) {
+        dialog.focus();
+        return;
+      }
+      if (
+        document.activeElement !== dialog &&
+        dialog.contains(document.activeElement)
+      )
+        return;
       (editing ? instructionsRef.current : editButtonRef.current)?.focus();
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [editing, loading]);
+  }, [editing, loading, saving]);
 
   useEffect(() => {
     let active = true;
@@ -2417,6 +2426,7 @@ function EmergencyCardScreen({
   async function saveCard(event: FormEvent) {
     event.preventDefault();
     if (saving) return;
+    let saved = false;
     setSaving(true);
     onError(null);
     try {
@@ -2428,7 +2438,6 @@ function EmergencyCardScreen({
       });
       if (!isGenerationCurrent(generation)) return;
       setRevision(nextRevision);
-      setEditing(false);
       const refreshed = await invoke<EmergencyCardResult | null>(
         "get_emergency_card",
       );
@@ -2440,10 +2449,14 @@ function EmergencyCardScreen({
         setCard(refreshed.card);
         setRevision(refreshed.revision);
       }
+      saved = true;
     } catch (reason) {
       if (isGenerationCurrent(generation)) onError(readError(reason));
     } finally {
-      if (isGenerationCurrent(generation)) setSaving(false);
+      if (isGenerationCurrent(generation)) {
+        setSaving(false);
+        if (saved) setEditing(false);
+      }
     }
   }
 
@@ -2464,6 +2477,7 @@ function EmergencyCardScreen({
           role="dialog"
           aria-modal="true"
           aria-labelledby="emergency-card-title"
+          aria-busy={saving}
           className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-6 shadow-2xl"
         >
           <div className="flex items-start justify-between gap-4">
@@ -2485,8 +2499,9 @@ function EmergencyCardScreen({
             <button
               ref={closeButtonRef}
               type="button"
+              disabled={saving}
               onClick={onClose}
-              className="flex shrink-0 items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] px-3 py-2 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--selected)]"
+              className="flex shrink-0 items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] px-3 py-2 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--selected)] disabled:cursor-not-allowed disabled:opacity-55"
             >
               <HugeiconsIcon
                 icon={ArrowLeft01Icon}
@@ -2502,7 +2517,11 @@ function EmergencyCardScreen({
               Opening emergency card…
             </p>
           ) : editing ? (
-            <form onSubmit={saveCard} className="mt-8 space-y-6">
+            <form
+              onSubmit={saveCard}
+              inert={saving ? true : undefined}
+              className="mt-8 space-y-6"
+            >
               <Field label="Instructions">
                 <textarea
                   ref={instructionsRef}
