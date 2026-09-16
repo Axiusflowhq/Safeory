@@ -33,7 +33,8 @@ Implemented now:
   CSPRNG-backed strong-password generation, record-type browsing, vault-wide
   local Find over already-loaded safe list projections, a Today panel driven by
   a tested local deadlines engine, trash with
-  restore/permanent-delete, and a 10-minute inactivity lock,
+  restore/permanent-delete, configurable device-local inactivity locking,
+  optional lock-on-background, and a Strict local lock shortcut,
 - encrypted Emergency Card: selected records, emergency contacts with optional
   phone/email contact methods, and
   instructions in one singleton record, hidden from lists, with stale-edit
