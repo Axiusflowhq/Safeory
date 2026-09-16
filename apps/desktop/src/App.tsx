@@ -6416,6 +6416,7 @@ function ItemHistorySection({
   onError: (message: string | null) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const historyPanelId = `item-history-${itemId}`;
   const [revisions, setRevisions] = useState<number[]>([]);
   const [listState, setListState] = useState<
     "idle" | "loading" | "ready" | "error"
@@ -6605,6 +6606,8 @@ function ItemHistorySection({
         <button
           type="button"
           disabled={mutationBusy}
+          aria-expanded={open}
+          aria-controls={historyPanelId}
           onClick={() => setOpen((current) => !current)}
           className="rounded-lg px-2.5 py-1.5 text-xs text-[var(--text-muted)] transition hover:bg-[var(--selected)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-55"
         >
@@ -6612,7 +6615,10 @@ function ItemHistorySection({
         </button>
       </div>
       {open ? (
-        <div className="mt-3 rounded-2xl border border-[var(--border)] bg-[var(--surface-secondary)] p-4">
+        <div
+          id={historyPanelId}
+          className="mt-3 rounded-2xl border border-[var(--border)] bg-[var(--surface-secondary)] p-4"
+        >
           <p className="text-xs leading-5 text-[var(--text-muted)]">
             Read-only snapshots of earlier encrypted revisions. Historical
             attachments cannot be opened or exported here.
