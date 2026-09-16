@@ -2907,11 +2907,13 @@ function SettingsPanel({
     changingPassphrase ||
     recoveryBusy ||
     backupBusy;
+  const settingsOperationBusy =
+    restoreBlockedBySettingsOperation || restoreBusy;
   const lastBackupCreation = formatBackupCreationTime(
     settings.last_successful_encrypted_backup_at_ms,
   );
 
-  dismissBlockedRef.current = restoreBusy || backupBusy || strictLockBusy;
+  dismissBlockedRef.current = settingsOperationBusy;
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -3343,7 +3345,7 @@ function SettingsPanel({
           <button
             ref={closeButtonRef}
             type="button"
-            disabled={restoreBusy || backupBusy || strictLockBusy}
+            disabled={settingsOperationBusy}
             onClick={onClose}
             className="flex items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] px-3 py-2 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--selected)] disabled:cursor-not-allowed disabled:opacity-55"
           >
