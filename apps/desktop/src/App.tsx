@@ -981,6 +981,7 @@ export default function App() {
   };
 
   const jumpToRecord = (kind: string, id: string) => {
+    if (editor !== null) return false;
     if (id !== selectedId && !canLeaveSelectedRecord()) return false;
     setCardOpen(false);
     setEditor(null);
