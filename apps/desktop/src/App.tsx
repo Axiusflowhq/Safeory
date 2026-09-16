@@ -37,6 +37,7 @@ type VaultStatus = {
   initialized: boolean;
   unlocked: boolean;
   cloud_sync_enabled: boolean;
+  session_generation: number;
 };
 
 type DeviceSettings = {
@@ -539,6 +540,9 @@ export default function App() {
   const [deviceSettings, setDeviceSettings] = useState<DeviceSettings>(
     DEFAULT_DEVICE_SETTINGS,
   );
+  const [backendSessionGeneration, setBackendSessionGeneration] = useState<
+    number | null
+  >(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [cardOpen, setCardOpen] = useState(false);
   const [planOpen, setPlanOpen] = useState(false);
@@ -620,6 +624,7 @@ export default function App() {
   const lockVault = useCallback(async () => {
     if (!desktopRuntime) return;
     sessionFence.invalidate();
+    setBackendSessionGeneration(null);
     clearPlaintextUi();
     setError(null);
     setScreen("locked");
@@ -640,6 +645,7 @@ export default function App() {
         else if (!status.unlocked) setScreen("locked");
         else {
           sessionFence.invalidate();
+          setBackendSessionGeneration(status.session_generation);
           setScreen("vault");
         }
       })
@@ -917,8 +923,9 @@ export default function App() {
       <AccessScreen
         mode={screen}
         error={error}
-        onauccess={() => {
+        onauccess={(status) => {
           sessionFence.invalidate();
+          setBackendSessionGeneration(status.session_generation);
           setError(null);
           setScreen("vault");
         }}
@@ -1281,6 +1288,7 @@ export default function App() {
         <SettingsPanel
           settings={deviceSettings}
           generation={sessionFence.token()}
+          backendSessionGeneration={backendSessionGeneration}
           isGenerationCurrent={isSessionGenerationCurrent}
           canReplaceVault={() => editor === null && canLeaveSelectedRecord()}
           onClose={() => setSettingsOpen(false)}
@@ -1288,6 +1296,7 @@ export default function App() {
           onLockVault={lockVault}
           onVaultRestored={() => {
             sessionFence.invalidate();
+            setBackendSessionGeneration(null);
             clearPlaintextUi();
             setError(null);
             setScreen("locked");
@@ -2833,6 +2842,7 @@ function EmergencyCardScreen({
 function SettingsPanel({
   settings,
   generation,
+  backendSessionGeneration,
   isGenerationCurrent,
   canReplaceVault,
   onClose,
@@ -2843,6 +2853,7 @@ function SettingsPanel({
 }: {
   settings: DeviceSettings;
   generation: number;
+  backendSessionGeneration: number | null;
   isGenerationCurrent: (generation: number) => boolean;
   canReplaceVault: () => boolean;
   onClose: () => void;
@@ -3200,7 +3211,13 @@ function SettingsPanel({
 
   async function saveSettings(event: FormEvent) {
     event.preventDefault();
-    if (savingSettings || restoreBusy || strictLockBusy) return;
+    if (
+      savingSettings ||
+      restoreBusy ||
+      strictLockBusy ||
+      backendSessionGeneration === null
+    )
+      return;
     setSavingSettings(true);
     setPanelError(null);
     setStatus(null);
@@ -3209,6 +3226,7 @@ function SettingsPanel({
       const saved = await invoke<DeviceSettings>("update_device_settings", {
         autoLockMinutes,
         lockOnBackground,
+        expectedSessionGeneration: backendSessionGeneration,
       });
       if (!isGenerationCurrent(generation)) return;
       onSettingsSaved(saved);
@@ -3222,7 +3240,13 @@ function SettingsPanel({
 
   async function changePassphrase(event: FormEvent) {
     event.preventDefault();
-    if (changingPassphrase || restoreBusy || strictLockBusy) return;
+    if (
+      changingPassphrase ||
+      restoreBusy ||
+      strictLockBusy ||
+      backendSessionGeneration === null
+    )
+      return;
     if (Array.from(newPassphrase).length < 12) {
       setPanelError(
         "Use at least 12 characters for the new master passphrase.",
@@ -3241,6 +3265,7 @@ function SettingsPanel({
       await invoke("change_master_passphrase", {
         currentPassphrase,
         newPassphrase,
+        expectedSessionGeneration: backendSessionGeneration,
       });
       if (!isGenerationCurrent(generation)) return;
       setCurrentPassphrase("");
@@ -3263,7 +3288,8 @@ function SettingsPanel({
       changingPassphrase ||
       recoveryBusy ||
       backupBusy ||
-      restoreBusy
+      restoreBusy ||
+      backendSessionGeneration === null
     ) {
       return;
     }
@@ -3275,6 +3301,7 @@ function SettingsPanel({
       const saved = await invoke<DeviceSettings>("update_device_settings", {
         autoLockMinutes: 1,
         lockOnBackground: true,
+        expectedSessionGeneration: backendSessionGeneration,
       });
       if (!isGenerationCurrent(generation)) return;
       setAutoLockMinutes(saved.auto_lock_minutes);
@@ -3356,7 +3383,11 @@ function SettingsPanel({
           <div className="mt-4">
             <Field label="Lock after inactivity">
               <select
-                disabled={restoreBusy || strictLockBusy}
+                disabled={
+                  restoreBusy ||
+                  strictLockBusy ||
+                  backendSessionGeneration === null
+                }
                 value={autoLockMinutes}
                 onChange={(event) =>
                   setAutoLockMinutes(Number(event.target.value))
@@ -3374,7 +3405,11 @@ function SettingsPanel({
           <label className="mt-4 flex items-start gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] p-4">
             <input
               type="checkbox"
-              disabled={restoreBusy || strictLockBusy}
+              disabled={
+                restoreBusy ||
+                strictLockBusy ||
+                backendSessionGeneration === null
+              }
               checked={lockOnBackground}
               onChange={(event) => setLockOnBackground(event.target.checked)}
               className="mt-1"
@@ -3392,7 +3427,12 @@ function SettingsPanel({
           <div className="mt-4 flex justify-end">
             <button
               type="submit"
-              disabled={savingSettings || restoreBusy || strictLockBusy}
+              disabled={
+                savingSettings ||
+                restoreBusy ||
+                strictLockBusy ||
+                backendSessionGeneration === null
+              }
               className="rounded-xl bg-[var(--primary)] px-4 py-2.5 text-sm font-medium text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-55"
             >
               {savingSettings ? "Saving…" : "Save lock settings"}
@@ -3416,7 +3456,8 @@ function SettingsPanel({
                 changingPassphrase ||
                 recoveryBusy ||
                 backupBusy ||
-                restoreBusy
+                restoreBusy ||
+                backendSessionGeneration === null
               }
               onClick={() => void applyStrictLocalLock()}
               className="rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] px-4 py-2.5 text-sm font-medium text-[var(--text-primary)] transition hover:bg-[var(--selected)] disabled:cursor-not-allowed disabled:opacity-55"
@@ -3441,7 +3482,11 @@ function SettingsPanel({
             <Field label="Current master passphrase">
               <input
                 type="password"
-                disabled={restoreBusy || strictLockBusy}
+                disabled={
+                  restoreBusy ||
+                  strictLockBusy ||
+                  backendSessionGeneration === null
+                }
                 autoComplete="current-password"
                 value={currentPassphrase}
                 onChange={(event) => setCurrentPassphrase(event.target.value)}
@@ -3451,7 +3496,11 @@ function SettingsPanel({
             <Field label="New master passphrase">
               <input
                 type="password"
-                disabled={restoreBusy || strictLockBusy}
+                disabled={
+                  restoreBusy ||
+                  strictLockBusy ||
+                  backendSessionGeneration === null
+                }
                 autoComplete="new-password"
                 value={newPassphrase}
                 onChange={(event) => setNewPassphrase(event.target.value)}
@@ -3462,7 +3511,11 @@ function SettingsPanel({
             <Field label="Confirm new passphrase">
               <input
                 type="password"
-                disabled={restoreBusy || strictLockBusy}
+                disabled={
+                  restoreBusy ||
+                  strictLockBusy ||
+                  backendSessionGeneration === null
+                }
                 autoComplete="new-password"
                 value={confirmation}
                 onChange={(event) => setConfirmation(event.target.value)}
@@ -3477,6 +3530,7 @@ function SettingsPanel({
                 changingPassphrase ||
                 restoreBusy ||
                 strictLockBusy ||
+                backendSessionGeneration === null ||
                 !currentPassphrase ||
                 !newPassphrase ||
                 !confirmation
@@ -3896,7 +3950,7 @@ function AccessScreen({
 }: {
   mode: "setup" | "locked";
   error: string | null;
-  onauccess: () => void;
+  onauccess: (status: VaultStatus) => void;
   onError: (message: string | null) => void;
 }) {
   const [passphrase, setPassphrase] = useState("");
@@ -3940,12 +3994,13 @@ function AccessScreen({
     }
     setBusy(true);
     try {
-      await invoke(creating ? "initialize_vault" : "unlock_vault", {
-        passphrase,
-      });
+      const status = await invoke<VaultStatus>(
+        creating ? "initialize_vault" : "unlock_vault",
+        { passphrase },
+      );
       setPassphrase("");
       setConfirmation("");
-      onauccess();
+      onauccess(status);
     } catch (reason) {
       onError(readError(reason));
     } finally {
@@ -3959,12 +4014,15 @@ function AccessScreen({
     if (!recoverySecret) return;
     setBusy(true);
     try {
-      await invoke<VaultStatus>("unlock_vault_with_recovery_kit", {
-        secret: recoverySecret,
-      });
+      const status = await invoke<VaultStatus>(
+        "unlock_vault_with_recovery_kit",
+        {
+          secret: recoverySecret,
+        },
+      );
       setRecoverySecret("");
       setPassphrase("");
-      onauccess();
+      onauccess(status);
     } catch (reason) {
       onError(readError(reason));
     } finally {
@@ -4031,7 +4089,7 @@ function AccessScreen({
       if (!status.initialized) {
         throw new Error("The selected backup was not installed.");
       }
-      await invoke<VaultStatus>("unlock_vault", {
+      const unlocked = await invoke<VaultStatus>("unlock_vault", {
         passphrase: unlockPassphrase,
       });
       setRestorePassphrase("");
@@ -4039,7 +4097,7 @@ function AccessScreen({
       setRestoreNewPassphrase("");
       setRestoreNewPassphraseConfirm("");
       setRestorePath(null);
-      onauccess();
+      onauccess(unlocked);
     } catch (reason) {
       onError(readError(reason));
     } finally {

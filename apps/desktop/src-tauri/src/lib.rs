@@ -387,6 +387,7 @@ struct VaultStatus {
     initialized: bool,
     unlocked: bool,
     cloud_sync_enabled: bool,
+    session_generation: u64,
 }
 
 #[derive(serde::Serialize)]
@@ -1062,8 +1063,14 @@ fn update_device_settings(
     state: State<'_, VaultRuntime>,
     auto_lock_minutes: u64,
     lock_on_background: bool,
+    expected_session_generation: u64,
 ) -> Result<DeviceSettings, String> {
-    update_device_settings_impl(&state, auto_lock_minutes, lock_on_background)
+    update_device_settings_impl(
+        &state,
+        auto_lock_minutes,
+        lock_on_background,
+        expected_session_generation,
+    )
 }
 
 #[tauri::command]
@@ -1071,8 +1078,14 @@ fn change_master_passphrase(
     state: State<'_, VaultRuntime>,
     current_passphrase: String,
     new_passphrase: String,
+    expected_session_generation: u64,
 ) -> Result<(), String> {
-    change_master_passphrase_impl(&state, current_passphrase, new_passphrase)
+    change_master_passphrase_impl(
+        &state,
+        current_passphrase,
+        new_passphrase,
+        expected_session_generation,
+    )
 }
 
 #[tauri::command]
@@ -2068,11 +2081,15 @@ fn vault_status_impl(state: &VaultRuntime) -> Result<VaultStatus, String> {
     } else {
         false
     };
-    let unlocked = lock_session(state)?.is_some();
+    let session = lock_session(state)?;
+    let unlocked = session.is_some();
+    let session_generation = capture_session_generation(state);
+    drop(session);
     Ok(VaultStatus {
         initialized,
         unlocked,
         cloud_sync_enabled: false,
+        session_generation,
     })
 }
 
@@ -2085,11 +2102,12 @@ fn initialize_vault_impl(state: &VaultRuntime, passphrase: String) -> Result<Vau
     let opened =
         VaultSession::create(&state.database_path, &passphrase).map_err(safe_vault_error)?;
     *session = Some(opened);
-    advance_session_generation(&state.session_generation);
+    let session_generation = advance_session_generation(&state.session_generation);
     Ok(VaultStatus {
         initialized: true,
         unlocked: true,
         cloud_sync_enabled: false,
+        session_generation,
     })
 }
 
@@ -2100,11 +2118,12 @@ fn unlock_vault_impl(state: &VaultRuntime, passphrase: String) -> Result<VaultSt
     })?;
     let mut session = lock_session(state)?;
     *session = Some(opened);
-    advance_session_generation(&state.session_generation);
+    let session_generation = advance_session_generation(&state.session_generation);
     Ok(VaultStatus {
         initialized: true,
         unlocked: true,
         cloud_sync_enabled: false,
+        session_generation,
     })
 }
 
@@ -2146,24 +2165,45 @@ fn update_device_settings_impl(
     state: &VaultRuntime,
     auto_lock_minutes: u64,
     lock_on_background: bool,
+    expected_session_generation: u64,
 ) -> Result<DeviceSettings, String> {
-    if lock_session(state)?.is_none() {
+    let session = lock_session(state)?;
+    if session.is_none() {
         return Err("Unlock the vault before changing device settings.".to_owned());
     }
-    mutate_device_settings(state, |current| DeviceSettings {
+    if !is_session_generation_current(state, expected_session_generation) {
+        return Err(
+            "The vault session changed while saving device settings. Try again.".to_owned(),
+        );
+    }
+    let updated = mutate_device_settings(state, |current| DeviceSettings {
         auto_lock_minutes,
         lock_on_background,
         last_successful_encrypted_backup_at_ms: current.last_successful_encrypted_backup_at_ms,
-    })
+    })?;
+    // Keep the session guard alive through durable settings persistence so a
+    // lock/reunlock cannot cross the authorization-to-commit boundary.
+    drop(session);
+    Ok(updated)
 }
 
 fn change_master_passphrase_impl(
     state: &VaultRuntime,
     current_passphrase: String,
     new_passphrase: String,
+    expected_session_generation: u64,
 ) -> Result<(), String> {
-    if lock_session(state)?.is_none() {
-        return Err("Unlock the vault before changing the master passphrase.".to_owned());
+    {
+        let session = lock_session(state)?;
+        if session.is_none() {
+            return Err("Unlock the vault before changing the master passphrase.".to_owned());
+        }
+        if !is_session_generation_current(state, expected_session_generation) {
+            return Err(
+                "The vault session changed while changing the master passphrase. Try again."
+                    .to_owned(),
+            );
+        }
     }
     let current_passphrase = Zeroizing::new(current_passphrase);
     let new_passphrase = Zeroizing::new(new_passphrase);
@@ -2174,6 +2214,11 @@ fn change_master_passphrase_impl(
     let session = session
         .as_ref()
         .ok_or_else(|| "Unlock the vault before changing the master passphrase.".to_owned())?;
+    if !is_session_generation_current(state, expected_session_generation) {
+        return Err(
+            "The vault session changed while changing the master passphrase. Try again.".to_owned(),
+        );
+    }
     session
         .change_passphrase(&new_passphrase)
         .map_err(safe_vault_error)
@@ -4696,11 +4741,12 @@ fn unlock_vault_with_recovery_kit_impl(
         })?;
     let mut session = lock_session(state)?;
     *session = Some(opened);
-    advance_session_generation(&state.session_generation);
+    let session_generation = advance_session_generation(&state.session_generation);
     Ok(VaultStatus {
         initialized: true,
         unlocked: true,
         cloud_sync_enabled: false,
+        session_generation,
     })
 }
 
@@ -5253,7 +5299,7 @@ fn commit_database_restore(
     // Finish locked so renderer plaintext from the previous vault cannot remain
     // authoritative after the transaction commits.
     *live_session = None;
-    advance_session_generation(&state.session_generation);
+    let session_generation = advance_session_generation(&state.session_generation);
     state.restore_in_progress.store(false, Ordering::Release);
     drop(live_session);
     let _ = fs::remove_file(candidate);
@@ -5264,6 +5310,7 @@ fn commit_database_restore(
         initialized: true,
         unlocked: false,
         cloud_sync_enabled: false,
+        session_generation,
     })
 }
 
@@ -6867,7 +6914,9 @@ mod tests {
         confirm_recovery_secret_impl(&first, recovery.secret.to_string(), recovery.generation)
             .expect("confirm recovery");
         let recovery_secret = recovery.secret.to_string();
-        update_device_settings_impl(&first, 30, false).expect("persist device settings");
+        let generation = capture_session_generation(&first);
+        update_device_settings_impl(&first, 30, false, generation)
+            .expect("persist device settings");
         lock_vault_impl(&first).expect("lock before restart");
         drop(first);
 
@@ -7013,11 +7062,15 @@ mod tests {
     #[test]
     fn device_settings_and_passphrase_change_are_local_and_lock_gated() {
         let (_directory, runtime) = runtime();
-        assert!(update_device_settings_impl(&runtime, 5, true).is_err());
+        assert!(
+            update_device_settings_impl(&runtime, 5, true, capture_session_generation(&runtime))
+                .is_err()
+        );
 
         initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
         let settings =
-            update_device_settings_impl(&runtime, 15, false).expect("update device settings");
+            update_device_settings_impl(&runtime, 15, false, capture_session_generation(&runtime))
+                .expect("update device settings");
         assert_eq!(settings.auto_lock_minutes, 15);
         assert!(!settings.lock_on_background);
         assert_eq!(settings.last_successful_encrypted_backup_at_ms, None);
@@ -7025,12 +7078,16 @@ mod tests {
         assert_eq!(persisted.auto_lock_minutes, 15);
         assert!(!persisted.lock_on_background);
         assert_eq!(persisted.last_successful_encrypted_backup_at_ms, None);
-        assert!(update_device_settings_impl(&runtime, 2, true).is_err());
+        assert!(
+            update_device_settings_impl(&runtime, 2, true, capture_session_generation(&runtime))
+                .is_err()
+        );
 
         let wrong = change_master_passphrase_impl(
             &runtime,
             "incorrect current phrase".to_owned(),
             "a new long local passphrase".to_owned(),
+            capture_session_generation(&runtime),
         )
         .expect_err("wrong current passphrase must fail");
         assert_eq!(
@@ -7042,12 +7099,91 @@ mod tests {
             &runtime,
             PASSPHRASE.to_owned(),
             "a new long local passphrase".to_owned(),
+            capture_session_generation(&runtime),
         )
         .expect("change master passphrase");
         lock_vault_impl(&runtime).expect("lock after passphrase change");
         assert!(unlock_vault_impl(&runtime, PASSPHRASE.to_owned()).is_err());
         unlock_vault_impl(&runtime, "a new long local passphrase".to_owned())
             .expect("unlock with new passphrase");
+    }
+
+    #[test]
+    fn stale_session_cannot_change_device_lock_settings() {
+        let (_directory, runtime) = runtime();
+        let initialized =
+            initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
+        let original = mutate_device_settings(&runtime, |_| DeviceSettings {
+            auto_lock_minutes: 1,
+            lock_on_background: true,
+            last_successful_encrypted_backup_at_ms: Some(42),
+        })
+        .expect("seed hardened settings");
+        let stale_generation = initialized.session_generation;
+
+        lock_vault_impl(&runtime).expect("lock after settings authorization");
+        assert!(update_device_settings_impl(&runtime, 60, false, stale_generation).is_err());
+        let after_lock = get_device_settings_impl(&runtime).expect("settings after lock");
+        assert_eq!(after_lock.auto_lock_minutes, original.auto_lock_minutes);
+        assert_eq!(after_lock.lock_on_background, original.lock_on_background);
+        assert_eq!(
+            after_lock.last_successful_encrypted_backup_at_ms,
+            original.last_successful_encrypted_backup_at_ms
+        );
+
+        let unlocked = unlock_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("reunlock vault");
+        assert_ne!(unlocked.session_generation, stale_generation);
+        let error = match update_device_settings_impl(&runtime, 60, false, stale_generation) {
+            Ok(_) => panic!("old session must not weaken settings after relock"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error,
+            "The vault session changed while saving device settings. Try again."
+        );
+        let after_stale = get_device_settings_impl(&runtime).expect("settings after stale update");
+        assert_eq!(after_stale.auto_lock_minutes, original.auto_lock_minutes);
+        assert_eq!(after_stale.lock_on_background, original.lock_on_background);
+        assert_eq!(
+            after_stale.last_successful_encrypted_backup_at_ms,
+            original.last_successful_encrypted_backup_at_ms
+        );
+        let persisted = load_device_settings(&runtime.settings_path);
+        assert_eq!(persisted.auto_lock_minutes, original.auto_lock_minutes);
+        assert_eq!(persisted.lock_on_background, original.lock_on_background);
+        assert_eq!(
+            persisted.last_successful_encrypted_backup_at_ms,
+            original.last_successful_encrypted_backup_at_ms
+        );
+    }
+
+    #[test]
+    fn stale_session_cannot_change_master_passphrase() {
+        let (_directory, runtime) = runtime();
+        let initialized =
+            initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
+        let stale_generation = initialized.session_generation;
+        lock_vault_impl(&runtime).expect("lock old session");
+        let unlocked =
+            unlock_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("reunlock current session");
+        assert_ne!(unlocked.session_generation, stale_generation);
+
+        let error = change_master_passphrase_impl(
+            &runtime,
+            PASSPHRASE.to_owned(),
+            "a stale replacement passphrase".to_owned(),
+            stale_generation,
+        )
+        .expect_err("old session must not change the current passphrase");
+        assert_eq!(
+            error,
+            "The vault session changed while changing the master passphrase. Try again."
+        );
+
+        lock_vault_impl(&runtime).expect("lock after rejected stale change");
+        assert!(unlock_vault_impl(&runtime, "a stale replacement passphrase".to_owned()).is_err());
+        unlock_vault_impl(&runtime, PASSPHRASE.to_owned())
+            .expect("original passphrase must remain valid");
     }
 
     #[test]
@@ -7118,7 +7254,10 @@ mod tests {
         fs::create_dir(&runtime.settings_path).expect("create settings blocker directory");
         let before = get_device_settings_impl(&runtime).expect("settings before failed install");
 
-        assert!(update_device_settings_impl(&runtime, 1, false).is_err());
+        assert!(
+            update_device_settings_impl(&runtime, 1, false, capture_session_generation(&runtime))
+                .is_err()
+        );
         let after = get_device_settings_impl(&runtime).expect("settings after failed install");
         assert_eq!(after.auto_lock_minutes, before.auto_lock_minutes);
         assert_eq!(after.lock_on_background, before.lock_on_background);
@@ -7152,7 +7291,8 @@ mod tests {
             .expect("backup timestamp recorded");
 
         let updated =
-            update_device_settings_impl(&runtime, 30, false).expect("update lock settings");
+            update_device_settings_impl(&runtime, 30, false, capture_session_generation(&runtime))
+                .expect("update lock settings");
         assert_eq!(
             updated.last_successful_encrypted_backup_at_ms,
             Some(recorded)
@@ -10040,13 +10180,16 @@ mod tests {
             &source,
             PASSPHRASE.to_owned(),
             CHANGED_SOURCE_PASSPHRASE.to_owned(),
+            capture_session_generation(&source),
         )
         .expect("change source passphrase after backup");
 
         let (_target_directory, target) = runtime();
         initialize_vault_impl(&target, TARGET_PASSPHRASE.to_owned())
             .expect("initialize existing target vault");
-        update_device_settings_impl(&target, 30, false).expect("set target lock preferences");
+        let generation = capture_session_generation(&target);
+        update_device_settings_impl(&target, 30, false, generation)
+            .expect("set target lock preferences");
         let target_settings = mutate_device_settings(&target, |current| DeviceSettings {
             last_successful_encrypted_backup_at_ms: Some(123_456_789),
             ..current
