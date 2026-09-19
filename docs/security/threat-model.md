@@ -1,6 +1,6 @@
 # Threat Model
 
-Status: browser/WASM + extension + self-hosted API baseline. Update this document before each security-sensitive feature ships.
+Status: browser/WASM + extension + AWS-hosted API baseline. Update this document before each security-sensitive feature ships.
 
 ## Assets
 
@@ -18,7 +18,7 @@ Status: browser/WASM + extension + self-hosted API baseline. Update this documen
 4. Extension background worker, trusted extension pages, browser-managed storage, and untrusted page content scripts.
 5. Browser/OS clipboard, file-download, print, and process-memory boundaries.
 6. Network boundary.
-7. Self-hosted API, PostgreSQL, S3-compatible object storage, Valkey, workers, and SMTP.
+7. AWS edge/account/backend boundary: CloudFront, Cognito, Rust API, RDS PostgreSQL, S3, Valkey/workers, SES, IAM/secrets, and CloudWatch.
 8. Trusted recipient devices.
 
 ## Threat register
@@ -31,6 +31,8 @@ Status: browser/WASM + extension + self-hosted API baseline. Update this documen
 | Backend compromise | Modification/replay/availability attacks | Authenticated envelopes, revisions, device auth, replay checks | Availability cannot be guaranteed |
 | Compromised Valkey/worker queue | Retry abuse, rate-limit bypass, duplicated jobs | Durable authorization stays in PostgreSQL; idempotent work | Queue compromise can delay or amplify work |
 | Proxy/application log exposure | Metadata, bearer token, or ciphertext copied into logs | No request-body/auth-secret logging; structured redaction | Network/account metadata remains observable to operator |
+| Compromised AWS account/IAM principal | Metadata/object access, destructive control-plane actions | Least-privilege IAM, short-lived/OIDC credentials, MFA/admin separation, CloudTrail, backups, no vault keys server-side | Attacker can deny service or exfiltrate ciphertext/server-visible metadata |
+| Cognito compromise/misconfiguration | Account-session takeover or unauthorized device-enrollment attempts | Cognito is account identity only; server-side account scoping; separate revocable Safeory device identity; security-event logging | Compromised account identity can authorize operations allowed to that account but still does not directly reveal vault decryption keys |
 | Compromised user passphrase | Root key can be unwrapped with the stored wrap | Argon2id, strong UX, rewrap on change | Known passphrase plus wrap material is catastrophic |
 | Stolen or compromised device | Plaintext/key theft while unlocked | Encrypted local persistence, explicit lock, minimal redacted projections | Malware can inspect process memory/screens while unlocked |
 | Web-app script/XSS compromise | Reads unlocked plaintext or WASM memory | Strict CSP, pinned dependencies, redacted projections, explicit detail fetches | WASM is not a sandbox from same-origin JavaScript |
@@ -69,9 +71,11 @@ Status: browser/WASM + extension + self-hosted API baseline. Update this documen
 - Cross-origin frames are not treated as the top-level origin. Autofill must not cross origin boundaries by caller assertion.
 - Password copy currently performs best-effort delayed compare-and-clear from the popup. Closing the popup or losing clipboard permission can prevent cleanup; OS clipboard history/sync is outside Safeory's erasure guarantee.
 
-## Server assumptions
+## AWS/server assumptions
 
 - The API never receives usable vault decryption keys or vault plaintext.
-- PostgreSQL is authoritative for server-visible account/device/revision/idempotency/policy state. Valkey is ephemeral and cannot authorize durable security transitions by itself.
-- Object storage contains opaque encrypted objects. Cross-account object access fails closed and server logs must not contain bearer tokens or object bodies.
-- Email contains notifications/invitations only, never vault plaintext or decryption material.
+- Cognito owns hosted account identity/session state but never receives vault passphrases, recovery secrets, usable vault keys, or vault plaintext.
+- RDS PostgreSQL is authoritative for server-visible account/device/revision/idempotency/policy state. Valkey is ephemeral and cannot authorize durable security transitions by itself.
+- S3 contains opaque encrypted objects. Cross-account object access fails closed and server logs must not contain bearer tokens or object bodies.
+- SES email contains notifications/invitations only, never vault plaintext or decryption material.
+- CloudFront/CloudWatch/IAM operational data follows the same metadata-minimization and secret-redaction rules as the application.

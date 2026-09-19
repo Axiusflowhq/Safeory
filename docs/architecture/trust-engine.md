@@ -1,6 +1,7 @@
-﻿# Trust Engine + Key Hierarchy (V1 Spec, Pre-Code)
+# Trust Engine + Key Hierarchy
 
-Status: design frozen before React screens. Code follows this doc, not the reverse.
+Status: cryptographic/policy foundation implemented; trusted-person persistence,
+AWS-coordinated timed release, and end-user workflow integration remain in progress.
 
 Implementation status: the policy model (`AccessPolicy`/`AccessGrant`,
 conditions, wait periods, durations, private-forever, destruction) with
@@ -21,7 +22,8 @@ release or deletion.
 
 - No server-side decryption, no admin unlock, no whole-account legacy unlock.
 - No automatic whole-vault AI access. No email/browser ingestion in V1.
-- No password autofill, banking connections, marketplaces.
+- Password autofill belongs to the password-manager extension and is outside the
+  Trust Engine scope. Banking connections and marketplaces remain non-goals.
 
 ## V1 scope (from product vision)
 

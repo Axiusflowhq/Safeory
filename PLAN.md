@@ -44,7 +44,7 @@ Rule: cloud integration starts only after the local platform below is stable.
 | # | Item | Status |
 |---|------|--------|
 | 17 | Client-side encryption | ✅ Done — XChaCha20-Poly1305, per-item keys, Argon2id KEK |
-| 18 | Zero-knowledge server | ⏸️ N/A yet — no server exists; architecture doc'd (`docs/architecture/overview.md`) |
+| 18 | Zero-knowledge server | 🟡 Partial — `apps/api` implements account/device coordination and opaque revision-fenced ciphertext sync; production AWS account/auth integration and end-to-end client sync are still in progress |
 | 19 | Local encrypted vault | ✅ Done — SQLite ciphertext-only, rollback-journal tested |
 | 20 | E2EE sharing | 🟡 Crypto layer done (`vault-sharing`: X25519 ephemeral-static, fingerprint-bound, purpose-separated); no transport |
 | 21 | Recovery kit | ✅ Done — save/print, install/confirm, live-key replacement, unlock-with-kit, recovery-authenticated backup restore with new passphrase, 2-of-3 social recovery crypto + e2e test |
@@ -58,18 +58,19 @@ Rule: cloud integration starts only after the local platform below is stable.
 
 ## Backlog — ordered, post-V1
 1. Grant persistence inside item payloads + trusted-person management UX.
-2. Emergency timed-release state machine (local simulation first, Durable Object later).
+2. Emergency timed-release state machine (local simulation first, then durable PostgreSQL + worker coordination on AWS).
 3. Enforce legacy/private-forever/destruction intent through trusted-person + emergency-release state once that machinery exists.
 4. Plan test (simulation) + preparedness score beyond today's local readiness checks.
-5. Sync: device auth, D1 metadata, R2 blobs, queues/notifications.
+5. AWS sync productionization: Cognito account identity, Safeory device auth, RDS metadata/policy state, S3 ciphertext blobs, Valkey/worker coordination, SES notifications, and end-to-end web/extension sync.
 6. OS keystore + biometric unlock; passkeys/TOTP.
 7. Expanded home inventory and account-closure automation. Possessions now support local encrypted category/location metadata, and local encrypted subscription tracking plus credential closure planning are done; broader inventory workflows remain future work. Safeory still does not contact providers, process subscription payments, cancel subscriptions, or close accounts automatically.
 8. Email import, browser capture, mobile scanner, private-AI modes (local-first per spec).
 9. Version-history restore/rollback and richer audit metadata; bounded encrypted browse-only history is implemented locally (20 prior revisions/item), but restoring an old snapshot is intentionally deferred because historical attachment references may no longer have live attachment data. Family space and secure links remain future work.
 
 ## Non-goals (explicit)
-Password autofill, banking/investment aggregation, resale marketplace, whole-vault
-cloud AI, ads/data business of any kind, company-side decryption — ever.
+Banking/investment aggregation, resale marketplace, whole-vault cloud AI,
+ads/data business of any kind, and company-side decryption — ever. Password
+autofill is a core extension feature and is intentionally in scope.
 
 ## Verification gates (must stay green)
 `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`,

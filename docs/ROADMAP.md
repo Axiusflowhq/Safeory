@@ -26,6 +26,23 @@ Browser persistence is deliberately platform-specific: IndexedDB CAS for the web
 
 Non-goals that STAY: banking/investment aggregation, resale marketplace, whole-vault cloud AI, ads/data business, company-side decryption, and standalone mobile apps (mobile web + the extension cover the need for now).
 
+## Decision 1 — production hosting: AWS
+
+AWS is the production hosting target. Docker Compose remains a local
+development/integration environment, not the production deployment model.
+
+Launch-sized production for roughly the first 100 users is defined in
+`docs/architecture/aws.md`: Route 53 + ACM, CloudFront, a private S3 static-web
+bucket, a small Graviton EC2 Rust API/worker origin, RDS PostgreSQL, a private S3
+ciphertext-object bucket, Cognito User Pools for hosted account identity, SES,
+ECR, CloudWatch, and AWS-managed secrets. Valkey remains ephemeral and may run
+on the AWS API host initially; move it to ElastiCache when independent
+availability/scaling justifies the fixed cost.
+
+The AWS decision does not change the zero-knowledge boundary. Master-passphrase
+processing, vault/item/attachment encryption and decryption, usable vault keys,
+recovery secrets, and unlocked search stay on authorized clients.
+
 ## Phase map (ordered; each phase keeps all verification gates green)
 ### Phase 1 — Finish V1 local platform + WASM extraction (core complete)
 **Verification status: 233 Rust tests pass (0 failed) workspace-wide in
@@ -117,25 +134,34 @@ first-class, standalone client sharing the same WASM core and UI package.
   discovery throttling and one-shot fill authorization are implemented;
   durable clipboard ownership remains follow-up hardening.
 
-### Phase 4 — Sync + multi-device (self-hosted backend first; in implementation)
-- **Status: in implementation.** The self-hosted stack and opaque sync contract
-  are being built now. Do not treat the HTTP sync/device/auth endpoint set as
+### Phase 4 — AWS sync + multi-device (in implementation)
+- **Status: in implementation.** The Rust API and opaque sync contract exist,
+  while the production AWS account/deployment integration and client sync UX
+  are still being built. Do not treat the HTTP sync/device/auth endpoint set as
   complete until the implementation and its security tests land end-to-end.
-- `apps/api`: Rust HTTP service packaged for Docker. PostgreSQL owns durable
-  account/device/opaque sync and policy metadata; an S3-compatible store owns
-  ciphertext blobs (Garage preferred); Valkey provides ephemeral queues,
-  rate-limit counters, and job coordination; SMTP delivers security
-  notifications; a reverse proxy terminates TLS. See `cloudflare.md` (historical
-  filename, now the self-hosted backend plan) and `server-visible-metadata.md`.
-  No vault plaintext or usable vault keys are server-side, ever.
-- Deliver one-machine Docker deployment and documented backup/restore of
-  PostgreSQL plus ciphertext object storage before adding any managed-hosting
-  convenience path. Hosted/cloud deployments remain optional adapters to the
-  same protocol.
+- `apps/api`: Rust HTTP service packaged as a versioned container. In production
+  RDS PostgreSQL owns durable account/device/opaque sync and policy metadata;
+  S3 owns ciphertext blobs; Cognito owns hosted account identity; SES delivers
+  account/security notifications; Valkey provides only ephemeral queues,
+  rate-limit counters, and job coordination. No vault plaintext or usable vault
+  keys are server-side, ever.
+- Build the AWS launch topology in `infra/aws/` from the contract in
+  `docs/architecture/aws.md`: Route 53/ACM, CloudFront, private S3 web +
+  ciphertext buckets, ECR, Graviton EC2 API/worker, RDS PostgreSQL, Cognito,
+  SES, IAM/secrets, CloudWatch, backup/restore, and GitHub Actions OIDC deploy.
+- Keep `docker-compose.yml` as the local integration environment using
+  PostgreSQL/Valkey/Garage/Mailpit; it is not the production hosting plan.
 - `vault-sync`: device keypairs (X25519), envelope sync protocol,
   conflict = last-writer-wins on revisions + tombstones (history already
   bounded at 20 revisions/item).
-- Account creation, email verification, device registration/revocation UX.
+- Cognito-backed account creation/sign-in/email verification plus Safeory
+  device registration/revocation UX. Cognito identity does not replace the
+  per-device cryptographic identity used by sync/sharing.
+- End-to-end web + extension sync: initial bootstrap, incremental pull/push,
+  offline/reconnect behavior, conflict handling, tombstones, and revocation.
+- Production gate: RDS/S3 restore drill, secrets/IAM review, CloudWatch
+  alarms/redaction, TLS/CSP/origin restrictions, and launch-population
+  load/soak testing.
 - This is what makes the *extension* useful across machines: the web app and
   every installed extension sync through it.
 
@@ -191,5 +217,5 @@ first-class, standalone client sharing the same WASM core and UI package.
 | 3 | Breach checking | Opt-in k-anonymity only, default off |
 | 4 | Passkeys | Store/sync passkey metadata first; full passkey *provider* in the extension deferred |
 | 5 | Mobile | Responsive web only; native autofill deferred |
-| 6 | Sync backend | RESOLVED — self-hosted Docker first: Rust HTTP API + PostgreSQL + S3-compatible object storage (Garage preferred) + Valkey + SMTP + reverse proxy/TLS; managed cloud hosting optional later |
-| 7 | Self-host packaging | Define the supported Docker Compose topology, secret injection, migrations, health checks, and backup/restore procedure before Phase 4 is called production-ready |
+| 6 | Sync backend | RESOLVED — AWS production: Rust HTTP API + Cognito + RDS PostgreSQL + S3 ciphertext storage + Valkey/ElastiCache as ephemeral coordination + SES + CloudFront/Route 53/ACM; Docker Compose is local development only |
+| 7 | AWS production packaging | RESOLVED architecture in `docs/architecture/aws.md`; implement reviewable IaC under `infra/aws/`, OIDC CI/CD, migrations, health checks, observability, and tested backup/restore before Phase 4 is production-ready |

@@ -1,4 +1,4 @@
-﻿# Safeory
+# Safeory
 
 Safeory is a local-first, zero-knowledge consumer vault for important personal
 information: documents, records, property, insurance, vehicles, and possessions,
@@ -7,7 +7,7 @@ working offline on one device, before any cloud or trusted-person networking.
 
 ## Current phase
 
-Phase 1 — browser-first local platform with the self-hosted sync/API layer in implementation.
+Phase 1 — browser-first local platform with the AWS-hosted sync/API layer in implementation.
 
 Implemented now:
 
@@ -17,7 +17,7 @@ Implemented now:
 - `apps/extension`, an MV3 browser extension with an isolated background vault, exact-origin credential matching, trusted-click discovery, bounded request throttling, one-shot fill authorization, and a compact credential surface;
 - ciphertext-only browser snapshot validation, IndexedDB CAS persistence, and fail-closed durability poisoning when an in-memory mutation cannot be saved;
 - portable emergency/recovery primitives, encrypted legacy/account-closure planning metadata, bounded history and attachment formats in the native core, plus the Trust Engine policy and threshold-sharing foundations;
-- `apps/api` and Docker-first self-hosted infrastructure for account/device coordination and opaque encrypted-object sync using PostgreSQL, Valkey, S3-compatible object storage, and SMTP;
+- `apps/api` plus a local Docker integration stack for account/device coordination and opaque encrypted-object sync using PostgreSQL, Valkey, S3-compatible object storage, and SMTP; the production target is AWS as documented in `docs/architecture/aws.md`;
 - pinned Rust/JS lockfiles and dependency/security CI policy.
 
 Not implemented yet: complete browser attachment/export parity, full trusted-person grant UX and timed emergency release, automated account closure, account/passkey flows, and end-to-end multi-device sync UX.
@@ -46,10 +46,23 @@ The post-V1 strategy (password-manager + autofill + sync/mobile) is in
 shared session/persistence layer, `apps/web` for the web app, and
 `apps/extension` for the browser extension.
 
-## Self-hosted Docker infrastructure
+## Production AWS infrastructure
 
-Safeory includes a Docker-first self-hosted stack and does not require
-Cloudflare or another managed backend. Compose builds the Safeory web app and
+AWS is the production hosting target. The launch-sized topology uses CloudFront
+and a private S3 bucket for the static web app, a small Graviton EC2 host for the
+Rust API/worker, RDS PostgreSQL, a private S3 ciphertext-object bucket, Cognito
+for hosted account identity, SES for notifications, Route 53/ACM for DNS/TLS,
+ECR for API images, and CloudWatch plus AWS-managed secrets for operations.
+
+Vault encryption/decryption, master-passphrase processing, recovery secrets,
+usable vault keys, and unlocked search remain on authorized user devices. See
+`docs/architecture/aws.md` for the complete production topology, security
+boundary, scaling path, and production-ready gate.
+
+## Local Docker development infrastructure
+
+Safeory includes a Docker Compose development/integration stack that mirrors the
+production service boundaries without being the production deployment. Compose builds the Safeory web app and
 Rust API, runs PostgreSQL for durable server-visible metadata/state, Valkey for
 ephemeral coordination, Garage for S3-compatible ciphertext object storage, and
 Mailpit for local SMTP testing. Vault decryption remains client-side; the API
@@ -81,10 +94,9 @@ Default host endpoints are loopback-only:
 Garage `v2.4.1` uses its single-node bootstrap mode here, so the bucket and S3
 access key from `.env` are created automatically on first launch. The metadata
 and object data live in persistent named volumes. This development topology uses
-`replication_factor = 1`, which has no node redundancy; production deployments
-should use unique generated secrets, backups, multiple Garage nodes/zones as
-appropriate, and a TLS reverse proxy or private network rather than exposing
-these service ports directly.
+`replication_factor = 1`, which has no node redundancy. It is intentionally not
+the production storage topology; production uses AWS RDS/S3 and the controls in
+`docs/architecture/aws.md`.
 
 Stop the services without deleting stored data with `docker compose down`.
 Deleting the named volumes is intentionally not part of the normal teardown.

@@ -1,4 +1,4 @@
-﻿# Dependency Risk Register
+# Dependency Risk Register
 
 Verified: 2026-09-19
 
@@ -32,7 +32,7 @@ This register records security-relevant direct dependencies and narrowly scoped 
 - Watch items: same as above — pinned, audited via `cargo audit`/`cargo deny`,
   no silent ignores.
 
-## Self-hosted API transport dependencies
+## API transport dependencies
 
 - `safeory-api` adds pinned `sqlx` 0.9.0 for PostgreSQL, `redis` 1.7.0 for
   Valkey, and `axum`/`tokio` for the HTTP runtime. The API is intentionally a

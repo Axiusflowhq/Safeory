@@ -1,4 +1,7 @@
-# Cloudflare infrastructure
+# Historical Cloudflare infrastructure placeholder
 
-Infrastructure code is deferred until the Cloudflare phase. The intended service
-boundaries are documented in `docs/architecture/cloudflare.md`.
+Cloudflare is no longer the production target. AWS is the production hosting
+decision; see `infra/aws/README.md` and `docs/architecture/aws.md`.
+
+This directory remains only to avoid breaking historical references and should
+not receive new infrastructure implementation.

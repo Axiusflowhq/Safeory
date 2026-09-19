@@ -1,6 +1,7 @@
-﻿# Cryptographic Design
+# Cryptographic Design
 
-Status: Phase 0 implementation design, format version 1.
+Status: implemented cryptographic baseline; format version 1 with current item
+payload schema evolution documented below.
 
 Changes to algorithms, KDF parameters, envelope formats, or key hierarchy require review and an ADR/migration plan.
 

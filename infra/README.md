@@ -1,6 +1,12 @@
-# Self-hosted infrastructure
+# Infrastructure
 
-`docker-compose.yml` provides the local Safeory self-hosted stack:
+AWS is the production hosting target. See `docs/architecture/aws.md` and
+`infra/aws/README.md` for the production service boundaries and implementation
+plan.
+
+## Local Docker development stack
+
+`docker-compose.yml` provides the local Safeory development/integration stack:
 
 - PostgreSQL for durable relational application data,
 - Valkey for cache/ephemeral coordination,
@@ -25,3 +31,7 @@ Garage bucket/access credentials through environment variables. Browser clients
 never receive those storage credentials. Account bootstrap uses a separate
 `ACCOUNT_REGISTRATION_TOKEN`; replace the development placeholder with random
 high-entropy material before any non-local deployment.
+
+Garage, Mailpit, and the Compose bootstrap token are development substitutes.
+Production uses Amazon S3, SES, Cognito-backed account identity, and the AWS
+deployment controls documented in `docs/architecture/aws.md`.

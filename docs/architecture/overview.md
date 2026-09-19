@@ -23,11 +23,15 @@ React web app                    Browser extension
                    |
                    | ciphertext + minimum metadata only
                    v
-          Self-hosted Rust HTTP API
-            |-- PostgreSQL
-            |-- S3-compatible object storage
-            |-- Valkey
-            `-- SMTP
+             AWS production edge
+          CloudFront / Route 53 / ACM
+                   |
+                   v
+             Rust HTTP API
+            |-- RDS PostgreSQL
+            |-- Amazon S3
+            |-- Cognito / SES
+            `-- Valkey / CloudWatch
 ```
 
 Dependency direction points inward toward portable Rust crates. Security-domain crates do not depend on React, browser UI types, a particular reverse proxy, object-store vendor, or cloud-provider SDK type.
@@ -87,32 +91,33 @@ Creation is the reverse path. The database receives only salts, nonces, cipherte
 
 ## Backend shape (in implementation)
 
-Self-hosting is the primary deployment target. The first supported backend is a
-Docker-deployed stack that can run on one operator-controlled host and later be
-split across machines without changing the client protocol:
+AWS is the production deployment target. `docker-compose.yml` remains a local
+development/integration stack that mirrors the service boundaries without being
+the production topology. The detailed AWS launch and scale-up plan is in
+`docs/architecture/aws.md`.
 
 - Rust HTTP API: authentication coordination, device registration, opaque sync
   metadata, emergency policy, trusted-person workflow, and presigned/object
   storage mediation where needed.
-- PostgreSQL: authoritative server-visible account, device, revision,
+- RDS PostgreSQL: authoritative server-visible account, device, revision,
   idempotency, audit, and emergency-workflow state.
-- S3-compatible object storage: encrypted records, attachments, and other
-  ciphertext blobs. Garage is the preferred self-hosted implementation. MinIO's
-  community distribution is no longer maintained/prebuilt, so it is not the
-  default recommendation; compatibility with standard S3 APIs remains the
-  portability boundary.
+- Amazon S3: encrypted records, attachments, and other ciphertext blobs.
+  Standard S3-compatible APIs remain the portability boundary used by the API;
+  Garage is retained only in the local Docker integration stack.
+- Cognito User Pools: hosted account identity/session/email-verification layer.
+  Safeory device credentials and X25519 keys remain separate cryptographic
+  device identity.
 - Valkey: ephemeral rate-limit counters, retry queues, worker coordination, and
-  short-lived job state. Durable security decisions stay in PostgreSQL.
-- SMTP: account/security notifications with no vault content.
-- Reverse proxy/TLS: the public ingress terminates HTTPS and forwards only the
-  API surface required by Safeory. Deployment may use an operator-selected
-  reverse proxy as long as TLS and security headers are enforced.
-
-Managed cloud services may be supported later as interchangeable deployment
-options. They must preserve the same protocol and zero-knowledge boundary; no
-cloud provider is required for the primary product architecture.
+  short-lived job state. It may run on the launch API host and later move to
+  ElastiCache. Durable security decisions stay in PostgreSQL.
+- SES: account/security notifications with no vault content.
+- CloudFront + Route 53 + ACM: public web/API edge, DNS, and TLS. The static web
+  export is served from a private S3 origin; `/api/*` is routed to the API
+  origin under the same public origin contract.
+- ECR, IAM/Secrets Manager/SSM, and CloudWatch: versioned API images,
+  short-lived service authorization/secrets, and operational visibility.
 
 No backend component receives usable vault decryption keys or vault plaintext.
-Opaque self-hosted synchronization is in implementation; this architecture
+Opaque AWS-hosted synchronization is in implementation; this architecture
 describes the intended server-visible contract and deployment boundaries, not a
 claim that the complete sync/auth/device HTTP endpoint surface has shipped.
