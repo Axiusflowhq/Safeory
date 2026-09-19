@@ -1,0 +1,63 @@
+/**
+ * Message protocol between content scripts, the background service worker,
+ * and the popup. This is the extension's security boundary:
+ *
+ * - Content scripts run in untrusted pages and NEVER hold vault keys or
+ *   decrypted item lists. They may only request a fill for a specific
+ *   credential id and receive just username/password.
+ * - The background service worker derives the page origin from MessageSender
+ *   and only releases a credential to the exact stored origin.
+ * - The popup is a trusted extension page and may list/edit after unlock.
+ */
+
+export interface CredentialSummary {
+  id: string;
+  title: string;
+  username: string;
+  website: string;
+  revision: number;
+}
+
+export interface FillPayload {
+  username: string;
+  password: string;
+}
+
+export type ContentRequest =
+  | { type: "findCredentials" }
+  | { type: "fillCredential"; id: string };
+
+export type ContentResponse =
+  | { type: "credentials"; locked: boolean; items: CredentialSummary[] }
+  | { type: "fill"; ok: boolean; payload?: FillPayload; error?: string }
+  | { type: "error"; error: string };
+
+export type PopupRequest =
+  | { type: "getState" }
+  | { type: "unlock"; passphrase: string }
+  | { type: "unlockWithRecoveryKit"; secretHex: string }
+  | { type: "create"; passphrase: string }
+  | { type: "lock" }
+  | { type: "listCredentials" }
+  | {
+      type: "addCredential";
+      title: string;
+      username: string;
+      password: string;
+      website: string;
+    }
+  | { type: "copyPassword"; id: string }
+  | { type: "generatePassword"; length: number };
+
+export type PopupResponse =
+  | {
+      type: "state";
+      initialized: boolean;
+      unlocked: boolean;
+      credentialCount: number;
+    }
+  | { type: "credentials"; items: CredentialSummary[] }
+  | { type: "password"; password: string }
+  | { type: "copiedPassword"; password: string; clearToken: string }
+  | { type: "ok" }
+  | { type: "error"; error: string };

@@ -2,8 +2,9 @@
 
 //! Local Trust Engine: conditional access policies, waiting periods, and
 //! threshold recovery. Evaluated in the portable Rust core on encrypted-payload
-//! policy data; enforcement stays local-first. The backend may later
-//! coordinate release timing in a Durable Object, but it can never decrypt.
+//! policy data; enforcement stays local-first. A self-hosted backend may later
+//! coordinate release timing using durable transactional state, but it can
+//! never decrypt vault contents.
 
 use blahaj::{Share, Sharks};
 use serde::{Deserialize, Serialize};

@@ -1,6 +1,6 @@
 # Threat Model
 
-Status: Phase 0 baseline. Update this document before each security-sensitive feature ships.
+Status: local desktop + browser/WASM + extension baseline. Update this document before each security-sensitive feature ships.
 
 ## Assets
 
@@ -15,19 +15,25 @@ Status: Phase 0 baseline. Update this document before each security-sensitive fe
 1. Unlocked local Rust core.
 2. Local encrypted SQLite database.
 3. Tauri IPC boundary and WebView renderer.
-4. OS secure-storage boundary (future Phase 0/1 work).
-5. Network boundary.
-6. Cloudflare Workers/D1/R2/Durable Objects/Queues.
-7. Trusted recipient devices.
+4. Web-app JavaScript/DOM and the `vault-wasm` linear-memory boundary.
+5. Browser IndexedDB and extension `chrome.storage.local` ciphertext persistence.
+6. Browser-extension background worker, trusted extension pages, and untrusted page content scripts.
+7. OS secure-storage boundary (future work).
+8. Network boundary.
+9. Self-hosted server stack: reverse proxy/TLS, Rust HTTP API, PostgreSQL,
+   S3-compatible object storage, Valkey, background workers, and SMTP relay.
+10. Trusted recipient devices.
 
 ## Threat register
 
 | Threat                            | Consequence                                        | Primary mitigation                                                        | Residual risk                                               |
 | --------------------------------- | -------------------------------------------------- | ------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| Stolen Cloudflare database        | Account/security metadata exposed                  | Minimize plaintext metadata; opaque IDs; E2EE vault records               | Metadata correlation remains visible                        |
-| Stolen R2 bucket                  | Ciphertext exfiltration/offline attack             | Per-item/file keys, AEAD, strong root-key wrapping                        | Weak passphrases still weaken offline resistance            |
+| Stolen PostgreSQL database        | Account/security metadata exposed                  | Minimize plaintext metadata; opaque IDs; E2EE vault records               | Metadata correlation remains visible                        |
+| Stolen object-storage bucket      | Ciphertext exfiltration/offline attack             | Per-item/file keys, AEAD, strong root-key wrapping                        | Weak passphrases still weaken offline resistance            |
 | Malicious backend administrator   | Unauthorized metadata actions/early release        | Backend never receives usable vault keys; strict auth/audit               | Admin can deny service or release encrypted capsules early  |
 | Backend compromise                | Modification/replay/availability attacks           | Authenticated envelopes, revisions, device auth, replay checks            | Availability cannot be guaranteed                           |
+| Compromised Valkey/worker queue   | Retry abuse, rate-limit bypass, duplicated jobs     | Valkey is ephemeral only; durable authorization/policy state stays transactionally in PostgreSQL; idempotent jobs | Queue compromise can delay or amplify work until contained |
+| Proxy/application log exposure    | Operational metadata or ciphertext copied into logs | Disable request-body/authorization-secret logging; structured redaction; minimal retention | Network/account metadata remains observable to the operator |
 | Compromised user passphrase       | Root key may be unwrapped if wrap record is stolen | Argon2id, strong UX, notifications, rewrap on change                      | Known passphrase plus wrap material is catastrophic         |
 | Stolen desktop computer           | Offline database theft                             | Encrypted secret-bearing records; passphrase KEK; OS secure storage later | Unlocked sessions/OS compromise can expose plaintext        |
 | Compromised trusted contact       | Authorized subset exposed                          | Granular grants; recipient-bound key wrapping; revocation before release  | Already decrypted copies cannot be recalled                 |
@@ -35,21 +41,25 @@ Status: Phase 0 baseline. Update this document before each security-sensitive fe
 | Revoked trusted contact           | Future unauthorized release                        | Invalidate unreleased grants; rotate affected wrapping material           | Previously decrypted copies persist                         |
 | Compromised device                | Plaintext/key theft while unlocked                 | Manual + configurable inactivity/background lock; generation-fenced renderer cleanup; secure storage planned | Malware can read process memory/screens while unlocked |
 | Malicious WebView content         | IPC invocation/data theft                          | Bundled assets, strict CSP, narrow domain commands                        | Renderer compromise retains legitimate capabilities         |
+| Web-app script/XSS compromise     | Reads unlocked plaintext or WASM memory            | Strict CSP, locked dependencies, redacted list projections, explicit detail fetches | WASM is not a sandbox from same-process JavaScript; an injected script can inspect exported linear memory while unlocked |
+| Malicious login page              | Tricks autofill into releasing another site's credential | Background derives top-frame origin from `MessageSender`; exact HTTP(S) origin match; trusted user click required before fill | Once explicitly filled, page JavaScript can read its own form fields |
+| Forged extension message          | Confused-deputy access to privileged vault commands | Background separates top-frame content-script senders from same-extension page senders and ignores caller-supplied origins | Bugs in sender classification or future message types can widen the surface |
+| Stale browser tab                 | Silently overwrites newer local vault state        | IndexedDB snapshot compare-and-swap version; stale saves fail and require reload | Current tab memory can remain ahead of durable state after a failed save |
 | IPC abuse                         | Unauthorized core operations                       | Typed domain commands; authorization in Rust core                         | Logic bugs remain possible                                  |
 | Oversized renderer input          | Memory/CPU/storage amplification                    | Portable Rust item-size limits before encryption and persistence          | IPC must still allocate a rejected input once               |
-| XSS                               | Renderer compromise                                | No remote code, strict CSP, escaping, no eval                             | Dependency/app bugs may still inject content                |
-| CSRF                              | Unauthorized browser-surface actions               | SameSite/Secure/HttpOnly cookies, origin checks, anti-CSRF patterns       | Applies to future web surfaces                              |
+| XSS                               | Renderer/browser compromise                        | No remote code, strict CSP, escaping, no eval except WASM compilation permission | Dependency/app bugs may still inject content                |
+| CSRF                              | Unauthorized browser-surface actions               | SameSite/Secure/HttpOnly cookies, origin checks, anti-CSRF patterns once accounts/network actions exist | Local-only browser vault currently has no authenticated server mutation surface |
 | Supply-chain compromise           | Malicious dependency/build artifact                | Lockfiles, minimal deps, audits, CI scanning                              | Registry/account compromise remains possible                |
-| Clipboard leakage                 | Secret retained outside app                        | Backend-only password copy; ownership-checked 30s clear; Windows compare+clear holds the global clipboard lock; early clear after session invalidation | OS clipboard history/sync/tools may retain copied secrets; non-Windows plugin APIs leave a narrow external replacement race |
+| Clipboard leakage                 | Secret retained outside app                        | Desktop backend owns password copy and compare+clear; extension copy computes an ownership token before best-effort delayed clearing | Extension popup lifetime/browser clipboard permissions can prevent the delayed clear; OS clipboard history/sync/tools may retain copied secrets |
 | Logs/crash dumps                  | Plaintext leakage                                  | Redacted structured logging, secret types, serialization tests            | OS crash capture can include memory                         |
 | Replay attacks                    | Stale mutation accepted                            | Revisions, operation IDs, authenticated metadata, replay guards           | Offline devices need reconciliation                         |
 | Rollback attacks                  | Old valid ciphertext presented as current          | Monotonic revisions/device-observed state                                 | Isolated device may not know newer state                    |
 | Sync conflicts                    | Data loss/overwrite                                | Item-level revisions, explicit conflict policy, tombstones                | Human resolution may be needed                              |
-| Emergency-state race              | Release after deny/revoke                          | Explicit state machine serialized in Durable Object; fail closed          | Control-plane failures can delay valid actions              |
+| Emergency-state race              | Release after deny/revoke                          | Explicit state machine serialized by PostgreSQL transactions/constraints with revision and idempotency checks; fail closed | Database/control-plane failures can delay valid actions |
 | Attacker changes recipient        | Wrong recipient can decrypt grant                  | Bind recipient key fingerprint in authenticated grant metadata            | Compromised authorized device can approve malicious changes |
 | Attacker adds device              | New device receives future key material            | Passkey auth, explicit authorization, notifications                       | Compromised account auth can still authorize a device       |
 | Recovery-flow takeover            | Root access stolen                                 | High-entropy recovery secret, generation-fenced install/save, no server backdoor | Recovery-key theft is catastrophic; saved/printed copies can persist |
-| Brute-force attempts              | Password/account guessing                          | Argon2id offline resistance; online rate limits/Turnstile                 | Weak passphrases remain weaker                              |
+| Brute-force attempts              | Password/account guessing                          | Argon2id offline resistance; reverse-proxy/API rate limits backed by Valkey | Weak passphrases remain weaker                              |
 | Email compromise                  | Notifications/invitations intercepted              | Email contains no vault content; sensitive actions need stronger proof    | Social engineering risk remains                             |
 
 ## Phase 0 assumptions
@@ -71,3 +81,15 @@ Status: Phase 0 baseline. Update this document before each security-sensitive fe
 - The desktop flow provides explicit manual lock plus a configurable device-local inactivity timeout and optional lock-on-background policy. The timeout is enforced in Rust as well as the renderer. Locking invalidates both renderer and backend session generations before stale attachment work can commit or continue to another chunk, clears decrypted UI state, and drops the in-memory Rust vault session; process exit also drops it. Bulk attachment source/output I/O runs outside the vault-session mutex, so a slow file does not block the lock path.
 - The SQLite file is treated as attacker-readable; secret-bearing columns remain authenticated ciphertext.
 - An attacker controlling an already-unlocked process is outside the at-rest encryption boundary.
+
+## Browser/WASM and extension assumptions
+
+- The web app persists only a ciphertext `KVSnapshot` in IndexedDB. Each stored snapshot carries a monotonic browser-local version; a tab must compare-and-swap the version it loaded before replacing the whole snapshot. This prevents a stale tab from silently overwriting another tab's successful mutation. It is a local concurrency fence, not multi-device sync or conflict merging.
+- Normal web item lists cross the WASM boundary only as `{id, kind, title, revision}` summaries. Full decrypted fields and notes cross only when the user opens one record for detail/edit. Credential matching in the extension uses a separate `{id, title, username, website, revision}` projection that excludes passwords and notes. The Emergency Card remains an explicit decrypted detail surface while the vault is open.
+- The extension background worker is the only extension component that owns the unlocked `WasmVault`. Content scripts never receive vault keys or a whole decrypted item list. For credential discovery/fill, the background derives the top-frame page origin from Chrome's `MessageSender`, requires an exact normalized HTTP(S) origin match including scheme and effective port, and releases username/password only after a trusted user click in the content script. Cross-origin iframes are not injected (`all_frames: false`).
+- Extension-page commands (create/unlock/lock/list/copy/add/generate) are rejected unless their sender is a same-extension page without a tab sender. Content-script requests and extension-page requests share one runtime listener but use separate sender checks.
+- `vault-wasm` keeps the root key in Rust-owned WASM memory and drops its zeroizing wrapper on lock, but WebAssembly linear memory is exported by the generated bindings. WASM therefore protects implementation boundaries and reduces accidental JS exposure; it does not protect keys from malicious JavaScript already executing in the same extension/web origin. CSP, dependency integrity, extension isolation, and minimizing plaintext returned to JS remain primary controls.
+- Recovery secrets and decrypted values intentionally returned to JavaScript can leave transient copies in JS strings or WASM linear memory that Rust cannot reliably zero after crossing the binding. Recovery-kit UX must continue to treat the displayed secret as a one-time high-value plaintext and avoid unnecessary copies/logging.
+- The web app carries a restrictive CSP meta policy for static builds and the extension declares a restrictive extension-page CSP. Production hosting must also send an equivalent or stricter HTTP CSP header; clickjacking protection such as `frame-ancestors` must be delivered by HTTP headers because it is not enforced from a meta CSP.
+- The extension and web app currently have separate device-local ciphertext stores. The extension can create and autofill local credentials, but automatic web/extension and multi-device convergence belongs to the sync phase. Until that transport exists, neither surface should imply that a record created in one local store automatically appears in the other.
+- Extension password copy currently schedules compare-and-clear from the popup page. Closing the popup or losing clipboard-read permission can prevent the delayed clear, so the 30-second clear is best-effort on the extension until a durable background/offscreen clipboard owner is implemented. Desktop's backend-owned clear remains stronger.

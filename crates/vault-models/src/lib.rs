@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use serde::{Deserialize, Deserializer, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,6 +73,75 @@ where
 pub const EMERGENCY_CARD_ID: Uuid = Uuid::from_bytes([
     0x45, 0x4D, 0x47, 0x43, 0x41, 0x52, 0x44, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
 ]);
+
+pub const MAX_ITEM_TITLE_CHARS: usize = 256;
+pub const MAX_ITEM_FIELDS: usize = 32;
+pub const MAX_ITEM_LINKS: usize = 64;
+pub const MAX_ITEM_ATTACHMENTS: usize = 16;
+pub const MAX_FIELD_NAME_CHARS: usize = 64;
+pub const MAX_FIELD_VALUE_CHARS: usize = 100_000;
+pub const MAX_ITEM_NOTES_CHARS: usize = 100_000;
+pub const MAX_CARD_ITEMS: usize = 128;
+pub const MAX_CARD_CONTACTS: usize = 32;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VaultItemValidationError {
+    InvalidLegacyDisposition,
+    InvalidAccountClosurePlan,
+    TooLarge,
+}
+
+/// Validate the portable item invariants shared by native and browser vaults.
+/// Storage adapters may enforce additional lifecycle rules (for example,
+/// attachment references can only be changed by attachment operations).
+pub fn validate_vault_item(item: &VaultItem) -> Result<(), VaultItemValidationError> {
+    let unique_attachments = item.attachments.iter().copied().collect::<BTreeSet<_>>();
+    if item.id == EMERGENCY_CARD_ID && item.legacy_disposition != LegacyDisposition::Unspecified {
+        return Err(VaultItemValidationError::InvalidLegacyDisposition);
+    }
+    if item.kind != ItemKind::Password && item.account_closure_plan != AccountClosurePlan::default()
+    {
+        return Err(VaultItemValidationError::InvalidAccountClosurePlan);
+    }
+    if item.title.chars().count() > MAX_ITEM_TITLE_CHARS
+        || item.fields.len() > MAX_ITEM_FIELDS
+        || item.links.len() > MAX_ITEM_LINKS
+        || item.attachments.len() > MAX_ITEM_ATTACHMENTS
+        || unique_attachments.len() != item.attachments.len()
+        || item.fields.iter().any(|(name, value)| {
+            name.chars().count() > MAX_FIELD_NAME_CHARS
+                || value.chars().count() > MAX_FIELD_VALUE_CHARS
+        })
+        || item
+            .notes
+            .as_ref()
+            .is_some_and(|notes| notes.chars().count() > MAX_ITEM_NOTES_CHARS)
+        || item.account_closure_plan.instructions.chars().count() > MAX_ITEM_NOTES_CHARS
+    {
+        return Err(VaultItemValidationError::TooLarge);
+    }
+    Ok(())
+}
+
+pub fn validate_emergency_card(card: &EmergencyCard) -> Result<(), VaultItemValidationError> {
+    if card.selected_item_ids.len() > MAX_CARD_ITEMS
+        || card.contacts.len() > MAX_CARD_CONTACTS
+        || card.instructions.chars().count() > MAX_ITEM_NOTES_CHARS
+    {
+        return Err(VaultItemValidationError::TooLarge);
+    }
+    for contact in &card.contacts {
+        if contact.name.chars().count() > MAX_ITEM_TITLE_CHARS
+            || contact.relation.chars().count() > MAX_ITEM_TITLE_CHARS
+            || contact.phone.chars().count() > MAX_ITEM_TITLE_CHARS
+            || contact.email.chars().count() > MAX_ITEM_TITLE_CHARS
+            || contact.notes.chars().count() > MAX_ITEM_NOTES_CHARS
+        {
+            return Err(VaultItemValidationError::TooLarge);
+        }
+    }
+    Ok(())
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EmergencyContact {

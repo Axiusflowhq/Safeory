@@ -787,9 +787,14 @@ export default function App() {
         deviceSettings.auto_lock_minutes * 60 * 1000,
       );
       const now = Date.now();
-      if (now - lastActivityReport >= 15_000) {
+      if (
+        backendSessionGeneration !== null &&
+        now - lastActivityReport >= 15_000
+      ) {
         lastActivityReport = now;
-        void invoke("record_activity").catch(() => undefined);
+        void invoke("record_activity", {
+          expectedSessionGeneration: backendSessionGeneration,
+        }).catch(() => undefined);
       }
     };
     const handleVisibilityChange = () => {
@@ -811,7 +816,7 @@ export default function App() {
       }
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [deviceSettings, lockVault, screen]);
+  }, [backendSessionGeneration, deviceSettings, lockVault, screen]);
 
   useEffect(() => {
     if (

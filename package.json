@@ -4,8 +4,10 @@
   "license": "AGPL-3.0-or-later",
   "packageManager": "pnpm@12.4.1",
   "scripts": {
-    "build": "pnpm --filter @safeory/desktop build",
-    "typecheck": "pnpm --filter @safeory/desktop typecheck",
+    "build:wasm": "node scripts/build-vault-wasm.mjs",
+    "build": "corepack pnpm run build:wasm && corepack pnpm --filter @safeory/web --filter @safeory/extension --filter @safeory/desktop build",
+    "typecheck": "corepack pnpm --filter @safeory/contracts --filter @safeory/web --filter @safeory/extension --filter @safeory/desktop typecheck",
+    "lint": "corepack pnpm --filter @safeory/contracts --filter @safeory/web --filter @safeory/extension --filter @safeory/desktop lint",
     "audit:js": "pnpm audit --prod",
     "check:icons": "node scripts/check-icon-policy.mjs",
     "test:rust": "cargo test --workspace",

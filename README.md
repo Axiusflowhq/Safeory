@@ -108,8 +108,8 @@ Implemented now:
 Not implemented yet: grant persistence inside item payloads, trusted-person
 grant UX, enforcement of legacy/private-forever/destruction intent, Emergency
 Access timed-release coordination, automated account closure, account/passkey flows,
-Cloudflare sync. Cloud integration starts only
-after this local platform is stable.
+self-hosted sync/auth endpoints. Remote coordination starts only after this
+local platform is stable; managed cloud hosting is optional, not required.
 
 ## Validation
 
@@ -119,13 +119,67 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo audit
 cargo deny check advisories bans licenses sources
+rustup target add wasm32-unknown-unknown
+cargo install wasm-pack --version 0.15.0 --locked
+node scripts/build-vault-wasm.mjs
 corepack pnpm install --frozen-lockfile
-corepack pnpm --filter @safeory/desktop typecheck
-corepack pnpm --filter @safeory/desktop lint
-corepack pnpm --filter @safeory/desktop build
+corepack pnpm typecheck
+corepack pnpm lint
+corepack pnpm --filter @safeory/desktop format:check
+corepack pnpm build
+corepack pnpm --filter @safeory/desktop tauri build
 ```
 
 Security design and known dependency risks live under `docs/security/`.
+The post-V1 strategy (password-manager + autofill + sync/mobile) is in
+`docs/ROADMAP.md`. The product ships as a **web app + browser extension**
+(ADR 0002) running the Rust core compiled to WASM (ADR 0003); see
+`crates/vault-wasm` for the browser vault core, `packages/contracts` for the
+shared session/persistence layer, and `apps/web` for the web app. The Tauri
+desktop app is retained for now as the reference implementation.
+
+## Self-hosted Docker infrastructure
+
+Safeory includes a Docker-first self-hosted stack and does not require
+Cloudflare or another managed backend. Compose builds the Safeory web app and
+Rust API, runs PostgreSQL for durable server-visible metadata/state, Valkey for
+ephemeral coordination, Garage for S3-compatible ciphertext object storage, and
+Mailpit for local SMTP testing. Vault decryption remains client-side; the API
+does not receive usable vault keys or vault plaintext.
+
+Running the stack requires Docker Compose v2 and a Linux-capable Docker daemon.
+On Windows, use Docker Desktop in Linux-container mode or a Docker Engine inside
+WSL2 with the Compose plugin installed; the standalone Windows Docker CLI alone
+is not sufficient for these Linux images.
+
+```text
+cp .env.example .env
+# Replace every DEV_ONLY / placeholder credential in .env before non-local use.
+docker compose up -d --build --wait
+docker compose ps
+```
+
+Default host endpoints are loopback-only:
+
+- Web app: `http://127.0.0.1:8080`
+- API diagnostics: `http://127.0.0.1:8081/health/live` and `/health/ready`
+- PostgreSQL: `127.0.0.1:5432`
+- Valkey: `127.0.0.1:6379`
+- Garage S3 API: `http://127.0.0.1:3900`
+- Garage admin API: `http://127.0.0.1:3903`
+- Mailpit SMTP: `127.0.0.1:1025`
+- Mailpit UI: `http://127.0.0.1:8025`
+
+Garage `v2.4.1` uses its single-node bootstrap mode here, so the bucket and S3
+access key from `.env` are created automatically on first launch. The metadata
+and object data live in persistent named volumes. This development topology uses
+`replication_factor = 1`, which has no node redundancy; production deployments
+should use unique generated secrets, backups, multiple Garage nodes/zones as
+appropriate, and a TLS reverse proxy or private network rather than exposing
+these service ports directly.
+
+Stop the services without deleting stored data with `docker compose down`.
+Deleting the named volumes is intentionally not part of the normal teardown.
 
 ## License
 

@@ -1,6 +1,9 @@
-﻿packages:
+packages:
   - "apps/*"
   - "packages/*"
+allowBuilds:
+  '@swc/core': true
+  unrs-resolver: true
 minimumReleaseAgeExclude:
   - '@oxlint/binding-android-arm-eabi@1.83.0'
   - '@oxlint/binding-android-arm64@1.83.0'
@@ -22,5 +25,5 @@ minimumReleaseAgeExclude:
   - '@oxlint/binding-win32-ia32-msvc@1.83.0'
   - '@oxlint/binding-win32-x64-msvc@1.83.0'
   - oxlint@1.83.0
-  - '@hugeicons/core-free-icons@4.3.3'
+  - '@hugeicons/core-free-icons@4.3.3 || 4.3.4'
   - '@solar-icons/react@2.2.0'

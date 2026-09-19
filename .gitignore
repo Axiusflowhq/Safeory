@@ -3,6 +3,12 @@
 .pnpm-store/
 apps/desktop/dist/
 apps/desktop/node_modules/
+apps/web/dist/
+apps/web/node_modules/
+apps/extension/dist/
+apps/extension/node_modules/
+packages/contracts/node_modules/
+crates/vault-wasm/pkg/
 .DS_Store
 *.log
 .env

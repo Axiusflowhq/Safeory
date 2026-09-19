@@ -90,6 +90,21 @@ continues to print them on every run.
   release; rerun `cargo audit`/`cargo deny` on upgrades and review any new
   native clipboard transitive dependency before accepting it.
 
+## Self-hosted API transport dependencies
+
+- `safeory-api` adds pinned `sqlx` 0.9.0 for PostgreSQL, `redis` 1.7.0 for
+  Valkey, and `axum`/`tokio` for the HTTP runtime. The API is intentionally a
+  coordination/metadata service and contains no vault decryption path.
+- SQLx's Rustls transport graph introduces `ring` 0.17.14,
+  `rustls-webpki` 0.103.15, and `untrusted` 0.9.0 under the ISC license, plus
+  `webpki-roots` 1.0.9 under CDLA-Permissive-2.0. Redis introduces
+  `xxhash-rust` 0.8.18 under BSL-1.0.
+- `deny.toml` allows those licenses only for those exact crate versions rather
+  than widening the workspace-wide allowlist. The exceptions are licensing
+  approvals, not advisory ignores; vulnerability checks remain unchanged.
+- Watch items: re-review these exact exceptions whenever SQLx/Rustls/Redis is
+  upgraded or the API transport graph changes.
+
 ## Review rule
 
 Do not add new advisory ignores merely to make CI green. For any new finding:

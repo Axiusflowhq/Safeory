@@ -1,16 +1,20 @@
 #![forbid(unsafe_code)]
+#![cfg_attr(not(feature = "sqlite"), allow(dead_code))]
 
+#[cfg(feature = "sqlite")]
 use rusqlite::{
     Connection, OptionalExtension, Transaction, TransactionBehavior, backup::Backup, params,
 };
+#[cfg(feature = "sqlite")]
 use std::{path::Path, time::Duration};
 use thiserror::Error;
 use uuid::Uuid;
+#[cfg(feature = "sqlite")]
 use vault_crypto::{
     ATTACHMENT_MAX_CHUNK_CIPHERTEXT_BYTES, ATTACHMENT_MAX_CHUNKS,
-    ATTACHMENT_MAX_ENCRYPTED_RECORD_BYTES, ATTACHMENT_MAX_OBJECTS, EncryptedItemV1,
-    RecoveryKitWrapV1, RootKeyWrapV1,
+    ATTACHMENT_MAX_ENCRYPTED_RECORD_BYTES, ATTACHMENT_MAX_OBJECTS,
 };
+use vault_crypto::{EncryptedItemV1, RecoveryKitWrapV1, RootKeyWrapV1};
 
 const CURRENT_SCHEMA_VERSION: i64 = 4;
 /// Resource ceiling for local encrypted item rows. This is intentionally far
@@ -31,8 +35,51 @@ pub const ITEM_HISTORY_MAX_STORAGE_BYTES: u64 = 1024 * 1024 * 1024;
 pub const ROOT_WRAP_MAX_ENCODED_BYTES: usize = 16 * 1024;
 pub const RECOVERY_WRAP_MAX_ENCODED_BYTES: usize = 16 * 1024;
 
+/// Storage-agnostic vault persistence boundary (ADR 0002/0003). The portable
+/// data path used by `vault-core` and the browser session is expressed against
+/// this trait; SQLite (`VaultStorage`) and the browser in-memory store
+/// (`vault-wasm`) are two implementations. Attachment file paths and native
+/// backup/restore stay on `VaultStorage` because they are desktop-only.
+pub trait VaultStore {
+    fn initialize_root_wrap(&self, wrapped: &RootKeyWrapV1) -> Result<(), StorageError>;
+    fn load_root_wrap(&self) -> Result<RootKeyWrapV1, StorageError>;
+    fn replace_root_wrap(&self, wrapped: &RootKeyWrapV1) -> Result<(), StorageError>;
+    fn is_initialized(&self) -> Result<bool, StorageError>;
+    fn store_recovery_wrap(&self, wrapped: &RecoveryKitWrapV1) -> Result<(), StorageError>;
+    fn load_recovery_wrap(&self) -> Result<Option<RecoveryKitWrapV1>, StorageError>;
+    fn has_recovery_wrap(&self) -> Result<bool, StorageError>;
+    fn insert_item(&self, item: &EncryptedItemV1) -> Result<(), StorageError>;
+    fn update_item_if_revision(
+        &self,
+        item: &EncryptedItemV1,
+        expected_revision: u64,
+    ) -> Result<(), StorageError>;
+    fn update_item_with_history_if_revision(
+        &self,
+        item: &EncryptedItemV1,
+        expected_revision: u64,
+    ) -> Result<(), StorageError>;
+    fn load_item(&self, object_id: Uuid) -> Result<EncryptedItemV1, StorageError>;
+    fn list_item_ids(&self) -> Result<Vec<Uuid>, StorageError>;
+    fn validate_record_bounds(&self) -> Result<(), StorageError>;
+}
+
+/// Serializable snapshot of the ciphertext-bearing rows for browser
+/// persistence (IndexedDB via JS) and portable interchange. Contains only
+/// already-encrypted envelopes and opaque metadata; no plaintext secrets.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct KVSnapshot {
+    pub schema_version: u32,
+    pub root_key_wrap: Option<RootKeyWrapV1>,
+    pub recovery_kit_wrap: Option<RecoveryKitWrapV1>,
+    pub items: Vec<EncryptedItemV1>,
+}
+
+pub const KV_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+
 #[derive(Error, Debug)]
 pub enum StorageError {
+    #[cfg(feature = "sqlite")]
     #[error("database operation failed")]
     Database(#[from] rusqlite::Error),
     #[error("encrypted metadata serialization failed")]
@@ -59,11 +106,13 @@ pub enum StorageError {
     UnsupportedSchemaVersion(i64),
 }
 
+#[cfg(feature = "sqlite")]
 pub struct VaultStorage {
     connection: Connection,
     path: std::path::PathBuf,
 }
 
+#[cfg(feature = "sqlite")]
 impl VaultStorage {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {
         let path = path.as_ref().to_path_buf();
@@ -1254,8 +1303,83 @@ impl VaultStorage {
         transaction.commit()?;
         Ok(())
     }
+
+    /// Serialize the ciphertext-bearing rows into a portable snapshot for
+    /// browser/IndexedDB interchange. Reads through the same size-bounded
+    /// loaders used by normal operation. Attachments and per-item history are
+    /// desktop-native concerns and are not part of the browser snapshot.
+    pub fn to_snapshot(&self) -> Result<KVSnapshot, StorageError> {
+        let root_key_wrap = if self.is_initialized()? {
+            Some(self.load_root_wrap()?)
+        } else {
+            None
+        };
+        let recovery_kit_wrap = self.load_recovery_wrap()?;
+        let mut items = Vec::new();
+        for id in self.list_item_ids()? {
+            items.push(self.load_item(id)?);
+        }
+        Ok(KVSnapshot {
+            schema_version: KV_SNAPSHOT_SCHEMA_VERSION,
+            root_key_wrap,
+            recovery_kit_wrap,
+            items,
+        })
+    }
 }
 
+#[cfg(feature = "sqlite")]
+impl VaultStore for VaultStorage {
+    fn initialize_root_wrap(&self, wrapped: &RootKeyWrapV1) -> Result<(), StorageError> {
+        VaultStorage::initialize_root_wrap(self, wrapped)
+    }
+    fn load_root_wrap(&self) -> Result<RootKeyWrapV1, StorageError> {
+        VaultStorage::load_root_wrap(self)
+    }
+    fn replace_root_wrap(&self, wrapped: &RootKeyWrapV1) -> Result<(), StorageError> {
+        VaultStorage::replace_root_wrap(self, wrapped)
+    }
+    fn is_initialized(&self) -> Result<bool, StorageError> {
+        VaultStorage::is_initialized(self)
+    }
+    fn store_recovery_wrap(&self, wrapped: &RecoveryKitWrapV1) -> Result<(), StorageError> {
+        VaultStorage::store_recovery_wrap(self, wrapped)
+    }
+    fn load_recovery_wrap(&self) -> Result<Option<RecoveryKitWrapV1>, StorageError> {
+        VaultStorage::load_recovery_wrap(self)
+    }
+    fn has_recovery_wrap(&self) -> Result<bool, StorageError> {
+        VaultStorage::has_recovery_wrap(self)
+    }
+    fn insert_item(&self, item: &EncryptedItemV1) -> Result<(), StorageError> {
+        VaultStorage::insert_item(self, item)
+    }
+    fn update_item_if_revision(
+        &self,
+        item: &EncryptedItemV1,
+        expected_revision: u64,
+    ) -> Result<(), StorageError> {
+        VaultStorage::update_item_if_revision(self, item, expected_revision)
+    }
+    fn update_item_with_history_if_revision(
+        &self,
+        item: &EncryptedItemV1,
+        expected_revision: u64,
+    ) -> Result<(), StorageError> {
+        VaultStorage::update_item_with_history_if_revision(self, item, expected_revision)
+    }
+    fn load_item(&self, object_id: Uuid) -> Result<EncryptedItemV1, StorageError> {
+        VaultStorage::load_item(self, object_id)
+    }
+    fn list_item_ids(&self) -> Result<Vec<Uuid>, StorageError> {
+        VaultStorage::list_item_ids(self)
+    }
+    fn validate_record_bounds(&self) -> Result<(), StorageError> {
+        VaultStorage::validate_record_bounds(self)
+    }
+}
+
+#[cfg(feature = "sqlite")]
 fn validate_encoded_blob_length(encoded_len: i64, max: usize) -> Result<(), StorageError> {
     if encoded_len < 0
         || usize::try_from(encoded_len).map_err(|_| StorageError::InconsistentEncryptedRow)? > max
@@ -1265,6 +1389,7 @@ fn validate_encoded_blob_length(encoded_len: i64, max: usize) -> Result<(), Stor
     Ok(())
 }
 
+#[cfg(feature = "sqlite")]
 fn archive_current_item(
     transaction: &Transaction<'_>,
     object_id: Uuid,
@@ -1285,6 +1410,7 @@ fn archive_current_item(
     Ok(())
 }
 
+#[cfg(feature = "sqlite")]
 fn update_current_item(
     transaction: &Transaction<'_>,
     object_id: Uuid,
@@ -1311,6 +1437,7 @@ fn update_current_item(
     Ok(())
 }
 
+#[cfg(feature = "sqlite")]
 fn prune_item_history(transaction: &Transaction<'_>, object_id: Uuid) -> Result<(), StorageError> {
     prune_item_history_with_limits(
         transaction,
@@ -1321,6 +1448,7 @@ fn prune_item_history(transaction: &Transaction<'_>, object_id: Uuid) -> Result<
     )
 }
 
+#[cfg(feature = "sqlite")]
 fn prune_item_history_with_limits(
     transaction: &Transaction<'_>,
     object_id: Uuid,
@@ -1383,7 +1511,7 @@ fn prune_item_history_with_limits(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::*;
     use std::fs;

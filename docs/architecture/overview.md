@@ -27,10 +27,14 @@ vault-core
   |
   | ciphertext + minimum metadata only
   v
-Cloudflare API / D1 / R2 / Durable Objects / Queues
+Self-hosted Rust HTTP API
+  |-- PostgreSQL (accounts, devices, opaque sync/policy state)
+  |-- S3-compatible object storage (ciphertext blobs; Garage preferred)
+  |-- Valkey (ephemeral queues, rate limits, job coordination)
+  `-- SMTP (security notifications only)
 ```
 
-Dependency direction always points inward toward portable Rust crates. No core crate may depend on Tauri, React, a WebView, or Cloudflare SDK types.
+Dependency direction always points inward toward portable Rust crates. No core crate may depend on Tauri, React, a WebView, a particular reverse proxy, database driver, object-store vendor, or cloud-provider SDK type.
 
 ## Local-first ownership
 
@@ -38,7 +42,7 @@ Dependency direction always points inward toward portable Rust crates. No core c
 - Sensitive item fields are serialized then encrypted before SQLite persistence.
 - The local database may contain synchronization metadata and encrypted envelopes, but no intentionally plaintext vault secrets.
 - Search is performed locally after unlock. Search indexes containing plaintext secrets are not persisted in Phase 0.
-- Cloud synchronization is secondary and may be unavailable without preventing core local vault operation.
+- Network synchronization is secondary and may be unavailable without preventing core local vault operation.
 
 ## Initial vertical slice
 
@@ -59,10 +63,29 @@ Creation is the reverse path. The database receives only salts, nonces, cipherte
 
 ## Backend shape (later phases)
 
-- Workers: authentication coordination, device registration, sync metadata, emergency policy, trusted-person workflow.
-- D1: server-visible metadata only.
-- R2: encrypted records/attachments/exports.
-- Durable Objects: race-sensitive emergency-access state machine.
-- Queues: idempotent notifications and retryable jobs.
+Self-hosting is the primary deployment target. The first supported backend is a
+Docker-deployed stack that can run on one operator-controlled host and later be
+split across machines without changing the client protocol:
 
-No backend component receives vault decryption keys.
+- Rust HTTP API: authentication coordination, device registration, opaque sync
+  metadata, emergency policy, trusted-person workflow, and presigned/object
+  storage mediation where needed.
+- PostgreSQL: authoritative server-visible account, device, revision,
+  idempotency, audit, and emergency-workflow state.
+- S3-compatible object storage: encrypted records, attachments, and other
+  ciphertext blobs. Garage is the preferred self-hosted implementation. MinIO's
+  community distribution is no longer maintained/prebuilt, so it is not the
+  default recommendation; compatibility with standard S3 APIs remains the
+  portability boundary.
+- Valkey: ephemeral rate-limit counters, retry queues, worker coordination, and
+  short-lived job state. Durable security decisions stay in PostgreSQL.
+- SMTP: account/security notifications with no vault content.
+- Reverse proxy/TLS: the public ingress terminates HTTPS and forwards only the
+  API surface required by Safeory. Deployment may use an operator-selected
+  reverse proxy as long as TLS and security headers are enforced.
+
+Managed cloud services may be supported later as interchangeable deployment
+options. They must preserve the same protocol and zero-knowledge boundary; no
+cloud provider is required for the primary product architecture.
+
+No backend component receives usable vault decryption keys or vault plaintext.

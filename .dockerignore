@@ -1,0 +1,12 @@
+.git
+.github
+target
+node_modules
+**/node_modules
+**/dist
+crates/vault-wasm/pkg
+*.log
+.env
+.env.*
+!.env.example
+

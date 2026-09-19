@@ -1,0 +1,31 @@
+{
+  "name": "@safeory/extension",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -b && vite build && vite build -c vite.background.config.ts && vite build -c vite.content.config.ts && node scripts/copy-manifest.mjs",
+    "typecheck": "tsc -b --pretty false",
+    "lint": "oxlint src vite.config.ts vite.background.config.ts vite.content.config.ts"
+  },
+  "dependencies": {
+    "@safeory/contracts": "workspace:*",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "vault-wasm": "file:../../crates/vault-wasm/pkg"
+  },
+  "devDependencies": {
+    "@types/chrome": "0.1.13",
+    "@types/node": "26.5.1",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.1",
+    "oxlint": "1.83.0",
+    "tailwindcss": "4.3.3",
+    "@tailwindcss/vite": "4.3.3",
+    "typescript": "7.0.2",
+    "vite": "8.3.0",
+    "vite-plugin-wasm": "3.5.0"
+  }
+}

@@ -1049,8 +1049,11 @@ fn lock_vault(state: State<'_, VaultRuntime>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn record_activity(state: State<'_, VaultRuntime>) -> Result<(), String> {
-    record_activity_impl(&state)
+fn record_activity(
+    state: State<'_, VaultRuntime>,
+    expected_session_generation: u64,
+) -> Result<(), String> {
+    record_activity_impl(&state, expected_session_generation)
 }
 
 #[tauri::command]
@@ -2099,8 +2102,13 @@ fn initialize_vault_impl(state: &VaultRuntime, passphrase: String) -> Result<Vau
     if session.is_some() {
         return Err("The vault is already unlocked.".to_owned());
     }
+    let mut last_activity = state
+        .last_activity
+        .lock()
+        .map_err(|_| "The local activity tracker is unavailable.".to_owned())?;
     let opened =
         VaultSession::create(&state.database_path, &passphrase).map_err(safe_vault_error)?;
+    *last_activity = Instant::now();
     *session = Some(opened);
     let session_generation = advance_session_generation(&state.session_generation);
     Ok(VaultStatus {
@@ -2117,6 +2125,10 @@ fn unlock_vault_impl(state: &VaultRuntime, passphrase: String) -> Result<VaultSt
         "Unable to unlock the vault. Check the master passphrase and try again.".to_owned()
     })?;
     let mut session = lock_session(state)?;
+    *state
+        .last_activity
+        .lock()
+        .map_err(|_| "The local activity tracker is unavailable.".to_owned())? = Instant::now();
     *session = Some(opened);
     let session_generation = advance_session_generation(&state.session_generation);
     Ok(VaultStatus {
@@ -2137,19 +2149,26 @@ fn lock_vault_impl(state: &VaultRuntime) -> Result<(), String> {
     Ok(())
 }
 
-fn record_activity_impl(state: &VaultRuntime) -> Result<(), String> {
+fn record_activity_impl(
+    state: &VaultRuntime,
+    expected_session_generation: u64,
+) -> Result<(), String> {
     expire_session_if_needed(state)?;
-    let unlocked = state
+    let session = state
         .session
         .lock()
-        .map_err(|_| "The local vault session is unavailable.".to_owned())?
-        .is_some();
-    if unlocked {
-        *state
-            .last_activity
-            .lock()
-            .map_err(|_| "The local activity tracker is unavailable.".to_owned())? = Instant::now();
+        .map_err(|_| "The local vault session is unavailable.".to_owned())?;
+    if session.is_none() {
+        return Err("Unlock the vault before recording activity.".to_owned());
     }
+    if !is_session_generation_current(state, expected_session_generation) {
+        return Err("The vault session changed while recording activity. Try again.".to_owned());
+    }
+    *state
+        .last_activity
+        .lock()
+        .map_err(|_| "The local activity tracker is unavailable.".to_owned())? = Instant::now();
+    drop(session);
     Ok(())
 }
 
@@ -4742,6 +4761,10 @@ fn unlock_vault_with_recovery_kit_impl(
             "Unable to unlock with this recovery kit. Check the secret and try again.".to_owned()
         })?;
     let mut session = lock_session(state)?;
+    *state
+        .last_activity
+        .lock()
+        .map_err(|_| "The local activity tracker is unavailable.".to_owned())? = Instant::now();
     *session = Some(opened);
     let session_generation = advance_session_generation(&state.session_generation);
     Ok(VaultStatus {
@@ -6364,10 +6387,6 @@ fn lock_session(state: &VaultRuntime) -> Result<MutexGuard<'_, Option<VaultSessi
         return Err("The vault is finishing a restore. Try again.".to_owned());
     }
     expire_session_if_needed(state)?;
-    *state
-        .last_activity
-        .lock()
-        .map_err(|_| "The local activity tracker is unavailable.".to_owned())? = Instant::now();
     let session = state
         .session
         .lock()
@@ -7226,6 +7245,67 @@ mod tests {
         assert_eq!(
             persisted.last_successful_encrypted_backup_at_ms,
             original.last_successful_encrypted_backup_at_ms
+        );
+    }
+
+    #[test]
+    fn stale_session_activity_cannot_extend_replacement_session() {
+        let (_directory, runtime) = runtime();
+        let initialized =
+            initialize_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("initialize vault");
+        let stale_generation = initialized.session_generation;
+        lock_vault_impl(&runtime).expect("lock old session");
+        let locked_activity = Instant::now() - Duration::from_secs(30);
+        *runtime
+            .last_activity
+            .lock()
+            .expect("activity tracker before replacement unlock") = locked_activity;
+        let unlocked =
+            unlock_vault_impl(&runtime, PASSPHRASE.to_owned()).expect("unlock replacement session");
+        assert_ne!(unlocked.session_generation, stale_generation);
+        assert!(
+            *runtime
+                .last_activity
+                .lock()
+                .expect("activity tracker after replacement unlock")
+                > locked_activity
+        );
+
+        let replacement_activity = Instant::now() - Duration::from_secs(30);
+        *runtime
+            .last_activity
+            .lock()
+            .expect("activity tracker before stale report") = replacement_activity;
+        list_vault_items_impl(&runtime).expect("non-activity read");
+        assert_eq!(
+            *runtime
+                .last_activity
+                .lock()
+                .expect("activity tracker after non-activity read"),
+            replacement_activity
+        );
+        let error = record_activity_impl(&runtime, stale_generation)
+            .expect_err("stale activity must not refresh the replacement session");
+        assert_eq!(
+            error,
+            "The vault session changed while recording activity. Try again."
+        );
+        assert_eq!(
+            *runtime
+                .last_activity
+                .lock()
+                .expect("activity tracker after stale report"),
+            replacement_activity
+        );
+
+        record_activity_impl(&runtime, unlocked.session_generation)
+            .expect("current session activity");
+        assert!(
+            *runtime
+                .last_activity
+                .lock()
+                .expect("activity tracker after current report")
+                > replacement_activity
         );
     }
 

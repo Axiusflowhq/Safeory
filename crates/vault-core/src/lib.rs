@@ -20,8 +20,11 @@ use vault_crypto::{
 };
 use vault_models::{
     AccountClosurePlan, EMERGENCY_CARD_ID, EmergencyCard, ItemKind, LegacyDisposition, VaultItem,
-    VaultItemState,
+    VaultItemState, VaultItemValidationError,
+    validate_emergency_card as validate_emergency_card_model, validate_vault_item,
 };
+#[cfg(test)]
+use vault_models::{MAX_FIELD_VALUE_CHARS, MAX_ITEM_NOTES_CHARS, MAX_ITEM_TITLE_CHARS};
 use vault_storage::{StorageError, VaultStorage};
 
 const PASSWORD_LOWERCASE: &[u8] = b"abcdefghijkmnopqrstuvwxyz";
@@ -32,15 +35,7 @@ const PASSWORD_ALL: &[u8] =
     b"abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$%^&*()-_=+[]{}:,.?";
 const PASSWORD_MIN_LENGTH: usize = 12;
 const PASSWORD_MAX_LENGTH: usize = 128;
-const MAX_ITEM_TITLE_CHARS: usize = 256;
-const MAX_ITEM_FIELDS: usize = 32;
-const MAX_ITEM_LINKS: usize = 64;
 const MAX_ITEM_ATTACHMENTS: usize = 16;
-const MAX_FIELD_NAME_CHARS: usize = 64;
-const MAX_FIELD_VALUE_CHARS: usize = 100_000;
-const MAX_ITEM_NOTES_CHARS: usize = 100_000;
-const MAX_CARD_ITEMS: usize = 128;
-const MAX_CARD_CONTACTS: usize = 32;
 const MAX_ATTACHMENT_STORAGE_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[derive(Clone, PartialEq, Eq)]
@@ -1472,52 +1467,20 @@ fn decode_attachment_record(
 }
 
 fn validate_item(item: &VaultItem) -> Result<(), VaultError> {
-    let unique_attachments = item.attachments.iter().copied().collect::<BTreeSet<_>>();
-    if item.id == EMERGENCY_CARD_ID && item.legacy_disposition != LegacyDisposition::Unspecified {
-        return Err(VaultError::InvalidLegacyDisposition);
+    match validate_vault_item(item) {
+        Ok(()) => Ok(()),
+        Err(VaultItemValidationError::InvalidLegacyDisposition) => {
+            Err(VaultError::InvalidLegacyDisposition)
+        }
+        Err(VaultItemValidationError::InvalidAccountClosurePlan) => {
+            Err(VaultError::InvalidAccountClosurePlan)
+        }
+        Err(VaultItemValidationError::TooLarge) => Err(VaultError::ItemTooLarge),
     }
-    if item.kind != ItemKind::Password && item.account_closure_plan != AccountClosurePlan::default()
-    {
-        return Err(VaultError::InvalidAccountClosurePlan);
-    }
-    if item.title.chars().count() > MAX_ITEM_TITLE_CHARS
-        || item.fields.len() > MAX_ITEM_FIELDS
-        || item.links.len() > MAX_ITEM_LINKS
-        || item.attachments.len() > MAX_ITEM_ATTACHMENTS
-        || unique_attachments.len() != item.attachments.len()
-        || item.fields.iter().any(|(name, value)| {
-            name.chars().count() > MAX_FIELD_NAME_CHARS
-                || value.chars().count() > MAX_FIELD_VALUE_CHARS
-        })
-        || item
-            .notes
-            .as_ref()
-            .is_some_and(|notes| notes.chars().count() > MAX_ITEM_NOTES_CHARS)
-        || item.account_closure_plan.instructions.chars().count() > MAX_ITEM_NOTES_CHARS
-    {
-        return Err(VaultError::ItemTooLarge);
-    }
-    Ok(())
 }
 
 fn validate_emergency_card(card: &EmergencyCard) -> Result<(), VaultError> {
-    if card.selected_item_ids.len() > MAX_CARD_ITEMS
-        || card.contacts.len() > MAX_CARD_CONTACTS
-        || card.instructions.chars().count() > MAX_ITEM_NOTES_CHARS
-    {
-        return Err(VaultError::ItemTooLarge);
-    }
-    for contact in &card.contacts {
-        if contact.name.chars().count() > MAX_ITEM_TITLE_CHARS
-            || contact.relation.chars().count() > MAX_ITEM_TITLE_CHARS
-            || contact.phone.chars().count() > MAX_ITEM_TITLE_CHARS
-            || contact.email.chars().count() > MAX_ITEM_TITLE_CHARS
-            || contact.notes.chars().count() > MAX_ITEM_NOTES_CHARS
-        {
-            return Err(VaultError::ItemTooLarge);
-        }
-    }
-    Ok(())
+    validate_emergency_card_model(card).map_err(|_| VaultError::ItemTooLarge)
 }
 
 #[cfg(test)]

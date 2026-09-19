@@ -27,6 +27,14 @@ jobs:
           corepack enable
           corepack prepare pnpm@12.4.1 --activate
 
+      - name: Install WASM build tooling
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo install wasm-pack --version 0.15.0 --locked
+
+      - name: Generate vault WASM package
+        run: node scripts/build-vault-wasm.mjs
+
       - name: Install Tauri Linux build dependencies
         run: |
           sudo apt-get update
@@ -44,6 +52,11 @@ jobs:
       - name: Install locked JavaScript dependencies
         run: corepack pnpm install --frozen-lockfile
 
+      - name: Validate self-hosted Compose configuration
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+
       - name: Rust format
         run: cargo fmt --all -- --check
       - name: Rust clippy
@@ -52,17 +65,17 @@ jobs:
         run: cargo test --workspace
 
       - name: Frontend typecheck
-        run: corepack pnpm --filter @safeory/desktop typecheck
+        run: corepack pnpm typecheck
       - name: Session generation fence test
         run: corepack pnpm test:session-fence
       - name: Frontend lint
-        run: corepack pnpm --filter @safeory/desktop lint
+        run: corepack pnpm lint
       - name: Enforce icon-family policy
         run: corepack pnpm check:icons
       - name: Frontend format
         run: corepack pnpm --filter @safeory/desktop format:check
       - name: Frontend build
-        run: corepack pnpm --filter @safeory/desktop build
+        run: corepack pnpm build
       - name: Desktop shell build
         run: corepack pnpm --filter @safeory/desktop tauri build
 

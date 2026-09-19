@@ -34,6 +34,9 @@ Safeory uses stable production releases only for core dependencies. Alpha, beta,
 | serde_json | 1.0.151 | 2026-09-15 | crates.io | Initial encrypted payload encoding |
 | uuid | 1.26.1 | 2026-09-15 | crates.io | Opaque object identifiers |
 | thiserror | 2.0.20 | 2026-09-15 | crates.io | Explicit typed errors |
+| wasm-bindgen | 0.2.106 | 2026-09-19 | crates.io | Rust->WASM/JS bindings for the browser vault core (`vault-wasm`) |
+| vite-plugin-wasm | 3.5.0 | 2026-09-19 | npm registry | Bundle the vault-wasm `.wasm` artifact in the web app and extension background worker |
+| @types/chrome | 0.1.13 | 2026-09-19 | npm registry | MV3 extension API types (content/background/popup messaging) |
 
 ## Verification notes
 

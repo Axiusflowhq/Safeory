@@ -1,0 +1,22 @@
+# Single-node Garage configuration for the local/self-hosted Docker stack.
+# Secrets are injected from .env by docker-compose.yml; do not put them here.
+
+metadata_dir = "/var/lib/garage/meta"
+data_dir = "/var/lib/garage/data"
+db_engine = "sqlite"
+
+# This compose scaffold intentionally runs one node. Garage's own documentation
+# warns that replication_factor = 1 provides no node redundancy.
+replication_factor = 1
+consistency_mode = "consistent"
+
+rpc_bind_addr = "[::]:3901"
+rpc_public_addr = "127.0.0.1:3901"
+
+[s3_api]
+s3_region = "garage"
+api_bind_addr = "[::]:3900"
+
+[admin]
+api_bind_addr = "[::]:3903"
+metrics_require_token = true
