@@ -1,8 +1,10 @@
 /**
- * Vault session controller shared by the web app and the browser extension.
+ * Browser vault session controller used by the web app.
  *
  * Owns the `WasmVault` instance and persists the ciphertext snapshot to
- * IndexedDB after every mutation. The root key lives only inside the WASM
+ * IndexedDB after every mutation. The extension currently owns a separate
+ * chrome.storage.local persistence path; it does not use this IndexedDB
+ * controller. The root key lives only inside the WASM
  * module and is dropped on `lock()`.
  */
 
@@ -21,6 +23,7 @@ export interface WasmVaultLike {
   putItemJson(itemJson: string): void;
   getItemJson(id: string): string;
   listItemsJson(): string;
+  listDeadlinesJson(todayYmd: string): string;
   updateItemJson(itemJson: string, expectedRevision: number | bigint): bigint;
   trashItem(id: string, expectedRevision: number | bigint, deletedAtMs: number | bigint): bigint;
   getEmergencyCardJson(): string | null;
@@ -45,6 +48,16 @@ export interface ListedItem {
   revision: number;
 }
 
+export interface DeadlineSummary {
+  itemId: string;
+  kind: string;
+  title: string;
+  label: string;
+  date: string;
+  daysUntil: number;
+  revision: number;
+}
+
 export interface EmergencyContact {
   name: string;
   relation: string;
@@ -59,11 +72,24 @@ export interface EmergencyCard {
   instructions: string;
 }
 
+/**
+ * A mutation changed the in-memory encrypted vault, but its replacement
+ * snapshot could not be durably committed. The session is poisoned and must
+ * be reloaded from IndexedDB before it can be used again.
+ */
+export class VaultDurabilityError extends Error {
+  constructor(cause?: unknown) {
+    super("Saving the encrypted vault failed. Reload before continuing.", { cause });
+    this.name = "VaultDurabilityError";
+  }
+}
+
 export class VaultSession {
   private vault: WasmVaultLike;
   private readonly factory: VaultFactory;
-  private persistenceTail: Promise<void> = Promise.resolve();
+  private mutationTail: Promise<void> = Promise.resolve();
   private persistenceVersion: number;
+  private durabilityError: VaultDurabilityError | null = null;
 
   private constructor(factory: VaultFactory, vault: WasmVaultLike, persistenceVersion: number) {
     this.factory = factory;
@@ -78,21 +104,21 @@ export class VaultSession {
   }
 
   isInitialized(): boolean {
-    return this.vault.isInitialized();
+    return this.durabilityError === null && this.vault.isInitialized();
   }
 
   isUnlocked(): boolean {
-    return this.vault.isUnlocked();
+    return this.durabilityError === null && this.vault.isUnlocked();
   }
 
   /** Create a brand-new vault and persist it. */
   async create(passphrase: string): Promise<void> {
-    this.vault.create(passphrase);
-    await this.persist();
+    await this.mutateAndPersist(() => this.vault.create(passphrase));
   }
 
   /** Unlock the loaded vault. */
   unlock(passphrase: string): void {
+    this.assertHealthy();
     this.vault.unlock(passphrase);
   }
 
@@ -103,40 +129,49 @@ export class VaultSession {
 
   /** Add a new item; persists the updated ciphertext snapshot. */
   async putItem(itemJson: string): Promise<void> {
-    this.vault.putItemJson(itemJson);
-    await this.persist();
+    await this.mutateAndPersist(() => this.vault.putItemJson(itemJson));
   }
 
   getItem(id: string): string {
+    this.assertHealthy();
     return this.vault.getItemJson(id);
   }
 
   listItems(): ListedItem[] {
+    this.assertHealthy();
     return JSON.parse(this.vault.listItemsJson()) as ListedItem[];
   }
 
+  /**
+   * Derive redacted deadline summaries for the caller's local calendar date.
+   * This is a read-only WASM projection and never touches persistence.
+   */
+  listDeadlines(todayYmd: string): DeadlineSummary[] {
+    this.assertHealthy();
+    return JSON.parse(this.vault.listDeadlinesJson(todayYmd)) as DeadlineSummary[];
+  }
+
   async updateItem(itemJson: string, expectedRevision: number): Promise<bigint> {
-    const rev = this.vault.updateItemJson(itemJson, expectedRevision);
-    await this.persist();
-    return rev;
+    return this.mutateAndPersist(() => this.vault.updateItemJson(itemJson, expectedRevision));
   }
 
   async trashItem(id: string, expectedRevision: number, deletedAtMs: number): Promise<bigint> {
-    const rev = this.vault.trashItem(id, expectedRevision, deletedAtMs);
-    await this.persist();
-    return rev;
+    return this.mutateAndPersist(() => this.vault.trashItem(id, expectedRevision, deletedAtMs));
   }
 
   /** Wipe local persistence and reset to a fresh vault. */
   async reset(): Promise<void> {
-    await this.enqueuePersistence(async () => {
+    await this.enqueueMutation(async () => {
+      this.assertHealthy();
       this.persistenceVersion = await clearSnapshot(this.persistenceVersion);
+      this.vault.lock();
+      this.vault = this.factory(null);
     });
-    this.vault = this.factory(null);
   }
 
   /** Fetch the Emergency Card, or null if not set. */
   getEmergencyCard(): { card: EmergencyCard; revision: number } | null {
+    this.assertHealthy();
     const raw = this.vault.getEmergencyCardJson();
     if (raw === null) return null;
     return JSON.parse(raw) as { card: EmergencyCard; revision: number };
@@ -144,43 +179,91 @@ export class VaultSession {
 
   /** Set the Emergency Card; persists and returns the new revision. */
   async setEmergencyCard(card: EmergencyCard): Promise<bigint> {
-    const rev = this.vault.setEmergencyCardJson(JSON.stringify(card));
-    await this.persist();
-    return rev;
+    return this.mutateAndPersist(() => this.vault.setEmergencyCardJson(JSON.stringify(card)));
   }
 
   /** Install a recovery kit from a hex secret; persists the new wrap. */
   async installRecoveryKit(secretHex: string): Promise<void> {
-    this.vault.installRecoveryKit(secretHex);
-    await this.persist();
+    await this.mutateAndPersist(() => this.vault.installRecoveryKit(secretHex));
   }
 
   hasRecoveryKit(): boolean {
+    this.assertHealthy();
     return this.vault.hasRecoveryKit();
   }
 
   verifyRecoveryKit(secretHex: string): boolean {
+    this.assertHealthy();
     return this.vault.verifyRecoveryKit(secretHex);
   }
 
   /** Unlock with a recovery kit secret instead of the master passphrase. */
   unlockWithRecoveryKit(secretHex: string): void {
+    this.assertHealthy();
     this.vault.unlockWithRecoveryKit(secretHex);
   }
 
-  private persist(): Promise<void> {
-    // Capture the post-mutation state now. Later mutations may run before this
-    // write reaches IndexedDB, but they cannot change the immutable snapshot
-    // queued here or overtake it on disk.
-    const snapshotJson = this.vault.snapshotJson();
-    return this.enqueuePersistence(async () => {
-      this.persistenceVersion = await saveSnapshot(snapshotJson, this.persistenceVersion);
+  private mutateAndPersist<T>(mutate: () => T): Promise<T> {
+    return this.enqueueMutation(async () => {
+      this.assertHealthy();
+
+      // A pre-mutation encrypted snapshot lets us discard the changed WASM
+      // store if the durable CAS fails, without exporting or reimplementing
+      // any key material. It is never used to continue the session unlocked.
+      const beforeSnapshot = this.vault.snapshotJson();
+
+      // WASM validation/auth/revision failures are expected to be atomic and
+      // remain recoverable. Because they throw before this call returns, they
+      // bypass the durability-failure handler below and do not poison the session.
+      const result = mutate();
+
+      try {
+        const snapshotJson = this.vault.snapshotJson();
+        this.persistenceVersion = await saveSnapshot(snapshotJson, this.persistenceVersion);
+        return result;
+      } catch (error) {
+        throw this.poisonAfterDurabilityFailure(beforeSnapshot, error);
+      }
     });
   }
 
-  private enqueuePersistence(operation: () => Promise<void>): Promise<void> {
-    const queued = this.persistenceTail.then(operation, operation);
-    this.persistenceTail = queued.catch(() => undefined);
+  private assertHealthy(): void {
+    if (this.durabilityError !== null) throw this.durabilityError;
+  }
+
+  private poisonAfterDurabilityFailure(
+    beforeSnapshot: string,
+    cause: unknown,
+  ): VaultDurabilityError {
+    const durabilityError = new VaultDurabilityError(cause);
+    this.durabilityError = durabilityError;
+
+    // Drop the active root key first. Best-effort restoration replaces the
+    // mutated in-memory ciphertext with the pre-mutation snapshot, but the
+    // session remains poisoned because a CAS conflict can mean even that
+    // snapshot is stale relative to another tab.
+    try {
+      this.vault.lock();
+    } catch {
+      // Poisoning is authoritative even if a defensive lock call fails.
+    }
+    try {
+      const restored = this.factory(beforeSnapshot);
+      restored.lock();
+      this.vault = restored;
+    } catch {
+      // The locked, poisoned instance remains inaccessible through this API.
+    }
+
+    return durabilityError;
+  }
+
+  private enqueueMutation<T>(operation: () => Promise<T>): Promise<T> {
+    const queued = this.mutationTail.then(operation, operation);
+    this.mutationTail = queued.then(
+      () => undefined,
+      () => undefined,
+    );
     return queued;
   }
 }

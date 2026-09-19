@@ -44,18 +44,18 @@ export function RecoveryKitPanel({
     <section className="space-y-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="flex items-start gap-3">
-          <div className="flex size-10 shrink-0 items-center justify-center rounded-xl border bg-muted/40">
+          <div className="flex size-10 shrink-0 items-center justify-center rounded-[var(--radius-default)] border bg-[var(--surface-secondary)]">
             <HugeiconsIcon
               icon={ShieldKeyIcon}
               strokeWidth={1.8}
-              className="size-5 text-primary"
+              className="size-5 text-[var(--primary)]"
             />
           </div>
           <div>
             <h2 className="text-lg font-semibold tracking-tight">
               Recovery kit
             </h2>
-            <p className="mt-1 max-w-2xl text-sm leading-relaxed text-muted-foreground">
+            <p className="mt-1 max-w-2xl text-sm leading-relaxed text-[var(--text-secondary)]">
               A recovery kit lets you regain access if you forget your master
               passphrase. Anyone with the key can unlock your vault, so keep it
               offline and somewhere only you can access.
@@ -70,7 +70,7 @@ export function RecoveryKitPanel({
       </div>
 
       {generatedSecret ? (
-        <div className="rounded-xl border bg-card p-5 shadow-xs">
+        <div className="rounded-[var(--radius-default)] border bg-[var(--surface)] p-5 shadow-[var(--fancy-shadow-basic)]">
           <Alert className="mb-4">
             <HugeiconsIcon icon={ShieldKeyIcon} strokeWidth={2} />
             <AlertTitle>Save this recovery key now</AlertTitle>
@@ -80,14 +80,14 @@ export function RecoveryKitPanel({
             </AlertDescription>
           </Alert>
 
-          <div className="rounded-lg border bg-muted/30 p-4">
-            <code className="block font-mono text-sm leading-6 break-all text-foreground">
+          <div className="rounded-[var(--radius-default)] border bg-[var(--surface-secondary)] p-4">
+            <code className="block font-mono text-sm leading-6 break-all text-[var(--text-primary)]">
               {generatedSecret}
             </code>
           </div>
 
           {copyFailed ? (
-            <p className="mt-2 text-sm text-destructive">
+            <p className="mt-2 text-sm text-[var(--danger)]">
               Clipboard access was unavailable. Select the key and copy it
               manually.
             </p>
@@ -117,14 +117,14 @@ export function RecoveryKitPanel({
           </div>
         </div>
       ) : (
-        <div className="flex flex-col gap-4 rounded-xl border bg-muted/20 p-5 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex flex-col gap-4 rounded-[var(--radius-default)] border bg-[var(--surface-secondary)] p-5 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <p className="text-sm font-medium">
               {hasRecoveryKit
                 ? "Your vault has a recovery kit"
                 : "Protect yourself from a forgotten passphrase"}
             </p>
-            <p className="mt-1 text-sm text-muted-foreground">
+            <p className="mt-1 text-sm text-[var(--text-secondary)]">
               {hasRecoveryKit
                 ? "Replacing it invalidates the previous recovery key."
                 : "Create one recovery key and store it separately from this device."}

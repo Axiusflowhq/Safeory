@@ -1,7 +1,8 @@
 /**
  * Content script: runs in the page, holds NO keys and NO decrypted data at
- * rest. It detects login forms, asks the background worker for credentials
- * matching this origin, and fills only after the user explicitly picks one.
+ * rest. It detects login forms and shows a generic Safeory affordance. Exact-
+ * origin credential summaries are requested only after a trusted user click,
+ * and filling requires a second explicit credential choice.
  */
 
 import type { ContentRequest, ContentResponse, CredentialSummary, FillPayload } from "./messages";
@@ -54,27 +55,35 @@ function showChooser(
   anchor: HTMLElement,
   items: CredentialSummary[],
   onPick: (id: string) => void,
+  emptyMessage?: string,
 ): void {
   const box = document.createElement("div");
   box.style.cssText =
     "position:absolute;z-index:2147483647;background:#fff;border:1px solid #ccc;" +
     "border-radius:6px;box-shadow:0 4px 16px rgba(0,0,0,.15);font:13px sans-serif;" +
     "min-width:220px;overflow:hidden;";
-  for (const item of items) {
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.textContent = `${item.title} — ${item.username}`;
-    btn.style.cssText =
-      "display:block;width:100%;text-align:left;padding:8px 10px;border:0;" +
-      "background:#fff;cursor:pointer;";
-    btn.onmouseenter = () => (btn.style.background = "#f0f0f0");
-    btn.onmouseleave = () => (btn.style.background = "#fff");
-    btn.onclick = (e) => {
-      if (!e.isTrusted) return;
-      onPick(item.id);
-      box.remove();
-    };
-    box.appendChild(btn);
+  if (items.length === 0) {
+    const status = document.createElement("div");
+    status.textContent = emptyMessage ?? "No Safeory credentials found for this site.";
+    status.style.cssText = "padding:9px 10px;color:#555;max-width:280px;";
+    box.appendChild(status);
+  } else {
+    for (const item of items) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = `${item.title} — ${item.username}`;
+      btn.style.cssText =
+        "display:block;width:100%;text-align:left;padding:8px 10px;border:0;" +
+        "background:#fff;cursor:pointer;";
+      btn.onmouseenter = () => (btn.style.background = "#f0f0f0");
+      btn.onmouseleave = () => (btn.style.background = "#fff");
+      btn.onclick = (e) => {
+        if (!e.isTrusted) return;
+        onPick(item.id);
+        box.remove();
+      };
+      box.appendChild(btn);
+    }
   }
   const rect = anchor.getBoundingClientRect();
   box.style.top = `${rect.bottom + window.scrollY + 4}px`;
@@ -93,11 +102,6 @@ async function enhanceForms(): Promise<void> {
   const forms = findLoginForms();
   if (forms.length === 0) return;
 
-  const res = await send<Extract<ContentResponse, { type: "credentials" }>>({
-    type: "findCredentials",
-  });
-  if (res.locked || res.items.length === 0) return;
-
   for (const form of forms) {
     const badge = document.createElement("button");
     badge.type = "button";
@@ -106,18 +110,42 @@ async function enhanceForms(): Promise<void> {
     badge.style.cssText =
       "margin-left:6px;font:12px sans-serif;padding:2px 6px;border:1px solid #999;" +
       "border-radius:4px;background:#fff;cursor:pointer;";
+    let lookupPending = false;
     badge.onclick = (e) => {
       if (!e.isTrusted) return;
       e.preventDefault();
       e.stopPropagation();
-      showChooser(badge, res.items, (id) => {
-        void send<Extract<ContentResponse, { type: "fill" }>>({
-          type: "fillCredential",
-          id,
-        }).then((fillRes) => {
-          if (fillRes.ok && fillRes.payload) fill(form, fillRes.payload);
+      if (lookupPending) return;
+      lookupPending = true;
+      void send<ContentResponse>({ type: "findCredentials" })
+        .then((res) => {
+          if (res.type === "error") {
+            showChooser(badge, [], () => undefined, "Safeory is temporarily unavailable.");
+            return;
+          }
+          if (res.type !== "credentials") return;
+          if (res.locked) {
+            showChooser(badge, [], () => undefined, "Unlock Safeory from the extension first.");
+            return;
+          }
+          if (res.items.length === 0 || !res.authorization) {
+            showChooser(badge, [], () => undefined);
+            return;
+          }
+
+          showChooser(badge, res.items, (id) => {
+            void send<Extract<ContentResponse, { type: "fill" }>>({
+              type: "fillCredential",
+              id,
+              authorization: res.authorization!,
+            }).then((fillRes) => {
+              if (fillRes.ok && fillRes.payload) fill(form, fillRes.payload);
+            });
+          });
+        })
+        .finally(() => {
+          lookupPending = false;
         });
-      });
     };
     form.password.insertAdjacentElement("afterend", badge);
   }

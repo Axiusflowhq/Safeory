@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod reminders;
+
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;

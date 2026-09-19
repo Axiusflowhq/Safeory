@@ -38,8 +38,8 @@ pub const RECOVERY_WRAP_MAX_ENCODED_BYTES: usize = 16 * 1024;
 /// Storage-agnostic vault persistence boundary (ADR 0002/0003). The portable
 /// data path used by `vault-core` and the browser session is expressed against
 /// this trait; SQLite (`VaultStorage`) and the browser in-memory store
-/// (`vault-wasm`) are two implementations. Attachment file paths and native
-/// backup/restore stay on `VaultStorage` because they are desktop-only.
+/// (`vault-wasm`) are two implementations. Attachment file paths and SQLite
+/// backup/restore stay on `VaultStorage` because they are native-only.
 pub trait VaultStore {
     fn initialize_root_wrap(&self, wrapped: &RootKeyWrapV1) -> Result<(), StorageError>;
     fn load_root_wrap(&self) -> Result<RootKeyWrapV1, StorageError>;
@@ -1307,7 +1307,7 @@ impl VaultStorage {
     /// Serialize the ciphertext-bearing rows into a portable snapshot for
     /// browser/IndexedDB interchange. Reads through the same size-bounded
     /// loaders used by normal operation. Attachments and per-item history are
-    /// desktop-native concerns and are not part of the browser snapshot.
+    /// native SQLite concerns and are not part of the browser snapshot.
     pub fn to_snapshot(&self) -> Result<KVSnapshot, StorageError> {
         let root_key_wrap = if self.is_initialized()? {
             Some(self.load_root_wrap()?)

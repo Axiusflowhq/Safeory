@@ -14,10 +14,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .init();
 
     let config = Config::from_env()?;
+    let bind_addr = config.bind_addr;
     let state = AppState::from_config(&config)?;
-    let listener = TcpListener::bind(config.bind_addr).await?;
+    drop(config);
+    let listener = TcpListener::bind(bind_addr).await?;
 
-    info!(bind_addr = %config.bind_addr, "Safeory API listening");
+    info!(bind_addr = %bind_addr, "Safeory API listening");
     axum::serve(listener, router(state))
         .with_graceful_shutdown(shutdown_signal())
         .await?;

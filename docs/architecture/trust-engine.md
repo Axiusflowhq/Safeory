@@ -1,4 +1,4 @@
-# Trust Engine + Key Hierarchy (V1 Spec, Pre-Code)
+﻿# Trust Engine + Key Hierarchy (V1 Spec, Pre-Code)
 
 Status: design frozen before React screens. Code follows this doc, not the reverse.
 
@@ -6,10 +6,10 @@ Implementation status: the policy model (`AccessPolicy`/`AccessGrant`,
 conditions, wait periods, durations, private-forever, destruction) with
 fail-closed local evaluation, plus Shamir 2-of-3 style threshold sharing and
 sealed recovery-share envelopes, is implemented and tested in
-`vault-emergency` (pure core, no IPC yet). Grant persistence inside item
+`vault-emergency` (pure core, no client wiring yet). Grant persistence inside item
 payloads, trusted-person UX, and the timed-release state machine are still
-pending — no UI or server path can release anything today. The desktop Plan
-Test now checks only locally enforceable preparedness (Emergency Card
+pending — no UI or server path can release anything today. The local Plan
+Test checks only locally enforceable preparedness (Emergency Card
 completeness and recovery-key verification) and reports aggregate local legacy
 planning coverage; it is not a release simulation. Each regular vault item can
 also carry one encrypted `LegacyDisposition` planning preference
@@ -97,7 +97,7 @@ V1 enforcement order: owner-only + explicit per-item grants + waiting period +
 deny/revoke wins over release. 2-of-3 threshold uses standard Shamir sharing
 over the capsule key, not custom crypto. The portable `vault-sharing` and
 `vault-emergency` cores are implemented and tested; grant persistence,
-IPC/session wiring, and timed-release coordination remain pending.
+client/session wiring, and timed-release coordination remain pending.
 
 ## Recovery (no backdoor)
 
@@ -121,9 +121,9 @@ must be messaged as such in UI copy.
 4. Grants/waiting-period policy engine — DONE in `vault-emergency` as the
    local fail-closed simulation/test harness (`evaluate`): owner-only
    default, explicit grants, approvals, waiting periods, private-forever and
-   destruction winning over release. Session/IPC wiring and the Durable
+   destruction winning over release. Session/client wiring and the Durable
    Object release coordinator come after this.
 5. Per-record legacy planning disposition — DONE locally as encrypted payload
-   metadata with exact-revision IPC and reader UX. It is deliberately separate
+   metadata with exact-revision client operations and reader UX. It is deliberately separate
    from the Trust Engine policy object until trusted-person identity/grant
    persistence and real enforcement are implemented.

@@ -97,7 +97,7 @@ export function ItemEditor({
           <h2 className="text-lg font-semibold tracking-tight">
             {isEdit ? "Edit item" : "Add to vault"}
           </h2>
-          <p className="mt-1 text-sm text-muted-foreground">
+          <p className="mt-1 text-sm text-[var(--text-secondary)]">
             {isEdit
               ? "Update the encrypted details for this item."
               : "Details are encrypted before they are stored in your vault."}

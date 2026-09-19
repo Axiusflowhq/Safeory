@@ -1,43 +1,8 @@
-# Dependency Risk Register
+﻿# Dependency Risk Register
 
-Verified: 2026-09-15
+Verified: 2026-09-19
 
-This register records security-relevant dependency findings that cannot currently
-be removed without abandoning the latest stable Tauri 2 desktop stack. It is not
-an allowlist of vulnerabilities and must be revisited on every Tauri upgrade.
-
-## Current RustSec findings
-
-`cargo audit` 0.22.2 currently exits successfully with seven informational
-warnings in the resolved Rust dependency graph and no failing vulnerability
-advisories.
-
-### RUSTSEC-2024-0429 — `glib` 0.18.5 soundness issue
-
-- Source: transitive Linux desktop dependency through Tauri/GTK.
-- RustSec classifies this as `INFO Unsound` and lists `glib >=0.20.0` as patched.
-- The affected API is `glib::VariantStrIter` iteration. Safeory does not depend
-  on `glib` directly or call this API directly.
-- Residual risk: if the affected path is exercised by the shell stack, undefined
-  behavior/crash is possible. A renderer or shell crash is not treated as a safe
-  place for vault secrets.
-- Mitigation: keep all security/business logic in portable Rust core crates, keep
-  Tauri narrow, track Tauri/gtk-rs upgrades, and remove this exception as soon as
-  the stable Tauri graph accepts a patched `glib`.
-
-### Unmaintained transitive crates
-
-The current stable Tauri graph also includes RustSec informational advisories for:
-
-- RUSTSEC-2024-0370 (`proc-macro-error` 1.0.4), through the Linux GTK stack.
-- RUSTSEC-2025-0075, -0080, -0081, -0098, and -0100 (`rust-unic` family),
-  through Tauri's `urlpattern` dependency.
-
-RustSec provides no patched version for `proc-macro-error`; the affected
-`rust-unic` crates are likewise reported as unmaintained. These IDs are explicitly
-annotated in `deny.toml` so `cargo deny` does not silently start failing on known,
-reviewed informational advisories. `cargo audit` remains a separate CI gate and
-continues to print them on every run.
+This register records security-relevant direct dependencies and narrowly scoped policy exceptions that require ongoing review. It is not an allowlist of vulnerabilities.
 
 ## New direct crypto dependency: `x25519-dalek` 2.0.1 (pinned)
 
@@ -66,29 +31,6 @@ continues to print them on every run.
   the tree; grant thresholds below 2 are rejected at the API boundary.
 - Watch items: same as above — pinned, audited via `cargo audit`/`cargo deny`,
   no silent ignores.
-
-## Desktop capability dependency: `tauri-plugin-clipboard-manager` 2.3.3 (pinned)
-
-- Added only to the replaceable desktop shell for explicit credential-password
-  copy. It is an official Tauri v2 plugin and delegates desktop clipboard access
-  to `arboard`; no clipboard code enters the portable vault/crypto crates.
-- On Windows, `arboard` resolves through `clipboard-win` 5.4.1 and
-  `error-code` 3.4.0. Safeory also pins `clipboard-win` directly on Windows so
-  the guarded clear can hold the global clipboard lock across compare + clear.
-  Both crates use the OSI-approved Boost Software License 1.0. `deny.toml`
-  allows BSL-1.0 only for those exact crate versions rather than widening the
-  workspace-wide license allowlist.
-- Safeory uses the Rust extension API behind one narrow domain command. The
-  WebView is not granted the plugin's generic read/write/clear permissions and
-  the JavaScript clipboard package is not installed.
-- Timed cleanup stores only a SHA-256 ownership digest/token after the write.
-  Windows compare + clear is serialized by the OS clipboard lock. On platforms
-  where the plugin exposes no atomic compare-and-clear primitive, Safeory does
-  a best-effort immediate recheck and documents the residual external-writer
-  race. OS clipboard history/sync remains a separate residual risk.
-- Watch items: keep the dependency pinned to the Tauri 2-compatible stable
-  release; rerun `cargo audit`/`cargo deny` on upgrades and review any new
-  native clipboard transitive dependency before accepting it.
 
 ## Self-hosted API transport dependencies
 

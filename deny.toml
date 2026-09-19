@@ -69,14 +69,7 @@ feature-depth = 1
 #db-urls = ["https://github.com/rustsec/advisory-db"]
 # A list of advisory IDs to ignore. Note that ignored advisories will still
 # output a note when they are encountered.
-ignore = [
-    { id = "RUSTSEC-2024-0370", reason = "unmaintained proc-macro-error is transitive through Tauri's Linux GTK stack; latest stable Tauri has no replacement yet" },
-    { id = "RUSTSEC-2025-0075", reason = "unmaintained rust-unic crate is transitive through Tauri urlpattern; latest stable Tauri has no replacement yet" },
-    { id = "RUSTSEC-2025-0080", reason = "unmaintained rust-unic crate is transitive through Tauri urlpattern; latest stable Tauri has no replacement yet" },
-    { id = "RUSTSEC-2025-0081", reason = "unmaintained rust-unic crate is transitive through Tauri urlpattern; latest stable Tauri has no replacement yet" },
-    { id = "RUSTSEC-2025-0098", reason = "unmaintained rust-unic crate is transitive through Tauri urlpattern; latest stable Tauri has no replacement yet" },
-    { id = "RUSTSEC-2025-0100", reason = "unmaintained rust-unic crate is transitive through Tauri urlpattern; latest stable Tauri has no replacement yet" },
-]
+ignore = []
 # If this is true, then cargo deny will use the git executable to fetch advisory database.
 # If this is false, then it uses a built-in git library.
 # Setting this to true can be helpful if you have special authentication requirements that cargo-deny does not support.
@@ -113,8 +106,6 @@ confidence-threshold = 0.8
 exceptions = [
     # Each entry is the crate and version constraint, and its specific allow
     # list
-    { allow = ["BSL-1.0"], crate = "clipboard-win@5.4.1" },
-    { allow = ["BSL-1.0"], crate = "error-code@3.4.0" },
     { allow = ["ISC"], crate = "ring@0.17.14" },
     { allow = ["ISC"], crate = "rustls-webpki@0.103.15" },
     { allow = ["ISC"], crate = "untrusted@0.9.0" },

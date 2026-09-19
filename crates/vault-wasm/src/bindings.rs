@@ -6,7 +6,7 @@ use wasm_bindgen::prelude::*;
 
 use vault_crypto::RecoverySecret;
 
-use crate::{BrowserVault, WasmVaultError, generate_strong_password};
+use crate::{BrowserVault, DeadlineEntry, WasmVaultError, generate_strong_password};
 
 fn js_err(e: WasmVaultError) -> JsValue {
     JsValue::from_str(&e.to_string())
@@ -103,6 +103,16 @@ impl WasmVault {
             })
             .collect();
         serde_json::to_string(&projected).map_err(|_| ser_err())
+    }
+
+    /// List redacted local deadline metadata for an explicitly supplied local
+    /// calendar date. Full record fields remain inside WASM.
+    #[wasm_bindgen(js_name = listDeadlinesJson)]
+    pub fn list_deadlines_json(&self, today_ymd: &str) -> Result<String, JsValue> {
+        let today = vault_models::reminders::parse_ymd(today_ymd)
+            .ok_or_else(|| JsValue::from_str("invalid local date"))?;
+        let deadlines = self.inner.list_deadlines(today).map_err(js_err)?;
+        deadline_entries_json(deadlines).map_err(|_| ser_err())
     }
 
     /// List only the non-secret credential metadata needed for matching and
@@ -240,9 +250,37 @@ struct CredentialListEntry {
 }
 
 #[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeadlineListEntry {
+    item_id: uuid::Uuid,
+    kind: vault_models::ItemKind,
+    title: String,
+    label: &'static str,
+    date: String,
+    days_until: i64,
+    revision: u64,
+}
+
+#[derive(serde::Serialize)]
 struct EmergencyCardEntry {
     card: vault_models::EmergencyCard,
     revision: u64,
+}
+
+fn deadline_entries_json(entries: Vec<DeadlineEntry>) -> Result<String, serde_json::Error> {
+    let projected: Vec<DeadlineListEntry> = entries
+        .into_iter()
+        .map(|entry| DeadlineListEntry {
+            item_id: entry.deadline.item_id,
+            kind: entry.deadline.kind,
+            title: entry.deadline.title,
+            label: entry.deadline.label,
+            date: entry.deadline.date,
+            days_until: entry.deadline.days_until,
+            revision: entry.revision,
+        })
+        .collect();
+    serde_json::to_string(&projected)
 }
 
 fn parse_uuid(s: &str) -> Result<uuid::Uuid, JsValue> {
@@ -251,4 +289,46 @@ fn parse_uuid(s: &str) -> Result<uuid::Uuid, JsValue> {
 
 fn parse_secret(hex: &str) -> Result<RecoverySecret, JsValue> {
     RecoverySecret::from_hex(hex).map_err(|_| JsValue::from_str("invalid recovery secret"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vault_models::VaultItem;
+
+    #[test]
+    fn deadline_projection_excludes_secret_fields_and_notes() {
+        const SECRET: &str = "SECRET-SENTINEL-MUST-NOT-CROSS";
+        let mut vault = BrowserVault::new_empty();
+        vault.create("correct horse battery").expect("create");
+        let mut item = VaultItem::document("Passport", SECRET, "Issuer", "2026-09-20", SECRET);
+        item.fields
+            .insert("private_extra".to_owned(), SECRET.to_owned());
+        vault.put_item(&item).expect("put");
+
+        let json = deadline_entries_json(
+            vault
+                .list_deadlines((2026, 9, 19))
+                .expect("deadline projection"),
+        )
+        .expect("serialize deadline projection");
+        assert!(!json.contains(SECRET));
+
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&json).expect("parse projection");
+        let object = rows[0].as_object().expect("deadline object");
+        let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "date",
+                "daysUntil",
+                "itemId",
+                "kind",
+                "label",
+                "revision",
+                "title",
+            ]
+        );
+    }
 }

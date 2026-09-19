@@ -100,12 +100,15 @@ services:
       - sh
       - -ec
       - >-
-        psql
-        --host=postgres
-        --username="${POSTGRES_USER:-safeory}"
-        --dbname="${POSTGRES_DB:-safeory}"
-        --set=ON_ERROR_STOP=1
-        --file=/migrations/0001_server_metadata.sql
+        for migration in /migrations/*.sql; do
+          echo "Applying $${migration}";
+          psql
+          --host=postgres
+          --username="${POSTGRES_USER:-safeory}"
+          --dbname="${POSTGRES_DB:-safeory}"
+          --set=ON_ERROR_STOP=1
+          --file="$${migration}";
+        done
 
   api:
     build:
@@ -117,9 +120,17 @@ services:
         condition: service_completed_successfully
       valkey:
         condition: service_healthy
+      garage:
+        condition: service_healthy
     environment:
       DATABASE_URL: "postgres://${POSTGRES_USER:-safeory}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-safeory}"
       VALKEY_URL: "redis://:${VALKEY_PASSWORD:?set VALKEY_PASSWORD in .env}@valkey:6379/"
+      ACCOUNT_REGISTRATION_TOKEN: "${ACCOUNT_REGISTRATION_TOKEN:?set ACCOUNT_REGISTRATION_TOKEN in .env}"
+      S3_ENDPOINT: "http://garage:3900"
+      S3_REGION: "garage"
+      S3_BUCKET: "${GARAGE_DEFAULT_BUCKET:-safeory-dev}"
+      S3_ACCESS_KEY_ID: "${GARAGE_DEFAULT_ACCESS_KEY:?set GARAGE_DEFAULT_ACCESS_KEY in .env}"
+      S3_SECRET_ACCESS_KEY: "${GARAGE_DEFAULT_SECRET_KEY:?set GARAGE_DEFAULT_SECRET_KEY in .env}"
       BIND_ADDR: "0.0.0.0:8080"
       RUST_LOG: "${RUST_LOG:-safeory_api=info}"
     ports:

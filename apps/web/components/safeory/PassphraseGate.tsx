@@ -71,14 +71,14 @@ export function PassphraseGate({
   const isSetup = mode === "setup"
 
   return (
-    <main className="flex min-h-svh items-center justify-center bg-background px-4 py-10">
-      <section className="w-full max-w-md overflow-hidden rounded-2xl border bg-card text-card-foreground shadow-sm">
-        <div className="border-b bg-muted/30 px-6 py-6 sm:px-8">
-          <div className="mb-5 flex size-11 items-center justify-center rounded-xl border bg-background shadow-xs">
+    <main className="flex min-h-svh items-center justify-center bg-[var(--surface)] px-4 py-10">
+      <section className="w-full max-w-md overflow-hidden rounded-[var(--radius-default)] border bg-[var(--surface)] text-[var(--text-primary)] shadow-[var(--fancy-shadow-basic)]">
+        <div className="border-b bg-[var(--surface-secondary)] px-6 py-6 sm:px-8">
+          <div className="mb-5 flex size-11 items-center justify-center rounded-[var(--radius-default)] border bg-[var(--surface)] shadow-[var(--fancy-shadow-basic)]">
             <HugeiconsIcon
               icon={showRecovery ? ShieldKeyIcon : LockKeyIcon}
               strokeWidth={1.8}
-              className="size-5 text-primary"
+              className="size-5 text-[var(--primary)]"
             />
           </div>
           <h1 className="text-xl font-semibold tracking-tight">
@@ -88,7 +88,7 @@ export function PassphraseGate({
                 ? "Create your Safeory vault"
                 : "Welcome back"}
           </h1>
-          <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground">
+          <p className="mt-1.5 text-sm leading-relaxed text-[var(--text-secondary)]">
             {showRecovery
               ? "Use the recovery key you saved when you created or replaced your recovery kit."
               : isSetup
@@ -166,7 +166,7 @@ export function PassphraseGate({
                   <Button
                     type="button"
                     variant="ghost"
-                    className="w-full text-muted-foreground"
+                    className="w-full text-[var(--text-secondary)]"
                     onClick={() => setShowRecovery(true)}
                   >
                     <HugeiconsIcon
@@ -227,7 +227,7 @@ export function PassphraseGate({
                 <Button
                   type="button"
                   variant="ghost"
-                  className="w-full text-muted-foreground"
+                  className="w-full text-[var(--text-secondary)]"
                   onClick={() => setShowRecovery(false)}
                 >
                   <HugeiconsIcon

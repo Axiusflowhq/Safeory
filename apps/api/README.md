@@ -11,21 +11,39 @@ The service reads configuration only from environment variables:
 - `DATABASE_URL` — PostgreSQL connection URL.
 - `VALKEY_URL` — Valkey connection URL using the Redis protocol.
 - `BIND_ADDR` — socket address to listen on, for example `0.0.0.0:8080`.
+- `ACCOUNT_REGISTRATION_TOKEN` — high-entropy bootstrap authority for creating
+  the first account/device; at least 32 bytes.
+- `S3_ENDPOINT` — S3-compatible endpoint (Garage is `http://garage:3900` in Compose).
+- `S3_REGION` — S3 region (`garage` for the bundled deployment).
+- `S3_BUCKET` — ciphertext-object bucket.
+- `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` — server-only object-store credentials.
 - `RUST_LOG` — optional tracing filter.
 
 ## Health endpoints
 
 - `GET /health/live` checks only that the HTTP process is running.
-- `GET /health/ready` performs bounded live checks against PostgreSQL and
-  Valkey. It returns HTTP 503 until both dependencies respond.
+- `GET /health/ready` performs bounded live checks against PostgreSQL, Valkey,
+  and the S3-compatible object store. It returns HTTP 503 until all required
+  dependencies respond.
 
 ## Database
 
-Migrations live in `apps/api/migrations`. The initial migration creates only
-opaque account, device, and ciphertext-object metadata. Applying migrations is
-an explicit deployment step; `docker-compose.yml` performs it through the
-one-shot `api-migrate` service before starting the API. The API process itself
-still does not require database connectivity in order to start serving process
-liveness.
+Migrations live in `apps/api/migrations`. Compose applies them in filename order
+through the one-shot `api-migrate` service before starting the API. PostgreSQL
+contains only server-visible account/device/sync metadata; ciphertext object
+bodies live in the S3-compatible store.
 
-Authentication and sync payload upload are intentionally outside this slice.
+## Opaque sync transport
+
+The first sync surface is intentionally narrow: bootstrap an account/first
+device, add or revoke same-account devices, list changed opaque objects, and
+revision-fenced PUT/GET of ciphertext bytes. Device bearer credentials contain
+256 bits of random material and are returned once; PostgreSQL stores only a
+domain-separated SHA-256 hash. X25519 device public keys are key-agreement
+metadata and are not HTTP authentication credentials.
+
+The server does not parse vault records or encrypted tombstones. Account scope
+comes only from the authenticated device, never from a client-supplied account
+ID. Object IDs, revisions, sizes, hashes, and change cursors are server-visible;
+titles, kinds, fields, notes, vault keys, passphrases, recovery secrets, and
+tombstone meaning remain encrypted/client-side.

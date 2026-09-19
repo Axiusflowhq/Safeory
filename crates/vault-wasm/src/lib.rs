@@ -22,6 +22,7 @@ use vault_crypto::{
 };
 use vault_models::{
     EMERGENCY_CARD_ID, EmergencyCard, VaultItem, VaultItemState, VaultItemValidationError,
+    reminders::{Deadline, deadline_for_item},
     validate_emergency_card, validate_vault_item,
 };
 use vault_storage::{KV_SNAPSHOT_SCHEMA_VERSION, KVSnapshot, StorageError, VaultStore};
@@ -66,6 +67,12 @@ pub enum WasmVaultError {
     InvalidAccountClosurePlan,
     #[error("attachment references are managed by attachment operations")]
     AttachmentReferencesManagedSeparately,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeadlineEntry {
+    pub deadline: Deadline,
+    pub revision: u64,
 }
 
 /// An unlocked (or locked) browser vault. The root key is held only while
@@ -164,6 +171,38 @@ impl BrowserVault {
                 out.push((item, encrypted.revision));
             }
         }
+        Ok(out)
+    }
+
+    /// Derive redacted deadline metadata while keeping full item plaintext
+    /// inside WASM. Active records are decrypted and projected one at a time.
+    pub fn list_deadlines(
+        &self,
+        today: (i32, u32, u32),
+    ) -> Result<Vec<DeadlineEntry>, WasmVaultError> {
+        let root = self.root_key()?;
+        let mut out = Vec::new();
+        for id in self.store.list_item_ids()? {
+            if id == EMERGENCY_CARD_ID {
+                continue;
+            }
+            let encrypted = self.store.load_item(id)?;
+            if let VaultItemState::Active { item } = decrypt_item_state(root, &encrypted)?
+                && let Some(deadline) = deadline_for_item(&item, today)
+            {
+                out.push(DeadlineEntry {
+                    deadline,
+                    revision: encrypted.revision,
+                });
+            }
+        }
+        out.sort_by(|a, b| {
+            a.deadline
+                .days_until
+                .cmp(&b.deadline.days_until)
+                .then_with(|| a.deadline.title.cmp(&b.deadline.title))
+                .then_with(|| a.deadline.item_id.cmp(&b.deadline.item_id))
+        });
         Ok(out)
     }
 
@@ -469,6 +508,90 @@ mod tests {
         let mut restored = BrowserVault::from_snapshot(snapshot).expect("from_snapshot");
         assert!(restored.unlock("wrong passphrase!!").is_err());
         assert!(!restored.is_unlocked());
+    }
+
+    #[test]
+    fn deadlines_are_sorted_redacted_candidates_with_receipt_status_semantics() {
+        let mut vault = BrowserVault::new_empty();
+        vault.create("correct horse battery").expect("create");
+
+        let mut document =
+            VaultItem::document("Passport", "P-SECRET", "Gov", "2026-09-25", "private note");
+        let document_id = document.id;
+        vault.put_item(&document).expect("put document");
+        document.title = "Passport".to_owned();
+        assert_eq!(vault.update_item(&document, 0).expect("revise document"), 1);
+
+        let insurance =
+            VaultItem::insurance("Policy", "Insurer", "Home", "N-SECRET", "2026-09-20", "");
+        vault.put_item(&insurance).expect("put insurance");
+
+        let refund = VaultItem::receipt(
+            "Refund",
+            "Store",
+            "2026-09-01",
+            "100",
+            "USD",
+            "R-SECRET",
+            "refund_pending",
+            "2026-09-21",
+            "2026-09-19",
+            "",
+        );
+        vault.put_item(&refund).expect("put refund");
+
+        let completed = VaultItem::receipt(
+            "Completed",
+            "Store",
+            "2026-09-01",
+            "100",
+            "USD",
+            "R-DONE",
+            "refunded",
+            "2026-09-18",
+            "2026-09-19",
+            "",
+        );
+        vault.put_item(&completed).expect("put completed receipt");
+
+        let deadlines = vault.list_deadlines((2026, 9, 19)).expect("list deadlines");
+        assert_eq!(deadlines.len(), 3);
+        assert_eq!(
+            deadlines
+                .iter()
+                .map(|entry| entry.deadline.title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Refund", "Policy", "Passport"]
+        );
+        assert_eq!(deadlines[0].deadline.label, "Refund due");
+        assert_eq!(deadlines[0].deadline.days_until, 0);
+        let revised = deadlines
+            .iter()
+            .find(|entry| entry.deadline.item_id == document_id)
+            .expect("document deadline");
+        assert_eq!(revised.revision, 1);
+    }
+
+    #[test]
+    fn deadlines_require_unlock_and_omit_trashed_records() {
+        let mut vault = BrowserVault::new_empty();
+        vault.create("correct horse battery").expect("create");
+        let item = VaultItem::document("Old passport", "P", "Gov", "2026-09-19", "");
+        let id = item.id;
+        vault.put_item(&item).expect("put");
+        vault.trash_item(id, 0, 1).expect("trash");
+        assert!(
+            vault
+                .list_deadlines((2026, 9, 19))
+                .expect("list")
+                .is_empty()
+        );
+
+        vault.lock();
+        assert!(matches!(
+            vault.list_deadlines((2026, 9, 19)),
+            Err(WasmVaultError::Locked)
+        ));
     }
 
     #[test]

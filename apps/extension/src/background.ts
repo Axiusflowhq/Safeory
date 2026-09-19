@@ -24,6 +24,26 @@ type ExtensionWasmVault = WasmVault & {
 let vault: ExtensionWasmVault | null = null;
 let initPromise: Promise<void> | null = null;
 
+const CONTENT_FIND_COOLDOWN_MS = 1_000;
+const CONTENT_FILL_AUTH_TTL_MS = 30_000;
+const CONTENT_REQUEST_STATE_MAX_ENTRIES = 128;
+
+interface ContentSenderContext {
+  tabId: number;
+  origin: string;
+}
+
+interface ContentRequestState {
+  lastFindAt: number;
+  lastTouchedAt: number;
+  authorization?: {
+    token: string;
+    expiresAt: number;
+  };
+}
+
+const contentRequestState = new Map<string, ContentRequestState>();
+
 function ensureInit(): Promise<void> {
   initPromise ??= (init as unknown as (a?: unknown) => Promise<unknown>)().then(() => undefined);
   return initPromise;
@@ -121,18 +141,93 @@ function originMatches(credentialWebsite: string, pageOrigin: string): boolean {
 }
 
 /** Accept only messages sent by this extension's top-frame content script. */
-function contentOriginFromSender(sender: chrome.runtime.MessageSender): string | null {
+function contentContextFromSender(sender: chrome.runtime.MessageSender): ContentSenderContext | null {
   if (sender.id !== chrome.runtime.id || sender.tab?.id === undefined || sender.frameId !== 0) {
     return null;
   }
   const senderUrl = sender.url ?? sender.tab.url;
-  return senderUrl ? pageOrigin(senderUrl) : null;
+  const origin = senderUrl ? pageOrigin(senderUrl) : null;
+  return origin === null ? null : { tabId: sender.tab.id, origin };
 }
 
 /** Popup-privileged requests must come from one of this extension's own pages. */
 function isExtensionPageSender(sender: chrome.runtime.MessageSender): boolean {
   if (sender.id !== chrome.runtime.id || sender.tab !== undefined || !sender.url) return false;
   return sender.url.startsWith(chrome.runtime.getURL(""));
+}
+
+function contentRequestKey(context: ContentSenderContext): string {
+  return `${context.tabId}\n${context.origin}`;
+}
+
+function pruneContentRequestState(now: number): void {
+  for (const [key, state] of contentRequestState) {
+    const authorizationExpired =
+      state.authorization === undefined || state.authorization.expiresAt <= now;
+    if (authorizationExpired && now - state.lastTouchedAt > CONTENT_FILL_AUTH_TTL_MS) {
+      contentRequestState.delete(key);
+    }
+  }
+
+  while (contentRequestState.size >= CONTENT_REQUEST_STATE_MAX_ENTRIES) {
+    let oldestKey: string | null = null;
+    let oldestTouchedAt = Number.POSITIVE_INFINITY;
+    for (const [key, state] of contentRequestState) {
+      if (state.lastTouchedAt < oldestTouchedAt) {
+        oldestKey = key;
+        oldestTouchedAt = state.lastTouchedAt;
+      }
+    }
+    if (oldestKey === null) break;
+    contentRequestState.delete(oldestKey);
+  }
+}
+
+function authorizeCredentialLookup(
+  context: ContentSenderContext,
+): { ok: true; authorization: string } | { ok: false } {
+  const now = Date.now();
+  const key = contentRequestKey(context);
+  const current = contentRequestState.get(key);
+  // Capture the current entry before pruning so capacity eviction cannot be
+  // used to bypass this origin's cooldown.
+  pruneContentRequestState(now);
+  if (current && now - current.lastFindAt < CONTENT_FIND_COOLDOWN_MS) {
+    current.lastTouchedAt = now;
+    return { ok: false };
+  }
+
+  const authorization = crypto.randomUUID();
+  contentRequestState.set(key, {
+    lastFindAt: now,
+    lastTouchedAt: now,
+    authorization: {
+      token: authorization,
+      expiresAt: now + CONTENT_FILL_AUTH_TTL_MS,
+    },
+  });
+  return { ok: true, authorization };
+}
+
+function consumeFillAuthorization(
+  context: ContentSenderContext,
+  authorization: string,
+): boolean {
+  const now = Date.now();
+  const key = contentRequestKey(context);
+  const state = contentRequestState.get(key);
+  if (
+    !state?.authorization ||
+    state.authorization.expiresAt <= now ||
+    state.authorization.token !== authorization
+  ) {
+    return false;
+  }
+
+  // Consume before decrypting so replayed or concurrent fill attempts fail closed.
+  delete state.authorization;
+  state.lastTouchedAt = now;
+  return true;
 }
 
 /** SHA-256 hex of a string; used as a clipboard clear-token (compare-and-clear). */
@@ -180,10 +275,10 @@ function fillCredential(v: WasmVault, id: string, origin: string): ContentRespon
   };
 }
 
-function findCredentials(v: WasmVault, origin: string): ContentResponse {
+function findCredentials(v: WasmVault, origin: string, authorization: string): ContentResponse {
   if (!v.isUnlocked()) return { type: "credentials", locked: true, items: [] };
   const matches = listCredentials(v).filter((c) => originMatches(c.website, origin));
-  return { type: "credentials", locked: false, items: matches };
+  return { type: "credentials", locked: false, items: matches, authorization };
 }
 
 // --- Message routing ---
@@ -195,14 +290,25 @@ chrome.runtime.onMessage.addListener((raw: unknown, sender, sendResponse) => {
     switch (msg.type) {
       // Content-script surface (untrusted page context).
       case "findCredentials": {
-        const origin = contentOriginFromSender(sender);
-        if (origin === null) return { type: "error", error: "unauthorized sender" } satisfies ContentResponse;
-        return findCredentials(await getVault(), origin);
+        const context = contentContextFromSender(sender);
+        if (context === null) {
+          return { type: "error", error: "unauthorized sender" } satisfies ContentResponse;
+        }
+        const lookup = authorizeCredentialLookup(context);
+        if (!lookup.ok) {
+          return { type: "error", error: "request throttled" } satisfies ContentResponse;
+        }
+        return findCredentials(await getVault(), context.origin, lookup.authorization);
       }
       case "fillCredential": {
-        const origin = contentOriginFromSender(sender);
-        if (origin === null) return { type: "error", error: "unauthorized sender" } satisfies ContentResponse;
-        return fillCredential(await getVault(), msg.id, origin);
+        const context = contentContextFromSender(sender);
+        if (context === null) {
+          return { type: "error", error: "unauthorized sender" } satisfies ContentResponse;
+        }
+        if (!consumeFillAuthorization(context, msg.authorization)) {
+          return { type: "fill", ok: false, error: "authorization required" } satisfies ContentResponse;
+        }
+        return fillCredential(await getVault(), msg.id, context.origin);
       }
 
       // Popup surface (trusted extension page).

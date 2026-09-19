@@ -66,18 +66,18 @@ export function EmergencyCardEditor({ initial, onSave }: Props) {
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <div className="flex items-center gap-2">
-            <div className="flex size-9 items-center justify-center rounded-lg border bg-muted/40">
+            <div className="flex size-9 items-center justify-center rounded-[var(--radius-default)] border bg-[var(--surface-secondary)]">
               <HugeiconsIcon
                 icon={ShieldKeyIcon}
                 strokeWidth={1.8}
-                className="size-4 text-primary"
+                className="size-4 text-[var(--primary)]"
               />
             </div>
             <div>
               <h2 className="text-lg font-semibold tracking-tight">
                 Emergency Card
               </h2>
-              <p className="text-sm text-muted-foreground">
+              <p className="text-sm text-[var(--text-secondary)]">
                 Private instructions and people to contact in an emergency.
               </p>
             </div>
@@ -110,7 +110,7 @@ export function EmergencyCardEditor({ initial, onSave }: Props) {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h3 className="text-sm font-medium">Emergency contacts</h3>
-            <p className="mt-0.5 text-sm text-muted-foreground">
+            <p className="mt-0.5 text-sm text-[var(--text-secondary)]">
               Add people who should be contacted or can help carry out your
               plan.
             </p>
@@ -133,16 +133,16 @@ export function EmergencyCardEditor({ initial, onSave }: Props) {
         </div>
 
         {contacts.length === 0 ? (
-          <div className="rounded-xl border border-dashed bg-muted/20 px-5 py-8 text-center">
-            <div className="mx-auto mb-3 flex size-9 items-center justify-center rounded-full bg-muted">
+          <div className="rounded-[var(--radius-default)] border border-dashed bg-[var(--surface-secondary)] px-5 py-8 text-center">
+            <div className="mx-auto mb-3 flex size-9 items-center justify-center rounded-[var(--radius-large)] bg-[var(--surface-secondary)]">
               <HugeiconsIcon
                 icon={Add01Icon}
                 strokeWidth={2}
-                className="size-4 text-muted-foreground"
+                className="size-4 text-[var(--text-secondary)]"
               />
             </div>
             <p className="text-sm font-medium">No contacts yet</p>
-            <p className="mx-auto mt-1 max-w-sm text-sm text-muted-foreground">
+            <p className="mx-auto mt-1 max-w-sm text-sm text-[var(--text-secondary)]">
               You can save the card without contacts, or add someone now.
             </p>
           </div>
@@ -151,14 +151,14 @@ export function EmergencyCardEditor({ initial, onSave }: Props) {
             {contacts.map((contact, index) => (
               <div
                 key={index}
-                className="rounded-xl border bg-card p-4 shadow-xs"
+                className="rounded-[var(--radius-default)] border bg-[var(--surface)] p-4 shadow-[var(--fancy-shadow-basic)]"
               >
                 <div className="mb-4 flex items-center justify-between gap-3">
                   <div className="min-w-0">
                     <p className="truncate text-sm font-medium">
                       {contact.name.trim() || `Contact ${index + 1}`}
                     </p>
-                    <p className="text-xs text-muted-foreground">
+                    <p className="text-xs text-[var(--text-secondary)]">
                       {contact.relation.trim() || "Relationship not specified"}
                     </p>
                   </div>
@@ -178,7 +178,7 @@ export function EmergencyCardEditor({ initial, onSave }: Props) {
                     <HugeiconsIcon
                       icon={Delete02Icon}
                       strokeWidth={2}
-                      className="text-destructive"
+                      className="text-[var(--danger)]"
                     />
                   </Button>
                 </div>

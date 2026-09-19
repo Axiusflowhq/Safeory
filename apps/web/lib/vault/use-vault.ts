@@ -2,7 +2,12 @@
 
 import { useCallback, useEffect, useRef, useState } from "react"
 
-import type { EmergencyCard, VaultSession } from "@safeory/contracts"
+import {
+  VaultDurabilityError,
+  type DeadlineSummary,
+  type EmergencyCard,
+  type VaultSession,
+} from "@safeory/contracts"
 import { newId, type VaultItemJson } from "./items"
 import { loadVaultSession, wasmStatics } from "./vault"
 
@@ -22,6 +27,14 @@ export interface EditableEntry {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function localTodayYmd(): string {
+  const today = new Date()
+  const year = String(today.getFullYear()).padStart(4, "0")
+  const month = String(today.getMonth() + 1).padStart(2, "0")
+  const day = String(today.getDate()).padStart(2, "0")
+  return `${year}-${month}-${day}`
 }
 
 export function useVault() {
@@ -81,9 +94,19 @@ export function useVault() {
       void Promise.resolve()
         .then(() => operation(session))
         .then(() => refresh())
-        .catch((operationError: unknown) =>
+        .catch((operationError: unknown) => {
+          if (operationError instanceof VaultDurabilityError) {
+            sessionRef.current = null
+            setItems([])
+            setEmergencyCardSnapshot(null)
+            setHasRecoveryKit(false)
+            setGeneratedSecret(null)
+            setError(errorMessage(operationError))
+            setPhase("load_error")
+            return
+          }
           setError(errorMessage(operationError))
-        )
+        })
     },
     [refresh]
   )
@@ -161,6 +184,19 @@ export function useVault() {
     }
   }, [])
 
+  const getDeadlines = useCallback((): DeadlineSummary[] => {
+    const session = sessionRef.current
+    if (!session || !session.isUnlocked()) return []
+
+    try {
+      setError(null)
+      return session.listDeadlines(localTodayYmd())
+    } catch (deadlineError: unknown) {
+      setError(errorMessage(deadlineError))
+      return []
+    }
+  }, [])
+
   const getEmergencyCard = useCallback(
     () => emergencyCardSnapshot,
     [emergencyCardSnapshot]
@@ -211,6 +247,7 @@ export function useVault() {
     updateItem,
     trashItem,
     getItem,
+    getDeadlines,
     getEmergencyCard,
     setEmergencyCard,
     installRecoveryKit,

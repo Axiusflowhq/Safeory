@@ -10,10 +10,12 @@
     "./session": "./src/session.ts"
   },
   "scripts": {
+    "test": "node scripts/test-durability.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "oxlint src"
   },
   "devDependencies": {
+    "@types/node": "26.5.1",
     "oxlint": "1.83.0",
     "typescript": "7.0.2"
   }

@@ -1,4 +1,4 @@
-# Dependency Baseline
+﻿# Dependency Baseline
 
 Verified: 2026-09-15
 
@@ -9,7 +9,7 @@ Safeory uses stable production releases only for core dependencies. Alpha, beta,
 | Rust | 1.98.1 | 2026-09-15 | rust-lang.org releases | Primary security/business core toolchain |
 | pnpm | 12.4.1 | 2026-09-15 | npm registry / pnpm | Reproducible JS workspace manager |
 | TypeScript | 7.0.2 | 2026-09-15 | npm registry | Strict frontend/contracts typing |
-| React / React DOM | 19.3.0 | 2026-09-15 | npm registry | Desktop presentation layer |
+| React / React DOM | 19.2.8 | 2026-09-19 | npm registry | Browser presentation layer |
 | Vite | 8.3.0 | 2026-09-15 | npm registry / vite.dev | Frontend build/dev tooling |
 | @vitejs/plugin-react | 6.1.1 | 2026-09-15 | npm registry | React integration for Vite |
 | Tailwind CSS / @tailwindcss/vite | 4.3.3 | 2026-09-15 | npm registry | UI styling and Vite integration |
@@ -20,9 +20,6 @@ Safeory uses stable production releases only for core dependencies. Alpha, beta,
 | @hugeicons/core-free-icons | 4.3.3 | 2026-09-15 | npm registry / Hugeicons | Free Hugeicons data used by the React renderer |
 | Oxlint | 1.83.0 | 2026-09-15 | npm registry / oxc.rs | TypeScript/React linting without an incompatible TypeScript peer ceiling |
 | Prettier | 3.9.6 | 2026-09-15 | npm registry / prettier.io | Deterministic frontend formatting |
-| @tauri-apps/cli | 2.11.4 | 2026-09-15 | npm registry | Replaceable desktop shell tooling |
-| tauri | 2.11.5 | 2026-09-15 | crates.io / docs.rs | Thin desktop adapter only |
-| tauri-build | 2.6.3 | 2026-09-15 | crates.io | Tauri build integration |
 | argon2 | 0.6.0 | 2026-09-15 | crates.io / RustCrypto | Argon2id passphrase KDF |
 | chacha20poly1305 | 0.11.0 | 2026-09-15 | crates.io / RustCrypto | XChaCha20-Poly1305 AEAD |
 | hkdf | 0.13.0 | 2026-09-15 | crates.io / RustCrypto | Domain-separated key derivation |
@@ -42,7 +39,6 @@ Safeory uses stable production releases only for core dependencies. Alpha, beta,
 
 - Rust 1.98.1 is pinned instead of 1.98.0 because 1.98.1 fixes a vtable-generation miscompilation.
 - `@base-ui-components/react` is deprecated; new code uses `@base-ui/react`.
-- Tauri 3.0.0-alpha.0 exists but is intentionally excluded. The newest stable Rust crate is 2.11.5.
 - shadcn currently defaults new projects to Base UI; this repository still pins `--base base` explicitly.
 - shadcn `iconLibrary` is pinned to `hugeicons`; product UI may also use Solar Icons. Lucide and other icon libraries are intentionally not dependencies.
 - Vite 8.3.0 is the current stable verified release.

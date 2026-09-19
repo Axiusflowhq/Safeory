@@ -3,8 +3,9 @@
  * and the popup. This is the extension's security boundary:
  *
  * - Content scripts run in untrusted pages and NEVER hold vault keys or
- *   decrypted item lists. They may only request a fill for a specific
- *   credential id and receive just username/password.
+ *   decrypted item lists at rest. Exact-origin credential summaries are
+ *   requested only after a trusted user gesture. A subsequent fill must carry
+ *   the background-issued one-shot authorization from that lookup.
  * - The background service worker derives the page origin from MessageSender
  *   and only releases a credential to the exact stored origin.
  * - The popup is a trusted extension page and may list/edit after unlock.
@@ -25,10 +26,15 @@ export interface FillPayload {
 
 export type ContentRequest =
   | { type: "findCredentials" }
-  | { type: "fillCredential"; id: string };
+  | { type: "fillCredential"; id: string; authorization: string };
 
 export type ContentResponse =
-  | { type: "credentials"; locked: boolean; items: CredentialSummary[] }
+  | {
+      type: "credentials";
+      locked: boolean;
+      items: CredentialSummary[];
+      authorization?: string;
+    }
   | { type: "fill"; ok: boolean; payload?: FillPayload; error?: string }
   | { type: "error"; error: string };
 

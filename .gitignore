@@ -1,8 +1,6 @@
-﻿/target/
+/target/
 /node_modules/
 .pnpm-store/
-apps/desktop/dist/
-apps/desktop/node_modules/
 apps/web/dist/
 apps/web/node_modules/
 apps/extension/dist/

@@ -35,20 +35,6 @@ jobs:
       - name: Generate vault WASM package
         run: node scripts/build-vault-wasm.mjs
 
-      - name: Install Tauri Linux build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            build-essential \
-            curl \
-            wget \
-            file \
-            libxdo-dev \
-            libssl-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev
-
       - name: Install locked JavaScript dependencies
         run: corepack pnpm install --frozen-lockfile
 
@@ -66,18 +52,14 @@ jobs:
 
       - name: Frontend typecheck
         run: corepack pnpm typecheck
-      - name: Session generation fence test
-        run: corepack pnpm test:session-fence
+      - name: Browser vault durability tests
+        run: corepack pnpm test:contracts
       - name: Frontend lint
         run: corepack pnpm lint
       - name: Enforce icon-family policy
         run: corepack pnpm check:icons
-      - name: Frontend format
-        run: corepack pnpm --filter @safeory/desktop format:check
       - name: Frontend build
         run: corepack pnpm build
-      - name: Desktop shell build
-        run: corepack pnpm --filter @safeory/desktop tauri build
 
       - name: Install Rust security tools
         run: |

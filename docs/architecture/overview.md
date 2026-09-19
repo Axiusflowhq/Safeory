@@ -9,40 +9,55 @@ A stolen backend database and object store must be insufficient by themselves to
 ## Layering
 
 ```text
-React UI
-  |
-  | narrow typed IPC
-  v
-Tauri adapter (replaceable)
-  |
-  v
-vault-core
-  |-- vault-models
-  |-- vault-crypto
-  |-- vault-storage
-  |-- vault-platform
-  |-- vault-sync
-  |-- vault-sharing
-  `-- vault-emergency
-  |
-  | ciphertext + minimum metadata only
-  v
-Self-hosted Rust HTTP API
-  |-- PostgreSQL (accounts, devices, opaque sync/policy state)
-  |-- S3-compatible object storage (ciphertext blobs; Garage preferred)
-  |-- Valkey (ephemeral queues, rate limits, job coordination)
-  `-- SMTP (security notifications only)
+React web app                    Browser extension
+      \                           /
+       \                         /
+        +---- typed contracts ---+
+                   |
+                   v
+              vault-wasm
+          /        |        \
+ vault-models  vault-crypto  vault-storage (browser MemStore)
+      |            |               |
+      +------------+---------------+
+                   |
+                   | ciphertext + minimum metadata only
+                   v
+          Self-hosted Rust HTTP API
+            |-- PostgreSQL
+            |-- S3-compatible object storage
+            |-- Valkey
+            `-- SMTP
 ```
 
-Dependency direction always points inward toward portable Rust crates. No core crate may depend on Tauri, React, a WebView, a particular reverse proxy, database driver, object-store vendor, or cloud-provider SDK type.
+Dependency direction points inward toward portable Rust crates. Security-domain crates do not depend on React, browser UI types, a particular reverse proxy, object-store vendor, or cloud-provider SDK type.
 
 ## Local-first ownership
 
-- SQLite is the local persistence substrate.
-- Sensitive item fields are serialized then encrypted before SQLite persistence.
-- The local database may contain synchronization metadata and encrypted envelopes, but no intentionally plaintext vault secrets.
+- Browser clients persist ciphertext snapshots locally: IndexedDB for the web
+  session and browser-managed extension storage for the extension background vault.
+- Sensitive item fields are serialized and encrypted inside the Rust/WASM
+  boundary before browser persistence.
+- `vault-storage` retains its SQLite implementation for native library utilities,
+  tests, migration/backup formats, and future non-browser adapters; it is not a
+  shipping client surface.
 - Search is performed locally after unlock. Search indexes containing plaintext secrets are not persisted in Phase 0.
 - Network synchronization is secondary and may be unavailable without preventing core local vault operation.
+
+The browser build uses the same crypto/domain model through `vault-wasm`, with a
+ciphertext-only `MemStore` snapshot persisted in IndexedDB. Browser snapshot
+restore validates the shared storage schema/object-count/revision/encoded-size
+bounds and duplicate object IDs before accepting the encrypted state. Local web
+mutations are serialized through mutation -> snapshot -> IndexedDB CAS; if the
+durable save fails after the WASM mutation, the session fails closed, locks,
+poisons itself, clears plaintext-derived UI state, and requires reload from the
+durable IndexedDB snapshot rather than continuing on divergent memory.
+
+The browser extension keeps the unlocked WASM vault in its background worker.
+Untrusted page content receives only exact-origin credential summaries after a
+trusted Safeory click. Discovery is throttled per tab+origin, and a short-lived
+authorization bound to that same context is consumed once before the selected
+credential is decrypted for fill.
 
 ## Initial vertical slice
 
@@ -61,7 +76,7 @@ Creation is the reverse path. The database receives only salts, nonces, cipherte
 
 `vault-platform` defines capabilities such as secure key storage, biometrics, filesystem, clipboard, clock, randomness, and network transport. Platform-specific implementations live outside the security-domain crates. Phase 0 uses the OS CSPRNG directly and does not yet persist root keys in OS secure storage.
 
-## Backend shape (later phases)
+## Backend shape (in implementation)
 
 Self-hosting is the primary deployment target. The first supported backend is a
 Docker-deployed stack that can run on one operator-controlled host and later be
@@ -89,3 +104,6 @@ options. They must preserve the same protocol and zero-knowledge boundary; no
 cloud provider is required for the primary product architecture.
 
 No backend component receives usable vault decryption keys or vault plaintext.
+Opaque self-hosted synchronization is in implementation; this architecture
+describes the intended server-visible contract and deployment boundaries, not a
+claim that the complete sync/auth/device HTTP endpoint surface has shipped.

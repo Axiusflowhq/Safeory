@@ -1,4 +1,4 @@
-# Safeory Roadmap — Full 1Password + Trustworthy Alternative
+﻿# Safeory Roadmap — Full 1Password + Trustworthy Alternative
 
 Status: strategy document. `PLAN.md` remains the source of truth for the V1
 local platform checklist; this document orders everything after it.
@@ -13,88 +13,44 @@ frontend and no reusable crypto. Safeory's portable `vault-*` crates already
 provide a modern crypto core (Argon2id + XChaCha20-Poly1305 + HKDF per-item
 keys) that the password-manager features build on directly.
 
-## Decision 0 — product shape: web app + all-in-one extension (no Tauri desktop)
+## Decision 0 — product shape: web app + all-in-one extension
 
-Supersedes the earlier native-messaging/Tauri direction. The shipping product
-is exactly two surfaces:
+The shipping client product has two browser surfaces:
 
-1. **Web app** (`apps/web`, React + Tailwind + `@hugeicons`/`@solar-icons`,
-   promoted from today's `apps/desktop` React code). This is the main UI:
-   full vault management, Emergency Card, recovery kit, legacy planning,
-   Today panel, attachments, importers, settings.
-2. **All-in-one browser extension** (new `apps/extension`, MV3, Chromium +
-   Firefox). Not just autofill — the password-manager surface *and* a compact
-   vault: unlock, browse/search all record types, view/copy credentials,
-   TOTP codes, add/save logins, capture new credentials on submit, quick-add
-   notes/receipts, Emergency Card read view, Today/deadline badge.
+1. **Web app** (`apps/web`, Next.js + React + shadcn/Base UI). This is the deep-management UI for full vault management, Emergency Card, recovery kit, Today/deadlines, attachments, importers, settings, and device management as those features land.
+2. **All-in-one browser extension** (`apps/extension`, MV3, Chromium + Firefox target). It owns the always-present password-manager surface: unlock, browse/search, explicit-origin autofill, credential capture, quick add, and compact continuity views.
 
-The Tauri desktop app is **deprecated** (see "What the desktop pivot
-requires"). ADR 0001 ("Tauri is a replaceable shell") is what makes this
-pivot cheap: the React UI and the `vault-*` crates were never coupled to
-Tauri.
+Both surfaces share the same `vault-wasm` crypto/domain boundary. Keys stay in WASM memory while unlocked; JavaScript receives ciphertext snapshots, redacted projections, or a single explicitly opened record.
 
-Why this shape:
-- One React codebase serves the web app *and* the extension popup/panel
-  (shared via `packages/ui` + `packages/contracts`), instead of maintaining a
-  desktop shell plus a web app plus an extension.
-- The extension is the always-present surface a password manager needs; the
-  web app is the deep-management surface Trustworthy needs. Together they
-  cover 1Password + Trustworthy without a native desktop app.
+Browser persistence is deliberately platform-specific: IndexedDB CAS for the web session and browser-extension storage for the extension background vault. Browser clipboard/filesystem capabilities require explicit user gestures and fail-closed handling where lifetime or permission guarantees are weaker than the core cryptographic guarantees.
 
-### The WASM core (the technical heart of the pivot)
-- All of `vault-crypto` is pure-Rust RustCrypto (`argon2`, `chacha20poly1305`,
-  `hkdf`, `sha2`, `x25519-dalek`, `blahaj`; `#![forbid(unsafe_code)]`,
-  `no_std`-friendly) and compiles to `wasm32-unknown-unknown`. `getrandom
-  0.4` supports that target via its `wasm_js` backend.
-- New crate `vault-wasm`: `wasm-bindgen` wrapper exposing unlock, item
-  list/reveal/edit, credential copy, TOTP, search, and Emergency Card to
-  TypeScript. Keys stay inside WASM linear memory (zeroed on lock); only
-  ciphertext and redacted projections cross the JS boundary.
-- Both the web app and the extension load the *same* `vault-wasm` module.
-
-### What the desktop pivot requires (the honest re-architecture)
-Tauri was silently load-bearing in three places. Replacing it:
-1. **Persistence:** `vault-storage` uses `rusqlite` (bundled C SQLite — not
-   WASM-able). Add a browser `vault-storage` backend on IndexedDB (via
-   `rexie` or a thin JS adapter behind a storage trait). The on-disk format
-   stays ciphertext envelopes either way. The existing "rollback-journal
-   plaintext inspection" test is native-only and gets an IndexedDB analogue
-   (raw-store plaintext scan).
-2. **Platform capabilities:** `vault-platform` is already just traits
-   (`SecureKeyStore`, `Clipboard`). Provide browser implementations:
-   WebCrypto non-extractable keys / IndexedDB for the keystore, the Async
-   Clipboard API + the existing 30-second compare-and-clear for clipboard.
-   The extension additionally gets `chrome.storage.session` for
-   session-scoped unlock state.
-3. **Native save dialogs:** portable export / recovery-kit Save move to the
-   File System Access API (`showSaveFilePicker`) with an `<a download>`
-   fallback. The guarantee "renderer cannot pick arbitrary export paths"
-   survives: the browser mediates the path, and the core still writes the
-   file bytes.
-
-Non-goals that STAY: banking/investment aggregation, resale marketplace,
-whole-vault cloud AI, ads/data business, company-side decryption, and
-standalone mobile apps (mobile web + the extension cover the need for now).
+Non-goals that STAY: banking/investment aggregation, resale marketplace, whole-vault cloud AI, ads/data business, company-side decryption, and standalone mobile apps (mobile web + the extension cover the need for now).
 
 ## Phase map (ordered; each phase keeps all verification gates green)
-
 ### Phase 1 — Finish V1 local platform + WASM extraction (core complete)
 **Verification status: 233 Rust tests pass (0 failed) workspace-wide in
 release; `cargo deny` advisories/bans/licenses/sources all ok; web +
 extension + contracts typecheck/lint/build green.**
 - ✅ DONE: `vault-storage` is now storage-agnostic. A `VaultStore` trait
   carries the portable data path; `rusqlite` is an optional `sqlite` feature
-  (default-on for desktop, off for WASM). Added a serializable `KVSnapshot`
+  (default-on for native SQLite users, off for WASM). Added a serializable `KVSnapshot`
   (ciphertext-only interchange) with `to_snapshot`.
 - ✅ DONE: `crates/vault-wasm` — `MemStore` (in-memory `VaultStore`),
   `BrowserVault` session (create/unlock/lock/put/get/list/update/trash with
   keys held in WASM and zeroized on lock), and `WasmVault` wasm-bindgen
   bindings. Compiles to `wasm32-unknown-unknown`; Node smoke test proves
   encrypt/decrypt/lock/fail-closed run in JS and the snapshot has no plaintext.
+  Restored browser snapshots are bounded before acceptance using the shared
+  storage limits: schema version, object count, duplicate object IDs, encrypted
+  item/root/recovery-wrap encoded size, and revision range are validated without
+  decrypting the snapshot.
 - ✅ DONE: `packages/contracts` — IndexedDB persistence (`persistence.ts`,
   plain TS, ciphertext snapshot only) + a version-fenced `VaultSession`
-  controller for the web app; stale tabs fail instead of replacing a newer
-  whole-vault snapshot.
+  controller for the web app. The full mutation + snapshot + CAS save is
+  serialized; a post-mutation IndexedDB/CAS failure poisons and locks the
+  session and forces reload rather than allowing in-memory state to run ahead
+  of the durable snapshot. Pre-commit validation/auth/revision errors remain
+  recoverable.
 - ✅ DONE: `apps/web` scaffold — React + Vite + Tailwind consuming
   `@safeory/contracts` + `vault-wasm`; typecheck/lint/build all green.
 - ✅ DONE: widened `vault-wasm` bindings — Emergency Card (singleton, hidden
@@ -116,18 +72,18 @@ extension + contracts typecheck/lint/build green.**
 - ✅ DONE: `apps/extension` (MV3, Chromium) scaffold — the all-in-one
   extension. Three self-contained bundles: a module **background worker** that
   alone holds the WASM vault (WASM embedded as base64, no runtime fetch),
-  authenticates message senders, enforces exact HTTP(S)-origin matching, and releases only the requested
-  username/password; a **content script** that detects login forms and fills
-  only on a trusted user pick (never holds keys or the item list); and a React
+  authenticates message senders, enforces exact HTTP(S)-origin matching,
+  releases credential summaries only after a trusted click, rate-limits lookup
+  per tab+origin, and requires a short-lived one-shot fill authorization before
+  decrypting the selected credential; a **content script** that detects login
+  forms and fills only on trusted user actions (never holds keys or a whole
+  decrypted item list); and a React
   **popup** mini-vault (unlock/lock, credential list/add, password generator).
   Ciphertext snapshot persists via `chrome.storage.local`. typecheck/lint/
   build all green.
 - TODO: close remaining PLAN.md local-only partials (grant persistence in
   payloads, trusted-person local model UX).
-- TODO: Today/deadlines panel (needs the `reminders` engine exposed via
-  `vault-wasm`), attachments in the browser, and item links/jump navigation;
-  freeze desktop once web parity is proven; add headless-browser
-  `wasm-pack test` when a browser is available.
+- ✅ DONE: Today/deadlines is exposed as a redacted unlocked-only WASM projection and rendered lazily in the web app. TODO: browser attachments and item links/jump navigation; add headless-browser `wasm-pack test` when a browser is available.
 - Keep gates: `cargo fmt/clippy/test/audit/deny`, pnpm typecheck/lint/build.
 
 ### Phase 2 — Credential core upgrade (pure `vault-*` crates)
@@ -157,10 +113,14 @@ first-class, standalone client sharing the same WASM core and UI package.
   quick-add notes/receipts, read-only Emergency Card, Today/deadline badge.
 - ✅ Browser/extension threat model updated for malicious pages, sender
   authentication, exact-origin fill, WASM-memory limits, CSP, browser-local
-  persistence races, and clipboard residual risk. Rate limiting and durable
-  clipboard ownership remain follow-up hardening.
+  persistence races, and clipboard residual risk. Per-tab+origin credential
+  discovery throttling and one-shot fill authorization are implemented;
+  durable clipboard ownership remains follow-up hardening.
 
-### Phase 4 — Sync + multi-device (self-hosted backend first)
+### Phase 4 — Sync + multi-device (self-hosted backend first; in implementation)
+- **Status: in implementation.** The self-hosted stack and opaque sync contract
+  are being built now. Do not treat the HTTP sync/device/auth endpoint set as
+  complete until the implementation and its security tests land end-to-end.
 - `apps/api`: Rust HTTP service packaged for Docker. PostgreSQL owns durable
   account/device/opaque sync and policy metadata; an S3-compatible store owns
   ciphertext blobs (Garage preferred); Valkey provides ephemeral queues,
@@ -179,9 +139,7 @@ first-class, standalone client sharing the same WASM core and UI package.
 - This is what makes the *extension* useful across machines: the web app and
   every installed extension sync through it.
 
-### Phase 5 — Web app reaches full parity (`apps/web`)
-- Promote the desktop React UI into `apps/web` on `vault-wasm`; retire
-  `apps/desktop` entirely once parity is proven.
+### Phase 5 — Web app reaches full deep-management parity (`apps/web`)
 - Deep-management surface: full record editing, attachments (encrypted, per
   `vault-*`), portable export + recovery kit (File System Access API),
   legacy planning, Plan Test, settings, device management.
@@ -215,7 +173,7 @@ first-class, standalone client sharing the same WASM core and UI package.
 
 ## Cross-cutting rules (never waived)
 1. Dependency direction stays inward to portable crates; no core crate may
-   depend on Tauri/React/extension/Worker types. (`vault-wasm` wraps the
+   depend on React/extension/Worker types. (`vault-wasm` wraps the
    core for the web/extension; the core never wraps `vault-wasm`.)
 2. New server-visible metadata requires a threat-model update justifying why
    the field cannot remain encrypted.

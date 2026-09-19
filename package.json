@@ -5,12 +5,12 @@
   "packageManager": "pnpm@12.4.1",
   "scripts": {
     "build:wasm": "node scripts/build-vault-wasm.mjs",
-    "build": "corepack pnpm run build:wasm && corepack pnpm --filter @safeory/web --filter @safeory/extension --filter @safeory/desktop build",
-    "typecheck": "corepack pnpm --filter @safeory/contracts --filter @safeory/web --filter @safeory/extension --filter @safeory/desktop typecheck",
-    "lint": "corepack pnpm --filter @safeory/contracts --filter @safeory/web --filter @safeory/extension --filter @safeory/desktop lint",
+    "build": "corepack pnpm run build:wasm && corepack pnpm --filter @safeory/web --filter @safeory/extension build",
+    "typecheck": "corepack pnpm --filter @safeory/contracts --filter @safeory/web --filter @safeory/extension typecheck",
+    "lint": "corepack pnpm --filter @safeory/contracts --filter @safeory/web --filter @safeory/extension lint",
     "audit:js": "pnpm audit --prod",
     "check:icons": "node scripts/check-icon-policy.mjs",
     "test:rust": "cargo test --workspace",
-    "test:session-fence": "node --test scripts/session-fence.test.mjs"
+    "test:contracts": "corepack pnpm --filter @safeory/contracts test"
   }
 }

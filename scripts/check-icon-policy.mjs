@@ -60,13 +60,13 @@ for (const root of [
 const shadcnConfigPath = join(
   workspaceRoot,
   "apps",
-  "desktop",
+  "web",
   "components.json",
 );
 const shadcnConfig = JSON.parse(readFileSync(shadcnConfigPath, "utf8"));
 if (shadcnConfig.iconLibrary !== "hugeicons") {
   errors.push(
-    `apps/desktop/components.json must keep iconLibrary as "hugeicons"; found ${JSON.stringify(shadcnConfig.iconLibrary)}`,
+    `apps/web/components.json must keep iconLibrary as "hugeicons"; found ${JSON.stringify(shadcnConfig.iconLibrary)}`,
   );
 }
 

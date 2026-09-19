@@ -7,6 +7,12 @@ HTTP API with PostgreSQL, S3-compatible ciphertext storage, Valkey, SMTP, and a
 TLS reverse proxy. Running the stack on operator-owned hardware does not make
 additional vault metadata safe to expose in plaintext.
 
+Opaque self-hosted synchronization is currently **in implementation**. The
+metadata classes below define the permitted server-visible contract; they do
+not assert that the complete sync/auth/device API endpoint surface is finished.
+Until those endpoints and protocol tests are complete, client-local vault data
+remains authoritative for the implemented browser flows.
+
 ## Intended plaintext metadata
 
 | Field class | Why required | Leakage |
@@ -47,5 +53,12 @@ their logs must never intentionally receive plaintext vault bodies, passwords,
 recovery codes, attachment contents, emergency instructions, AccountRootKey,
 per-item keys, or usable attachment keys. Ciphertext bodies may transit the API
 or proxy when protocol design requires it, but request-body logging is disabled.
+
+Browser-local hardening does not widen this server boundary: bounded `MemStore`
+snapshot validation operates on ciphertext on the client, IndexedDB durability
+poison/reload handling is client-local, and extension credential discovery/fill
+authorization is enforced between the content script and extension background
+worker. None of those controls require sending additional vault metadata to the
+self-hosted server.
 
 Any addition to server-visible metadata requires a threat-model update explaining why the field cannot remain encrypted.

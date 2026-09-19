@@ -1,20 +1,43 @@
+mod auth;
+mod blob;
+mod model;
+mod store;
+mod sync;
+
 use std::{env, net::SocketAddr, time::Duration};
 
-use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
+use axum::{
+    Json, Router,
+    extract::{DefaultBodyLimit, State},
+    http::StatusCode,
+    routing::{get, post},
+};
 use redis::AsyncCommands;
 use serde::Serialize;
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::postgres::PgPoolOptions;
 use thiserror::Error;
 use tokio::time::timeout;
 use tracing::warn;
 
-const READINESS_TIMEOUT: Duration = Duration::from_secs(2);
+use crate::{
+    auth::registration_token_hash, blob::S3BlobStore, store::MetadataStore,
+    sync::MAX_CIPHERTEXT_OBJECT_BYTES,
+};
 
-#[derive(Debug, Clone)]
+const READINESS_TIMEOUT: Duration = Duration::from_secs(2);
+const MIN_REGISTRATION_TOKEN_BYTES: usize = 32;
+
+#[derive(Clone)]
 pub struct Config {
     pub database_url: String,
     pub valkey_url: String,
     pub bind_addr: SocketAddr,
+    registration_token_hash: [u8; 32],
+    s3_endpoint: String,
+    s3_region: String,
+    s3_bucket: String,
+    s3_access_key_id: String,
+    s3_secret_access_key: String,
 }
 
 impl Config {
@@ -24,31 +47,48 @@ impl Config {
         let bind_addr = required_env("BIND_ADDR")?
             .parse()
             .map_err(ConfigError::InvalidBindAddress)?;
+        let registration_token = required_env("ACCOUNT_REGISTRATION_TOKEN")?;
+        if registration_token.len() < MIN_REGISTRATION_TOKEN_BYTES {
+            return Err(ConfigError::RegistrationTokenTooShort);
+        }
 
         Ok(Self {
             database_url,
             valkey_url,
             bind_addr,
+            registration_token_hash: registration_token_hash(&registration_token),
+            s3_endpoint: required_env("S3_ENDPOINT")?,
+            s3_region: required_env("S3_REGION")?,
+            s3_bucket: required_env("S3_BUCKET")?,
+            s3_access_key_id: required_env("S3_ACCESS_KEY_ID")?,
+            s3_secret_access_key: required_env("S3_SECRET_ACCESS_KEY")?,
         })
     }
 }
 
 fn required_env(name: &'static str) -> Result<String, ConfigError> {
-    env::var(name).map_err(|_| ConfigError::MissingEnvironmentVariable(name))
+    match env::var(name) {
+        Ok(value) if !value.is_empty() => Ok(value),
+        _ => Err(ConfigError::MissingEnvironmentVariable(name)),
+    }
 }
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
-    #[error("required environment variable {0} is missing")]
+    #[error("required environment variable {0} is missing or empty")]
     MissingEnvironmentVariable(&'static str),
     #[error("BIND_ADDR is not a valid socket address")]
     InvalidBindAddress(#[source] std::net::AddrParseError),
+    #[error("ACCOUNT_REGISTRATION_TOKEN must contain at least 32 bytes")]
+    RegistrationTokenTooShort,
 }
 
 #[derive(Clone)]
 pub struct AppState {
-    postgres: PgPool,
-    valkey: redis::Client,
+    pub(crate) metadata: MetadataStore,
+    pub(crate) valkey: redis::Client,
+    pub(crate) blobs: S3BlobStore,
+    pub(crate) registration_token_hash: [u8; 32],
 }
 
 impl AppState {
@@ -58,8 +98,21 @@ impl AppState {
             .acquire_timeout(READINESS_TIMEOUT)
             .connect_lazy(&config.database_url)?;
         let valkey = redis::Client::open(config.valkey_url.as_str())?;
+        let blobs = S3BlobStore::new(
+            &config.s3_endpoint,
+            &config.s3_region,
+            &config.s3_bucket,
+            &config.s3_access_key_id,
+            &config.s3_secret_access_key,
+        )
+        .map_err(|_| StartupError::ObjectStore)?;
 
-        Ok(Self { postgres, valkey })
+        Ok(Self {
+            metadata: MetadataStore::new(postgres),
+            valkey,
+            blobs,
+            registration_token_hash: config.registration_token_hash,
+        })
     }
 }
 
@@ -69,12 +122,27 @@ pub enum StartupError {
     Database(#[from] sqlx::Error),
     #[error("VALKEY_URL is invalid")]
     Valkey(#[from] redis::RedisError),
+    #[error("S3-compatible object store configuration is invalid")]
+    ObjectStore,
 }
 
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health/live", get(health_live))
         .route("/health/ready", get(health_ready))
+        .route("/v1/accounts", post(sync::create_account))
+        .route("/v1/devices", post(sync::create_device))
+        .route(
+            "/v1/devices/{device_id}",
+            axum::routing::delete(sync::revoke_device),
+        )
+        .route("/v1/objects", get(sync::list_objects))
+        .route(
+            "/v1/objects/{object_id}",
+            get(sync::get_object)
+                .put(sync::put_object)
+                .layer(DefaultBodyLimit::max(MAX_CIPHERTEXT_OBJECT_BYTES)),
+        )
         .with_state(state)
 }
 
@@ -92,18 +160,22 @@ struct ReadyResponse {
     status: &'static str,
     postgres: &'static str,
     valkey: &'static str,
+    garage: &'static str,
 }
 
 async fn health_ready(State(state): State<AppState>) -> (StatusCode, Json<ReadyResponse>) {
-    let postgres_check = check_postgres(&state.postgres);
+    let postgres_check = check_postgres(&state.metadata);
     let valkey_check = check_valkey(&state.valkey);
-    let (postgres_ready, valkey_ready) = tokio::join!(postgres_check, valkey_check);
+    let garage_check = check_garage(&state.blobs);
+    let (postgres_ready, valkey_ready, garage_ready) =
+        tokio::join!(postgres_check, valkey_check, garage_check);
 
-    let ready = postgres_ready && valkey_ready;
+    let ready = postgres_ready && valkey_ready && garage_ready;
     let response = ReadyResponse {
         status: if ready { "ready" } else { "not_ready" },
         postgres: if postgres_ready { "ok" } else { "unavailable" },
         valkey: if valkey_ready { "ok" } else { "unavailable" },
+        garage: if garage_ready { "ok" } else { "unavailable" },
     };
 
     (
@@ -116,17 +188,17 @@ async fn health_ready(State(state): State<AppState>) -> (StatusCode, Json<ReadyR
     )
 }
 
-async fn check_postgres(pool: &PgPool) -> bool {
+async fn check_postgres(metadata: &MetadataStore) -> bool {
     match timeout(
         READINESS_TIMEOUT,
-        sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(pool),
+        sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(metadata.pool()),
     )
     .await
     {
         Ok(Ok(1)) => true,
         Ok(Ok(_)) => false,
-        Ok(Err(error)) => {
-            warn!(error = %error, "PostgreSQL readiness check failed");
+        Ok(Err(_)) => {
+            warn!("PostgreSQL readiness check failed");
             false
         }
         Err(_) => {
@@ -146,12 +218,26 @@ async fn check_valkey(client: &redis::Client) -> bool {
     match timeout(READINESS_TIMEOUT, check).await {
         Ok(Ok(true)) => true,
         Ok(Ok(false)) => false,
-        Ok(Err(error)) => {
-            warn!(error = %error, "Valkey readiness check failed");
+        Ok(Err(_)) => {
+            warn!("Valkey readiness check failed");
             false
         }
         Err(_) => {
             warn!("Valkey readiness check timed out");
+            false
+        }
+    }
+}
+
+async fn check_garage(blobs: &S3BlobStore) -> bool {
+    match timeout(READINESS_TIMEOUT, blobs.ready()).await {
+        Ok(Ok(())) => true,
+        Ok(Err(_)) => {
+            warn!("Garage readiness check failed");
+            false
+        }
+        Err(_) => {
+            warn!("Garage readiness check timed out");
             false
         }
     }
