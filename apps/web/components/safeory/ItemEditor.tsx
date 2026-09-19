@@ -1,6 +1,7 @@
 "use client"
 
 import { useRef, useState } from "react"
+import type { TrustedPrincipal } from "@safeory/contracts"
 import { SparklesIcon, ViewIcon, ViewOffIcon } from "@hugeicons/core-free-icons"
 import { HugeiconsIcon } from "@hugeicons/react"
 
@@ -22,22 +23,34 @@ import {
 import { Input } from "@/components/ui/input"
 import { Separator } from "@/components/ui/separator"
 import { Textarea } from "@/components/ui/textarea"
-import type { ItemKind, VaultItemJson } from "@/lib/vault/items"
+import { AccessGrantEditor } from "@/components/safeory/AccessGrantEditor"
+import type {
+  AccessPolicy,
+  AccountClosureDisposition,
+  ItemKind,
+  LegacyDisposition,
+  VaultItemJson,
+} from "@/lib/vault/items"
 import {
   buildEditedItem,
   buildItem,
   KIND_FIELDS,
   kindLabel,
   newId,
+  ownerOnlyAccessPolicy,
 } from "@/lib/vault/items"
 
 interface Props {
   existing: { item: VaultItemJson; revision: number } | null
   defaultKind: ItemKind
-  onSave: (item: VaultItemJson, expectedRevision: number | null) => void
+  onSave: (
+    item: VaultItemJson,
+    expectedRevision: number | null
+  ) => void | Promise<void>
   onCancel: () => void
   generatePassword: (length: number) => string
-  onTrash?: () => void
+  trustedPrincipals: TrustedPrincipal[]
+  onTrash?: () => void | Promise<void>
 }
 
 export function ItemEditor({
@@ -46,6 +59,7 @@ export function ItemEditor({
   onSave,
   onCancel,
   generatePassword,
+  trustedPrincipals,
   onTrash,
 }: Props) {
   const isEdit = existing !== null
@@ -64,6 +78,19 @@ export function ItemEditor({
     return initialFields
   })
   const [notes, setNotes] = useState(existing?.item.notes ?? "")
+  const [legacyDisposition, setLegacyDisposition] = useState<LegacyDisposition>(
+    existing?.item.legacy_disposition ?? "unspecified"
+  )
+  const [accountClosureDisposition, setAccountClosureDisposition] =
+    useState<AccountClosureDisposition>(
+      existing?.item.account_closure_plan.disposition ?? "unspecified"
+    )
+  const [accountClosureInstructions, setAccountClosureInstructions] = useState(
+    existing?.item.account_closure_plan.instructions ?? ""
+  )
+  const [accessPolicy, setAccessPolicy] = useState<AccessPolicy>(
+    existing?.item.access_policy ?? ownerOnlyAccessPolicy()
+  )
   const [revealed, setRevealed] = useState<Record<string, boolean>>({})
   const [titleError, setTitleError] = useState<string | null>(null)
   const titleInputRef = useRef<HTMLInputElement>(null)
@@ -73,16 +100,31 @@ export function ItemEditor({
   }
 
   function save() {
+    const planning = {
+      legacyDisposition,
+      accountClosurePlan: {
+        disposition: accountClosureDisposition,
+        instructions: accountClosureInstructions,
+      },
+      accessPolicy,
+    }
     if (existing) {
       onSave(
-        buildEditedItem(existing.item, kind, title.trim(), fields, notes),
+        buildEditedItem(
+          existing.item,
+          kind,
+          title.trim(),
+          fields,
+          notes,
+          planning
+        ),
         existing.revision
       )
       return
     }
 
     const id = newId()
-    onSave(buildItem(id, kind, title.trim(), fields, notes), null)
+    onSave(buildItem(id, kind, title.trim(), fields, notes, planning), null)
   }
 
   return (
@@ -269,6 +311,96 @@ export function ItemEditor({
             </Field>
           </>
         ) : null}
+
+        <Separator />
+
+        <div className="space-y-4">
+          <div>
+            <h3 className="text-sm font-medium">Continuity planning</h3>
+            <p className="mt-1 max-w-[65ch] text-sm leading-6 text-pretty text-[var(--text-secondary)]">
+              These encrypted preferences record your intent only. Safeory does
+              not automatically share this item, delete it, or carry out account
+              actions from these settings.
+            </p>
+          </div>
+
+          <Field>
+            <FieldLabel htmlFor="safeory-item-legacy-disposition">
+              Legacy preference
+            </FieldLabel>
+            <select
+              id="safeory-item-legacy-disposition"
+              value={legacyDisposition}
+              onChange={(event) =>
+                setLegacyDisposition(event.target.value as LegacyDisposition)
+              }
+              className="h-10 w-full rounded-[var(--radius-default)] border border-[var(--input-border)] bg-[var(--input-fill)] px-3 text-sm text-[var(--text-primary)] outline-none focus-visible:border-[var(--ring)] focus-visible:ring-3 focus-visible:ring-[var(--ring)]"
+            >
+              <option value="unspecified">Unspecified</option>
+              <option value="selected_for_legacy">Selected for legacy</option>
+              <option value="private_forever">Keep private forever</option>
+              <option value="destroy_on_death">Destroy on death</option>
+            </select>
+            <FieldDescription>
+              “Destroy on death” is a planning preference only. It does not
+              automatically delete this item.
+            </FieldDescription>
+          </Field>
+
+          {kind === "password" ? (
+            <>
+              <Field>
+                <FieldLabel htmlFor="safeory-item-account-closure">
+                  Account closure preference
+                </FieldLabel>
+                <select
+                  id="safeory-item-account-closure"
+                  value={accountClosureDisposition}
+                  onChange={(event) =>
+                    setAccountClosureDisposition(
+                      event.target.value as AccountClosureDisposition
+                    )
+                  }
+                  className="h-10 w-full rounded-[var(--radius-default)] border border-[var(--input-border)] bg-[var(--input-fill)] px-3 text-sm text-[var(--text-primary)] outline-none focus-visible:border-[var(--ring)] focus-visible:ring-3 focus-visible:ring-[var(--ring)]"
+                >
+                  <option value="unspecified">Unspecified</option>
+                  <option value="keep_open">Keep account open</option>
+                  <option value="close_account">Close account</option>
+                  <option value="review_manually">Review manually</option>
+                </select>
+                <FieldDescription>
+                  Safeory does not contact the provider or close this account
+                  automatically.
+                </FieldDescription>
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="safeory-item-account-closure-instructions">
+                  Closure instructions
+                </FieldLabel>
+                <Textarea
+                  id="safeory-item-account-closure-instructions"
+                  value={accountClosureInstructions}
+                  onChange={(event) =>
+                    setAccountClosureInstructions(event.target.value)
+                  }
+                  placeholder="Optional notes for a future manual review"
+                  rows={3}
+                  className="min-h-20 resize-y"
+                />
+                <FieldDescription>
+                  Encrypted planning notes only; they do not trigger account
+                  closure or sharing.
+                </FieldDescription>
+              </Field>
+            </>
+          ) : null}
+
+          <AccessGrantEditor
+            policy={accessPolicy}
+            principals={trustedPrincipals}
+            onChange={setAccessPolicy}
+          />
+        </div>
       </FieldGroup>
 
       <div className="flex flex-col gap-3 border-t pt-5 sm:flex-row sm:items-center sm:justify-between">

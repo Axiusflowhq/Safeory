@@ -13,19 +13,26 @@ mod store;
 
 pub use store::MemStore;
 
+use std::{cell::RefCell, collections::BTreeMap};
 use thiserror::Error;
 use uuid::Uuid;
 use vault_crypto::{
-    AccountRootKey, CryptoError, RecoverySecret, SessionResumeSecret, SessionResumeWrapV1,
-    decrypt_item, decrypt_item_state, encrypt_item, encrypt_item_state,
+    AccountRootKey, CryptoError, EncryptedItemV1, RecoverySecret, SessionResumeSecret,
+    SessionResumeWrapV1, decrypt_item, decrypt_item_state, encrypt_item, encrypt_item_state,
     recovery_secret_matches_root_key, unwrap_root_key, unwrap_root_key_with_recovery_secret,
     unwrap_root_key_with_session_resume_secret, wrap_root_key, wrap_root_key_with_recovery_secret,
     wrap_root_key_with_session_resume_secret,
 };
 use vault_models::{
     EMERGENCY_CARD_ID, EmergencyCard, VaultItem, VaultItemState, VaultItemValidationError,
+    carry_forward_trusted_identity_retirements,
     reminders::{Deadline, deadline_for_item},
-    validate_emergency_card, validate_vault_item,
+    validate_emergency_card, validate_trusted_devices_unpaired,
+    validate_trusted_identity_continuity, validate_vault_item,
+};
+use vault_sharing::{
+    PairingChallengeV1, PairingProofV1, PairingVerifierState, SharingError,
+    create_pairing_challenge, verify_pairing_proof,
 };
 use vault_storage::{KV_SNAPSHOT_SCHEMA_VERSION, KVSnapshot, StorageError, VaultStore};
 
@@ -38,6 +45,13 @@ const PASSWORD_ALL: &[u8] =
     b"abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$%^&*()-_=+[]{}:,.?";
 const PASSWORD_MIN_LENGTH: usize = 12;
 const PASSWORD_MAX_LENGTH: usize = 128;
+const SESSION_RESUME_BINDING_VERSION: u16 = 1;
+const SESSION_RESUME_MARKER_ID: Uuid = Uuid::from_bytes([
+    0x53, 0x41, 0x46, 0x45, 0x4f, 0x52, 0x59, 0x2d, 0x52, 0x45, 0x53, 0x55, 0x4d, 0x45, 0x00, 0x01,
+]);
+const SESSION_RESUME_MARKER_TITLE: &str = "Safeory session resume state";
+const SESSION_RESUME_MARKER_BODY: &str = "generation";
+const MAX_PENDING_TRUSTED_DEVICE_PAIRINGS: usize = 16;
 
 #[derive(Error, Debug)]
 pub enum WasmVaultError {
@@ -67,8 +81,27 @@ pub enum WasmVaultError {
     InvalidLegacyDisposition,
     #[error("account closure plans are supported only for credential records")]
     InvalidAccountClosurePlan,
+    #[error("trusted-person access policy is invalid")]
+    InvalidAccessPolicy,
+    #[error("trusted-person principal is invalid")]
+    InvalidTrustedPrincipal,
+    #[error("reserved vault record must be changed through its dedicated operation")]
+    ReservedSystemItem,
+    #[error("trusted-device pairing operation failed")]
+    Sharing(#[from] SharingError),
+    #[error("trusted-device pairing challenge is missing or already consumed")]
+    PairingChallengeUnavailable,
     #[error("attachment references are managed by attachment operations")]
     AttachmentReferencesManagedSeparately,
+    #[error("session resume credential is unavailable or stale")]
+    InvalidSessionResume,
+}
+
+#[derive(serde::Serialize)]
+struct SessionResumeSnapshotBinding<'a> {
+    version: u16,
+    root_key_wrap: &'a vault_crypto::RootKeyWrapV1,
+    generation_marker: &'a EncryptedItemV1,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -82,6 +115,12 @@ pub struct DeadlineEntry {
 pub struct BrowserVault {
     store: MemStore,
     root_key: Option<AccountRootKey>,
+    pending_pairings: RefCell<BTreeMap<Uuid, PendingTrustedDevicePairing>>,
+}
+
+struct PendingTrustedDevicePairing {
+    package: PairingChallengeV1,
+    state: PairingVerifierState,
 }
 
 impl BrowserVault {
@@ -90,6 +129,7 @@ impl BrowserVault {
         Self {
             store: MemStore::new(),
             root_key: None,
+            pending_pairings: RefCell::new(BTreeMap::new()),
         }
     }
 
@@ -103,6 +143,7 @@ impl BrowserVault {
         Ok(Self {
             store: MemStore::from_snapshot(snapshot)?,
             root_key: None,
+            pending_pairings: RefCell::new(BTreeMap::new()),
         })
     }
 
@@ -133,6 +174,7 @@ impl BrowserVault {
     /// Lock the vault, dropping (zeroizing) the root key.
     pub fn lock(&mut self) {
         self.root_key = None;
+        self.pending_pairings.get_mut().clear();
     }
 
     pub fn is_unlocked(&self) -> bool {
@@ -144,9 +186,17 @@ impl BrowserVault {
     /// recovery secret and must be cleared by the host on explicit lock.
     pub fn create_session_resume(&self) -> Result<(String, SessionResumeWrapV1), WasmVaultError> {
         let secret = SessionResumeSecret::generate()?;
-        let snapshot_binding = self.session_resume_snapshot_binding()?;
+        let root_key = self.root_key()?;
+        let (current, next_marker) = self.prepare_next_session_resume_marker(root_key)?;
+        let snapshot_binding = self.session_resume_snapshot_binding_for(&next_marker)?;
         let wrapped =
-            wrap_root_key_with_session_resume_secret(&secret, self.root_key()?, &snapshot_binding)?;
+            wrap_root_key_with_session_resume_secret(&secret, root_key, &snapshot_binding)?;
+        match current {
+            Some(current) => self
+                .store
+                .update_item_if_revision(&next_marker, current.revision)?,
+            None => self.store.insert_item(&next_marker)?,
+        }
         Ok((secret.to_hex(), wrapped))
     }
 
@@ -160,13 +210,84 @@ impl BrowserVault {
         let snapshot_binding = self.session_resume_snapshot_binding()?;
         let root_key =
             unwrap_root_key_with_session_resume_secret(secret, wrapped, &snapshot_binding)?;
+        self.validate_session_resume_marker(&root_key)?;
         self.root_key = Some(root_key);
         Ok(())
     }
 
     fn session_resume_snapshot_binding(&self) -> Result<Vec<u8>, WasmVaultError> {
+        let marker =
+            self.store
+                .load_item(SESSION_RESUME_MARKER_ID)
+                .map_err(|error| match error {
+                    StorageError::ItemNotFound => WasmVaultError::InvalidSessionResume,
+                    other => WasmVaultError::Storage(other),
+                })?;
+        self.session_resume_snapshot_binding_for(&marker)
+    }
+
+    fn session_resume_snapshot_binding_for(
+        &self,
+        marker: &EncryptedItemV1,
+    ) -> Result<Vec<u8>, WasmVaultError> {
         let root_wrap = self.store.load_root_wrap()?;
-        Ok(serde_json::to_vec(&root_wrap).map_err(StorageError::from)?)
+        let binding = SessionResumeSnapshotBinding {
+            version: SESSION_RESUME_BINDING_VERSION,
+            root_key_wrap: &root_wrap,
+            generation_marker: marker,
+        };
+        Ok(serde_json::to_vec(&binding).map_err(StorageError::from)?)
+    }
+
+    fn prepare_next_session_resume_marker(
+        &self,
+        root_key: &AccountRootKey,
+    ) -> Result<(Option<EncryptedItemV1>, EncryptedItemV1), WasmVaultError> {
+        let current = match self.store.load_item(SESSION_RESUME_MARKER_ID) {
+            Ok(current) => {
+                self.validate_session_resume_marker_record(root_key, &current)?;
+                Some(current)
+            }
+            Err(StorageError::ItemNotFound) => None,
+            Err(error) => return Err(error.into()),
+        };
+        let revision = match current.as_ref() {
+            Some(current) => current
+                .revision
+                .checked_add(1)
+                .ok_or(WasmVaultError::RevisionExhausted)?,
+            None => 0,
+        };
+        let marker = session_resume_marker_item();
+        let encrypted = encrypt_item(root_key, &marker, revision)?;
+        Ok((current, encrypted))
+    }
+
+    fn validate_session_resume_marker(
+        &self,
+        root_key: &AccountRootKey,
+    ) -> Result<(), WasmVaultError> {
+        let marker =
+            self.store
+                .load_item(SESSION_RESUME_MARKER_ID)
+                .map_err(|error| match error {
+                    StorageError::ItemNotFound => WasmVaultError::InvalidSessionResume,
+                    other => WasmVaultError::Storage(other),
+                })?;
+        self.validate_session_resume_marker_record(root_key, &marker)
+    }
+
+    fn validate_session_resume_marker_record(
+        &self,
+        root_key: &AccountRootKey,
+        marker: &EncryptedItemV1,
+    ) -> Result<(), WasmVaultError> {
+        let item =
+            decrypt_item(root_key, marker).map_err(|_| WasmVaultError::InvalidSessionResume)?;
+        if item != session_resume_marker_item() {
+            return Err(WasmVaultError::InvalidSessionResume);
+        }
+        Ok(())
     }
 
     fn root_key(&self) -> Result<&AccountRootKey, WasmVaultError> {
@@ -175,6 +296,7 @@ impl BrowserVault {
 
     /// Insert a new item at revision 0.
     pub fn put_item(&self, item: &VaultItem) -> Result<(), WasmVaultError> {
+        ensure_mutable_user_item_id(item.id)?;
         if !item.attachments.is_empty() {
             return Err(WasmVaultError::AttachmentReferencesManagedSeparately);
         }
@@ -186,6 +308,7 @@ impl BrowserVault {
 
     /// Fetch and decrypt an active item by id.
     pub fn get_item(&self, id: Uuid) -> Result<VaultItem, WasmVaultError> {
+        ensure_user_item_id(id)?;
         let encrypted = self.store.load_item(id)?;
         Ok(decrypt_item(self.root_key()?, &encrypted)?)
     }
@@ -195,7 +318,7 @@ impl BrowserVault {
         let root = self.root_key()?;
         let mut out = Vec::new();
         for id in self.store.list_item_ids()? {
-            if id == EMERGENCY_CARD_ID {
+            if id == EMERGENCY_CARD_ID || id == SESSION_RESUME_MARKER_ID {
                 continue; // the singleton card is hidden from normal lists (matches vault-core)
             }
             let encrypted = self.store.load_item(id)?;
@@ -215,7 +338,7 @@ impl BrowserVault {
         let root = self.root_key()?;
         let mut out = Vec::new();
         for id in self.store.list_item_ids()? {
-            if id == EMERGENCY_CARD_ID {
+            if id == EMERGENCY_CARD_ID || id == SESSION_RESUME_MARKER_ID {
                 continue;
             }
             let encrypted = self.store.load_item(id)?;
@@ -244,6 +367,7 @@ impl BrowserVault {
         item: &VaultItem,
         expected_revision: u64,
     ) -> Result<u64, WasmVaultError> {
+        ensure_mutable_user_item_id(item.id)?;
         validate_item(item)?;
         let current = self.store.load_item(item.id)?;
         if current.revision != expected_revision {
@@ -274,6 +398,7 @@ impl BrowserVault {
         expected_revision: u64,
         deleted_at_ms: u64,
     ) -> Result<u64, WasmVaultError> {
+        ensure_mutable_user_item_id(id)?;
         let item = self.get_item(id)?;
         let current = self.store.load_item(id)?;
         if current.revision != expected_revision {
@@ -319,14 +444,38 @@ impl BrowserVault {
     pub fn set_emergency_card(&self, card: &EmergencyCard) -> Result<u64, WasmVaultError> {
         validate_emergency_card(card).map_err(map_validation_error)?;
         let root = self.root_key()?; // auth check first
-        let item = VaultItem::emergency_card(card);
         match self.store.load_item(EMERGENCY_CARD_ID) {
             Err(StorageError::ItemNotFound) => {
+                validate_trusted_devices_unpaired(card).map_err(map_validation_error)?;
+                let item = VaultItem::emergency_card(card);
                 let encrypted = encrypt_item(root, &item, 1)?;
                 self.store.insert_item(&encrypted)?;
+                self.pending_pairings.borrow_mut().clear();
                 Ok(1)
             }
             Ok(current) => {
+                let VaultItemState::Active { mut item } = decrypt_item_state(root, &current)?
+                else {
+                    return Err(WasmVaultError::ItemNotFound);
+                };
+                let previous_card = item
+                    .parse_emergency_card()
+                    .ok_or(WasmVaultError::InvalidTrustedPrincipal)?;
+                let mut next_card = card.clone();
+                carry_forward_trusted_identity_retirements(&previous_card, &mut next_card);
+                validate_emergency_card(&next_card).map_err(map_validation_error)?;
+                validate_trusted_identity_continuity(&previous_card, &next_card)
+                    .map_err(map_validation_error)?;
+                let replacement = VaultItem::emergency_card(&next_card);
+                item.fields.insert(
+                    "card".to_owned(),
+                    replacement
+                        .fields
+                        .get("card")
+                        .expect("emergency card constructor always stores card content")
+                        .clone(),
+                );
+                validate_item(&item)?;
                 let revision = current
                     .revision
                     .checked_add(1)
@@ -334,10 +483,139 @@ impl BrowserVault {
                 let encrypted = encrypt_item(root, &item, revision)?;
                 self.store
                     .update_item_if_revision(&encrypted, current.revision)?;
+                self.pending_pairings.borrow_mut().clear();
                 Ok(revision)
             }
             Err(other) => Err(other.into()),
         }
+    }
+
+    pub fn create_trusted_device_pairing_challenge(
+        &self,
+        principal_id: Uuid,
+        device_id: Uuid,
+    ) -> Result<PairingChallengeV1, WasmVaultError> {
+        let (card, _) = self
+            .get_emergency_card()?
+            .ok_or(WasmVaultError::PairingChallengeUnavailable)?;
+        let device = card
+            .principals
+            .iter()
+            .find(|principal| principal.id == principal_id)
+            .and_then(|principal| {
+                principal
+                    .devices
+                    .iter()
+                    .find(|device| device.id == device_id)
+            })
+            .ok_or(WasmVaultError::PairingChallengeUnavailable)?;
+        if device.signing_public_key_hex.is_some() {
+            return Err(WasmVaultError::InvalidTrustedPrincipal);
+        }
+        let encryption_public = decode_hex_32(&device.encryption_public_key_hex)
+            .ok_or(WasmVaultError::InvalidTrustedPrincipal)?;
+        let (package, state) =
+            create_pairing_challenge(principal_id, device_id, &encryption_public)?;
+        let mut pending = self.pending_pairings.borrow_mut();
+        pending.retain(|_, existing| {
+            existing.package.principal_id != principal_id || existing.package.device_id != device_id
+        });
+        if pending.len() >= MAX_PENDING_TRUSTED_DEVICE_PAIRINGS {
+            return Err(WasmVaultError::PairingChallengeUnavailable);
+        }
+        pending.insert(
+            package.request_id,
+            PendingTrustedDevicePairing {
+                package: package.clone(),
+                state,
+            },
+        );
+        Ok(package)
+    }
+
+    pub fn complete_trusted_device_pairing(
+        &self,
+        proof: &PairingProofV1,
+    ) -> Result<u64, WasmVaultError> {
+        let pending = self
+            .pending_pairings
+            .borrow_mut()
+            .remove(&proof.request_id)
+            .ok_or(WasmVaultError::PairingChallengeUnavailable)?;
+        let signing_public = verify_pairing_proof(&pending.package, &pending.state, proof)?;
+        let root = self.root_key()?;
+        let current = self.store.load_item(EMERGENCY_CARD_ID)?;
+        let VaultItemState::Active { mut item } = decrypt_item_state(root, &current)? else {
+            return Err(WasmVaultError::ItemNotFound);
+        };
+        let mut card = item
+            .parse_emergency_card()
+            .ok_or(WasmVaultError::InvalidTrustedPrincipal)?;
+        let device = card
+            .principals
+            .iter_mut()
+            .find(|principal| principal.id == proof.principal_id)
+            .and_then(|principal| {
+                principal
+                    .devices
+                    .iter_mut()
+                    .find(|device| device.id == proof.device_id)
+            })
+            .ok_or(WasmVaultError::PairingChallengeUnavailable)?;
+        if device.signing_public_key_hex.is_some()
+            || decode_hex_32(&device.encryption_public_key_hex) != Some(proof.encryption_public)
+        {
+            return Err(WasmVaultError::InvalidTrustedPrincipal);
+        }
+        device.signing_public_key_hex = Some(encode_hex_32(&signing_public));
+        validate_emergency_card(&card).map_err(map_validation_error)?;
+        let replacement = VaultItem::emergency_card(&card);
+        item.fields.insert(
+            "card".to_owned(),
+            replacement
+                .fields
+                .get("card")
+                .expect("emergency card constructor always stores card content")
+                .clone(),
+        );
+        validate_item(&item)?;
+        let revision = current
+            .revision
+            .checked_add(1)
+            .ok_or(WasmVaultError::RevisionExhausted)?;
+        let encrypted = encrypt_item(root, &item, revision)?;
+        self.store
+            .update_item_if_revision(&encrypted, current.revision)?;
+        Ok(revision)
+    }
+
+    #[cfg(test)]
+    fn set_emergency_card_access_policy(
+        &self,
+        policy: vault_models::AccessPolicy,
+        expected_revision: u64,
+    ) -> Result<u64, WasmVaultError> {
+        let root = self.root_key()?;
+        let current = self.store.load_item(EMERGENCY_CARD_ID)?;
+        if current.revision != expected_revision {
+            return Err(WasmVaultError::Storage(StorageError::StaleRevision));
+        }
+        let VaultItemState::Active { mut item } = decrypt_item_state(root, &current)? else {
+            return Err(WasmVaultError::ItemNotFound);
+        };
+        item.access_policy = policy;
+        let card = item
+            .parse_emergency_card()
+            .ok_or(WasmVaultError::InconsistentEmergencyCard)?;
+        validate_emergency_card(&card).map_err(map_validation_error)?;
+        validate_item(&item)?;
+        let revision = expected_revision
+            .checked_add(1)
+            .ok_or(WasmVaultError::RevisionExhausted)?;
+        let encrypted = encrypt_item(root, &item, revision)?;
+        self.store
+            .update_item_if_revision(&encrypted, expected_revision)?;
+        Ok(revision)
     }
 
     /// Install a recovery kit wrap for the current root key.
@@ -388,6 +666,60 @@ impl BrowserVault {
     }
 }
 
+fn session_resume_marker_item() -> VaultItem {
+    let mut item = VaultItem::secure_note(SESSION_RESUME_MARKER_TITLE, SESSION_RESUME_MARKER_BODY);
+    item.id = SESSION_RESUME_MARKER_ID;
+    item
+}
+
+fn ensure_user_item_id(id: Uuid) -> Result<(), WasmVaultError> {
+    if id == SESSION_RESUME_MARKER_ID {
+        return Err(WasmVaultError::ItemNotFound);
+    }
+    Ok(())
+}
+
+fn ensure_mutable_user_item_id(id: Uuid) -> Result<(), WasmVaultError> {
+    ensure_user_item_id(id)?;
+    if id == EMERGENCY_CARD_ID {
+        return Err(WasmVaultError::ReservedSystemItem);
+    }
+    Ok(())
+}
+
+fn decode_hex_32(value: &str) -> Option<[u8; 32]> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let encoded = value.as_bytes();
+    let mut output = [0u8; 32];
+    for (index, byte) in output.iter_mut().enumerate() {
+        let high = hex_nibble(encoded[index * 2])?;
+        let low = hex_nibble(encoded[index * 2 + 1])?;
+        *byte = (high << 4) | low;
+    }
+    Some(output)
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn encode_hex_32(value: &[u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(64);
+    for byte in value {
+        output.push(char::from(HEX[usize::from(byte >> 4)]));
+        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    output
+}
+
 fn validate_item(item: &VaultItem) -> Result<(), WasmVaultError> {
     validate_vault_item(item).map_err(map_validation_error)
 }
@@ -399,6 +731,10 @@ fn map_validation_error(error: VaultItemValidationError) -> WasmVaultError {
         }
         VaultItemValidationError::InvalidAccountClosurePlan => {
             WasmVaultError::InvalidAccountClosurePlan
+        }
+        VaultItemValidationError::InvalidAccessPolicy => WasmVaultError::InvalidAccessPolicy,
+        VaultItemValidationError::InvalidTrustedPrincipal => {
+            WasmVaultError::InvalidTrustedPrincipal
         }
         VaultItemValidationError::TooLarge => WasmVaultError::ItemTooLarge,
     }
@@ -662,12 +998,25 @@ mod tests {
         // Create at revision 1.
         let mut card = EmergencyCard::empty();
         card.instructions = "Call my sister".to_string();
+        card.principals.push(vault_models::TrustedPrincipal {
+            id: Uuid::new_v4(),
+            name: "Ada".to_owned(),
+            relation: "Sibling".to_owned(),
+            devices: vec![vault_models::TrustedDevice {
+                id: Uuid::new_v4(),
+                label: "Phone".to_owned(),
+                encryption_public_key_hex:
+                    "3333333333333333333333333333333333333333333333333333333333333333".to_owned(),
+                signing_public_key_hex: None,
+            }],
+        });
         let rev = vault.set_emergency_card(&card).expect("set");
         assert_eq!(rev, 1);
 
         // Read back.
         let (loaded, rev) = vault.get_emergency_card().expect("get").expect("present");
         assert_eq!(loaded.instructions, "Call my sister");
+        assert_eq!(loaded.principals, card.principals);
         assert_eq!(rev, 1);
 
         // CAS update bumps revision.
@@ -678,8 +1027,262 @@ mod tests {
         let (loaded2, _) = vault.get_emergency_card().expect("get").expect("present");
         assert_eq!(loaded2.instructions, "Call my lawyer");
 
+        let mut rebound = loaded2.clone();
+        rebound.principals[0].devices[0].encryption_public_key_hex =
+            "4444444444444444444444444444444444444444444444444444444444444444".to_owned();
+        assert!(matches!(
+            vault.set_emergency_card(&rebound),
+            Err(WasmVaultError::InvalidTrustedPrincipal)
+        ));
+        let (still_bound, rev_after_reject) =
+            vault.get_emergency_card().expect("get").expect("present");
+        assert_eq!(rev_after_reject, 2);
+        assert_eq!(still_bound, loaded2);
+
+        let removed_principal = still_bound.principals[0].clone();
+        let mut removed = still_bound.clone();
+        removed.principals.clear();
+        let rev3 = vault
+            .set_emergency_card(&removed)
+            .expect("remove principal and retire its ids");
+        assert_eq!(rev3, 3);
+        let (retired, _) = vault.get_emergency_card().expect("get").expect("present");
+        assert!(
+            retired
+                .retired_principal_ids
+                .contains(&removed_principal.id)
+        );
+        assert!(
+            retired
+                .retired_device_ids
+                .contains(&removed_principal.devices[0].id)
+        );
+
+        let mut revived = retired.clone();
+        revived.principals.push(removed_principal);
+        assert!(matches!(
+            vault.set_emergency_card(&revived),
+            Err(WasmVaultError::InvalidTrustedPrincipal)
+        ));
+        let (_, rev_after_revive_reject) =
+            vault.get_emergency_card().expect("get").expect("present");
+        assert_eq!(rev_after_revive_reject, 3);
+
         // The singleton must not appear in the normal item list.
         assert!(vault.list_items().expect("list").is_empty());
+    }
+
+    #[test]
+    fn emergency_card_reserved_id_rejects_generic_mutations() {
+        let mut vault = BrowserVault::new_empty();
+        vault.create("correct horse battery").expect("create");
+        let card = EmergencyCard::empty();
+        let raw = VaultItem::emergency_card(&card);
+
+        assert!(matches!(
+            vault.put_item(&raw),
+            Err(WasmVaultError::ReservedSystemItem)
+        ));
+        assert_eq!(vault.set_emergency_card(&card).expect("create card"), 1);
+
+        let mut generic = vault
+            .get_item(EMERGENCY_CARD_ID)
+            .expect("load emergency singleton");
+        generic.fields.insert("card".to_owned(), "{}".to_owned());
+        assert!(matches!(
+            vault.update_item(&generic, 1),
+            Err(WasmVaultError::ReservedSystemItem)
+        ));
+        assert!(matches!(
+            vault.trash_item(EMERGENCY_CARD_ID, 1, 42),
+            Err(WasmVaultError::ReservedSystemItem)
+        ));
+
+        let (stored, revision) = vault
+            .get_emergency_card()
+            .expect("load card")
+            .expect("card present");
+        assert_eq!(revision, 1);
+        assert_eq!(stored, card);
+    }
+
+    #[test]
+    fn trusted_device_pairing_is_persisted_and_lock_cancels_pending_challenges() {
+        use vault_sharing::{DeviceKeyPair, DeviceSigningKeyPair, answer_pairing_challenge};
+
+        let mut vault = BrowserVault::new_empty();
+        vault.create("correct horse battery").expect("create");
+        let principal_id = Uuid::new_v4();
+        let device_id = Uuid::new_v4();
+        let encryption_key = DeviceKeyPair::generate().expect("recipient key");
+        let signing_key = DeviceSigningKeyPair::generate().expect("signing key");
+        let mut card = EmergencyCard::empty();
+        card.principals.push(vault_models::TrustedPrincipal {
+            id: principal_id,
+            name: "Ada".to_owned(),
+            relation: "Sibling".to_owned(),
+            devices: vec![vault_models::TrustedDevice {
+                id: device_id,
+                label: "Phone".to_owned(),
+                encryption_public_key_hex: encode_hex_32(&encryption_key.public_bytes()),
+                signing_public_key_hex: None,
+            }],
+        });
+        assert_eq!(vault.set_emergency_card(&card).expect("store card"), 1);
+
+        let cancelled = vault
+            .create_trusted_device_pairing_challenge(principal_id, device_id)
+            .expect("create cancelled challenge");
+        let cancelled_proof = answer_pairing_challenge(&cancelled, &encryption_key, &signing_key)
+            .expect("answer cancelled challenge");
+        vault.lock();
+        vault.unlock("correct horse battery").expect("unlock");
+        assert!(matches!(
+            vault.complete_trusted_device_pairing(&cancelled_proof),
+            Err(WasmVaultError::PairingChallengeUnavailable)
+        ));
+
+        let generic_cancelled = vault
+            .create_trusted_device_pairing_challenge(principal_id, device_id)
+            .expect("create generic-cancelled challenge");
+        let generic_cancelled_proof =
+            answer_pairing_challenge(&generic_cancelled, &encryption_key, &signing_key)
+                .expect("answer generic-cancelled challenge");
+        let (mut edited_card, _) = vault
+            .get_emergency_card()
+            .expect("load card")
+            .expect("card present");
+        edited_card.instructions = "Generic edit cancels pending pairing".to_owned();
+        assert_eq!(
+            vault
+                .set_emergency_card(&edited_card)
+                .expect("generic card edit"),
+            2
+        );
+        assert!(matches!(
+            vault.complete_trusted_device_pairing(&generic_cancelled_proof),
+            Err(WasmVaultError::PairingChallengeUnavailable)
+        ));
+
+        let challenge = vault
+            .create_trusted_device_pairing_challenge(principal_id, device_id)
+            .expect("create challenge");
+        let proof = answer_pairing_challenge(&challenge, &encryption_key, &signing_key)
+            .expect("answer challenge");
+        assert_eq!(
+            vault
+                .complete_trusted_device_pairing(&proof)
+                .expect("complete pairing"),
+            3
+        );
+        let (stored, revision) = vault
+            .get_emergency_card()
+            .expect("load card")
+            .expect("card present");
+        assert_eq!(revision, 3);
+        assert_eq!(
+            stored.principals[0].devices[0].signing_public_key_hex,
+            Some(encode_hex_32(&signing_key.public_bytes()))
+        );
+
+        let signing_public_key_hex = encode_hex_32(&signing_key.public_bytes());
+        let mut revoked = stored;
+        revoked.principals[0].devices.clear();
+        assert_eq!(
+            vault
+                .set_emergency_card(&revoked)
+                .expect("revoke paired device"),
+            4
+        );
+        let (revoked, _) = vault
+            .get_emergency_card()
+            .expect("load revoked card")
+            .expect("card present");
+        assert!(
+            revoked
+                .retired_signing_public_key_hexes
+                .contains(&signing_public_key_hex)
+        );
+
+        let replacement_device_id = Uuid::new_v4();
+        let replacement_encryption_key = DeviceKeyPair::generate().expect("replacement key");
+        let mut replacement = revoked;
+        replacement.principals[0]
+            .devices
+            .push(vault_models::TrustedDevice {
+                id: replacement_device_id,
+                label: "Replacement phone".to_owned(),
+                encryption_public_key_hex: encode_hex_32(
+                    &replacement_encryption_key.public_bytes(),
+                ),
+                signing_public_key_hex: None,
+            });
+        assert_eq!(
+            vault
+                .set_emergency_card(&replacement)
+                .expect("add replacement device"),
+            5
+        );
+        let replacement_challenge = vault
+            .create_trusted_device_pairing_challenge(principal_id, replacement_device_id)
+            .expect("create replacement-device challenge");
+        let reused_signing_proof = answer_pairing_challenge(
+            &replacement_challenge,
+            &replacement_encryption_key,
+            &signing_key,
+        )
+        .expect("answer with retired signing key");
+        assert!(matches!(
+            vault.complete_trusted_device_pairing(&reused_signing_proof),
+            Err(WasmVaultError::InvalidTrustedPrincipal)
+        ));
+        let (unchanged, revision) = vault
+            .get_emergency_card()
+            .expect("load unchanged card")
+            .expect("card present");
+        assert_eq!(revision, 5);
+        assert!(
+            unchanged.principals[0].devices[0]
+                .signing_public_key_hex
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn emergency_card_update_preserves_hidden_access_policy() {
+        use vault_models::{AccessPolicy, EmergencyCard, EmergencyContact};
+
+        let mut vault = BrowserVault::new_empty();
+        vault.create("correct horse battery").expect("create");
+
+        let mut card = EmergencyCard::empty();
+        card.instructions = "Original instructions".to_owned();
+        assert_eq!(vault.set_emergency_card(&card).expect("create card"), 1);
+
+        let mut policy = AccessPolicy::new(false);
+        policy.set_private_forever();
+        assert_eq!(
+            vault
+                .set_emergency_card_access_policy(policy.clone(), 1)
+                .expect("set hidden policy"),
+            2
+        );
+
+        card.contacts.push(EmergencyContact {
+            name: "Ada".to_owned(),
+            relation: "Sibling".to_owned(),
+            phone: "+1-555-0100".to_owned(),
+            email: "ada@example.test".to_owned(),
+            notes: "Call first".to_owned(),
+        });
+        card.instructions = "Updated instructions".to_owned();
+        assert_eq!(vault.set_emergency_card(&card).expect("update card"), 3);
+
+        let stored = vault
+            .get_item(EMERGENCY_CARD_ID)
+            .expect("reload emergency item");
+        assert_eq!(stored.access_policy, policy);
+        assert_eq!(stored.parse_emergency_card(), Some(card));
     }
 
     #[test]
@@ -753,6 +1356,112 @@ mod tests {
             .unlock_with_session_resume(&secret, &wrapped)
             .expect("resume");
         assert_eq!(restored.get_item(id).expect("get").title, "Reload me");
+        assert_eq!(restored.list_items().expect("list").len(), 1);
+    }
+
+    #[test]
+    fn session_resume_rotation_rejects_previous_credential() {
+        let mut vault = BrowserVault::new_empty();
+        vault.create("correct horse battery").expect("create");
+        let (first_secret_hex, first_wrap) = vault
+            .create_session_resume()
+            .expect("first resume material");
+        let first_snapshot = vault.to_snapshot();
+
+        let mut resumed = BrowserVault::from_snapshot(first_snapshot).expect("restore first");
+        let first_secret = SessionResumeSecret::from_hex(&first_secret_hex).expect("first secret");
+        resumed
+            .unlock_with_session_resume(&first_secret, &first_wrap)
+            .expect("first resume");
+
+        let (second_secret_hex, second_wrap) = resumed
+            .create_session_resume()
+            .expect("rotated resume material");
+        resumed.lock();
+        assert!(
+            resumed
+                .unlock_with_session_resume(&first_secret, &first_wrap)
+                .is_err(),
+            "a consumed credential must fail after rotation"
+        );
+        assert!(!resumed.is_unlocked());
+
+        let second_secret =
+            SessionResumeSecret::from_hex(&second_secret_hex).expect("second secret");
+        resumed
+            .unlock_with_session_resume(&second_secret, &second_wrap)
+            .expect("rotated credential resumes");
+    }
+
+    #[test]
+    fn updated_snapshot_rejects_cross_tab_reinserted_stale_resume_payload() {
+        let mut vault = BrowserVault::new_empty();
+        vault.create("correct horse battery").expect("create");
+        let (first_secret_hex, first_wrap) = vault
+            .create_session_resume()
+            .expect("first resume material");
+        let first_snapshot = vault.to_snapshot();
+
+        let mut resumed = BrowserVault::from_snapshot(first_snapshot).expect("restore first");
+        let first_secret = SessionResumeSecret::from_hex(&first_secret_hex).expect("first secret");
+        resumed
+            .unlock_with_session_resume(&first_secret, &first_wrap)
+            .expect("first resume");
+        let (second_secret_hex, second_wrap) = resumed
+            .create_session_resume()
+            .expect("rotated resume material");
+        let updated_snapshot_json =
+            serde_json::to_vec(&resumed.to_snapshot()).expect("serialize updated snapshot");
+
+        let updated_snapshot =
+            serde_json::from_slice(&updated_snapshot_json).expect("parse updated snapshot");
+        let mut other_tab = BrowserVault::from_snapshot(updated_snapshot).expect("other tab");
+        assert!(
+            other_tab
+                .unlock_with_session_resume(&first_secret, &first_wrap)
+                .is_err(),
+            "reinserted stale payload must not unlock an updated snapshot"
+        );
+        assert!(!other_tab.is_unlocked());
+
+        let latest_snapshot =
+            serde_json::from_slice(&updated_snapshot_json).expect("parse latest snapshot");
+        let mut latest_tab = BrowserVault::from_snapshot(latest_snapshot).expect("latest tab");
+        let second_secret =
+            SessionResumeSecret::from_hex(&second_secret_hex).expect("second secret");
+        latest_tab
+            .unlock_with_session_resume(&second_secret, &second_wrap)
+            .expect("current payload unlocks updated snapshot");
+    }
+
+    #[test]
+    fn legacy_snapshot_without_generation_requires_normal_unlock_before_reissue() {
+        let mut vault = BrowserVault::new_empty();
+        vault.create("correct horse battery").expect("create");
+        let legacy_snapshot = vault.to_snapshot();
+
+        let mut restored = BrowserVault::from_snapshot(legacy_snapshot).expect("restore legacy");
+        let random_secret = SessionResumeSecret::generate().expect("random secret");
+        let (_, unrelated_wrap) = vault.create_session_resume().expect("unrelated wrap");
+        assert!(
+            restored
+                .unlock_with_session_resume(&random_secret, &unrelated_wrap)
+                .is_err()
+        );
+        assert!(!restored.is_unlocked());
+
+        restored
+            .unlock("correct horse battery")
+            .expect("normal unlock after upgrade");
+        let (secret_hex, wrapped) = restored
+            .create_session_resume()
+            .expect("issue generation-bound credential");
+        let upgraded_snapshot = restored.to_snapshot();
+        let mut reloaded = BrowserVault::from_snapshot(upgraded_snapshot).expect("reload upgraded");
+        let secret = SessionResumeSecret::from_hex(&secret_hex).expect("resume secret");
+        reloaded
+            .unlock_with_session_resume(&secret, &wrapped)
+            .expect("upgraded resume works");
     }
 
     #[test]

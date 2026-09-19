@@ -39,6 +39,11 @@ impl MemStore {
                 snapshot.schema_version,
             )));
         }
+        if snapshot.root_key_wrap.is_none()
+            && (snapshot.recovery_kit_wrap.is_some() || !snapshot.items.is_empty())
+        {
+            return Err(StorageError::InconsistentEncryptedRow);
+        }
         validate_item_count(snapshot.items.len())?;
         if let Some(wrapped) = snapshot.root_key_wrap.as_ref() {
             validate_encoded_bound(wrapped, ROOT_WRAP_MAX_ENCODED_BYTES)?;
@@ -327,6 +332,31 @@ mod tests {
 
         assert!(matches!(
             MemStore::from_snapshot(snapshot),
+            Err(StorageError::InconsistentEncryptedRow)
+        ));
+    }
+
+    #[test]
+    fn snapshot_rejects_material_without_root_wrap() {
+        let recovery_only = KVSnapshot {
+            schema_version: KV_SNAPSHOT_SCHEMA_VERSION,
+            root_key_wrap: None,
+            recovery_kit_wrap: Some(sample_recovery_wrap()),
+            items: Vec::new(),
+        };
+        assert!(matches!(
+            MemStore::from_snapshot(recovery_only),
+            Err(StorageError::InconsistentEncryptedRow)
+        ));
+
+        let item_only = KVSnapshot {
+            schema_version: KV_SNAPSHOT_SCHEMA_VERSION,
+            root_key_wrap: None,
+            recovery_kit_wrap: None,
+            items: vec![sample_item(Uuid::new_v4())],
+        };
+        assert!(matches!(
+            MemStore::from_snapshot(item_only),
             Err(StorageError::InconsistentEncryptedRow)
         ));
     }

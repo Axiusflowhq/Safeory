@@ -1,15 +1,35 @@
 # Trust Engine + Key Hierarchy
 
-Status: cryptographic/policy foundation implemented; trusted-person persistence,
-AWS-coordinated timed release, and end-user workflow integration remain in progress.
+Status: cryptographic/policy foundation, encrypted per-item grant persistence,
+stable local trusted-principal UUIDs, recipient-encryption device bindings, and
+browser grant-planning UX are implemented. The local dual-key pairing/signing
+verifier and persisted signing-key binding are implemented; recipient-side
+durable key storage/responder, AWS-coordinated timed release, and actionable
+release enforcement remain in progress.
 
 Implementation status: the policy model (`AccessPolicy`/`AccessGrant`,
 conditions, wait periods, durations, private-forever, destruction) with
 fail-closed local evaluation, plus Shamir 2-of-3 style threshold sharing and
-sealed recovery-share envelopes, is implemented and tested in
-`vault-emergency` (pure core, no client wiring yet). Grant persistence inside item
-payloads, trusted-person UX, and the timed-release state machine are still
-pending — no UI or server path can release anything today. The local Plan
+sealed recovery-share envelopes, is implemented and tested in `vault-emergency`.
+The canonical grant DTOs live in `vault-models` and are persisted inside each
+encrypted `VaultItem` payload. The encrypted Emergency Card keeps continuity
+contacts and access principals as separate typed collections: contacts never
+become principals implicitly. Each principal has a stable UUID and may have
+bounded device UUIDs carrying X25519 recipient-encryption public keys. An
+explicitly paired device also carries a separate Ed25519 verification key
+installed only after the dual-key possession proof succeeds. X25519 by itself
+is not a signature or identity proof, and successful dual-key pairing proves
+device-key possession rather than the person's real-world identity.
+Removed principal/device UUIDs and removed paired-device Ed25519 verification
+keys are retained as encrypted retirement tombstones. This prevents both old
+grant identifiers and revoked signing identities from being rebound after
+removal. Existing device UUIDs also cannot be rebound to another principal or
+recipient/signing key; rotation is remove + add with a fresh device UUID and
+fresh key pair.
+Browser grant planning binds explicit principal UUIDs to the canonical per-record
+scope `record`; advanced/custom/legacy rules are preserved rather than rewritten.
+The timed-release state machine is still pending — no UI or server path can
+release anything today. The local Plan
 Test checks only locally enforceable preparedness (Emergency Card
 completeness and recovery-key verification) and reports aggregate local legacy
 planning coverage; it is not a release simulation. Each regular vault item can
@@ -78,8 +98,7 @@ Rules:
 
 ## Trust Engine (V1 policy model, enforcement local-first)
 
-Target per-object policy (future encrypted payload; currently evaluated in the
-Rust core only):
+Per-object policy (persisted in the encrypted item payload and evaluated locally):
 
 ```text
 Policy {
@@ -92,14 +111,22 @@ Policy {
 ```
 
 Conditions V1: `normal | emergency | incapacity | death`.
-`emergency` maps to timer-coordinated release; the server enforces timing but
-cannot decrypt (documented limitation, no fake time-lock crypto claims).
+`emergency` maps to the planned timer-coordinated release path; the future
+coordinator will enforce timing but cannot decrypt (documented limitation, no
+fake time-lock crypto claims).
 
 V1 enforcement order: owner-only + explicit per-item grants + waiting period +
 deny/revoke wins over release. 2-of-3 threshold uses standard Shamir sharing
 over the capsule key, not custom crypto. The portable `vault-sharing` and
-`vault-emergency` cores are implemented and tested; grant persistence,
-client/session wiring, and timed-release coordination remain pending.
+`vault-emergency` cores are implemented and tested; grant persistence and local
+grant-management wiring are implemented in authenticated encrypted payloads.
+The local pairing/signing foundation now uses a dedicated Ed25519 device key
+separate from the X25519 recipient-encryption key. Pairing proves possession of
+both keys against a one-time owner challenge and persists that binding to the
+existing device UUID. This is device-key authentication, not human-identity
+verification. Future release must still verify a domain-separated signed
+request from an active paired device, resolve it to a principal UUID, and only
+then evaluate policy. Timed-release coordination remains pending.
 
 ## Recovery (no backdoor)
 
@@ -120,12 +147,18 @@ must be messaged as such in UI copy.
    2-of-3 sealed shares and decrypts vault items. Compartment-wrap key
    separation (`safeory:v1:compartment-wrap:<id>`) remains future work with
    its own review + migration.
-4. Grants/waiting-period policy engine — DONE in `vault-emergency` as the
+4. Grants/waiting-period policy engine — DONE locally in `vault-emergency` as the
    local fail-closed simulation/test harness (`evaluate`): owner-only
    default, explicit grants, approvals, waiting periods, private-forever and
-   destruction winning over release. Session/client wiring and the Durable
-   Object release coordinator come after this.
+   destruction winning over release. The policy is persisted per encrypted item;
+   stable principal UUIDs, recipient-device registry, and browser planning UX are
+   implemented. The local dual-key pairing/signing foundation plus native/WASM
+   owner-side challenge/proof verification APIs are implemented. The shipped
+   browser UI deliberately does not expose pairing until recipient-side durable
+   private-key storage and a pairing responder exist; the release coordinator
+   also remains future work.
+   Waiting periods/durations therefore remain declarative.
 5. Per-record legacy planning disposition — DONE locally as encrypted payload
    metadata with exact-revision client operations and reader UX. It is deliberately separate
-   from the Trust Engine policy object until trusted-person identity/grant
-   persistence and real enforcement are implemented.
+   from the Trust Engine policy object until real release/deletion enforcement is
+   implemented.

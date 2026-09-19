@@ -17,6 +17,7 @@ import {
   Search01Icon,
   Settings01Icon,
   ShieldCheckIcon,
+  UserMultipleIcon,
   Wallet02Icon,
 } from "@hugeicons/core-free-icons"
 import { HugeiconsIcon } from "@hugeicons/react"
@@ -26,6 +27,7 @@ import { ItemEditor } from "@/components/safeory/ItemEditor"
 import { PassphraseGate } from "@/components/safeory/PassphraseGate"
 import { RecoveryKitPanel } from "@/components/safeory/RecoveryKitPanel"
 import { TodayView } from "@/components/safeory/TodayView"
+import { TrustedPeopleEditor } from "@/components/safeory/TrustedPeopleEditor"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -56,7 +58,7 @@ import {
 } from "@/lib/vault/items"
 import { useVault, type EditableEntry } from "@/lib/vault/use-vault"
 
-type View = "today" | "items" | "emergency" | "settings"
+type View = "today" | "items" | "trusted-people" | "emergency" | "settings"
 
 const categoryIcons = {
   password: Key01Icon,
@@ -169,14 +171,15 @@ function VaultWorkspace({ vault }: { vault: Vault }) {
     setEditing(null)
   }
 
-  function saveItem(item: VaultItemJson, expectedRevision: number | null) {
-    if (expectedRevision === null) {
-      vault.putItem(item)
-    } else {
-      vault.updateItem(item, expectedRevision)
+  async function saveItem(item: VaultItemJson, expectedRevision: number | null) {
+    const saved =
+      expectedRevision === null
+        ? await vault.putItem(item)
+        : await vault.updateItem(item, expectedRevision)
+    if (saved) {
+      setCreating(false)
+      setEditing(null)
     }
-    setCreating(false)
-    setEditing(null)
   }
 
   return (
@@ -262,6 +265,24 @@ function VaultWorkspace({ vault }: { vault: Vault }) {
               <SidebarMenu>
                 <SidebarMenuItem>
                   <SidebarMenuButton
+                    tooltip="Trusted people"
+                    isActive={view === "trusted-people"}
+                    onClick={() => {
+                      setDeadlines([])
+                      setView("trusted-people")
+                      setCreating(false)
+                      setEditing(null)
+                    }}
+                  >
+                    <HugeiconsIcon icon={UserMultipleIcon} strokeWidth={2} />
+                    <span>Trusted people</span>
+                  </SidebarMenuButton>
+                  <SidebarMenuBadge className="tabular-nums">
+                    {vault.getEmergencyCard()?.card.contacts.length ?? 0}
+                  </SidebarMenuBadge>
+                </SidebarMenuItem>
+                <SidebarMenuItem>
+                  <SidebarMenuButton
                     tooltip="Emergency card"
                     isActive={view === "emergency"}
                     onClick={() => {
@@ -321,9 +342,11 @@ function VaultWorkspace({ vault }: { vault: Vault }) {
                   ? activeKind === "all"
                     ? "All items"
                     : kindLabel(activeKind)
-                  : view === "emergency"
-                    ? "Emergency card"
-                    : "Settings"}
+                  : view === "trusted-people"
+                    ? "Trusted people"
+                    : view === "emergency"
+                      ? "Emergency card"
+                      : "Settings"}
             </p>
           </div>
           <div className="ml-auto flex items-center gap-2">
@@ -485,13 +508,19 @@ function VaultWorkspace({ vault }: { vault: Vault }) {
                     }}
                     onTrash={
                       editing
-                        ? () => {
-                            vault.trashItem(editing.item.id, editing.revision)
-                            setEditing(null)
+                        ? async () => {
+                            const trashed = await vault.trashItem(
+                              editing.item.id,
+                              editing.revision
+                            )
+                            if (trashed) setEditing(null)
                           }
                         : undefined
                     }
                     generatePassword={vault.generatePassword}
+                    trustedPrincipals={
+                      vault.getEmergencyCard()?.card.principals ?? []
+                    }
                   />
                 </div>
               ) : (
@@ -517,7 +546,30 @@ function VaultWorkspace({ vault }: { vault: Vault }) {
             </div>
             <EmergencyCardEditor
               initial={vault.getEmergencyCard()?.card ?? null}
-              onSave={vault.setEmergencyCard}
+              onSaveInstructions={vault.setEmergencyInstructions}
+            />
+          </section>
+        ) : null}
+
+        {view === "trusted-people" ? (
+          <section className="mx-auto w-full max-w-3xl p-5 md:p-8 lg:p-10">
+            <div className="mb-7">
+              <p className="text-sm font-medium text-[var(--primary)]">
+                Life continuity
+              </p>
+              <h1 className="mt-1 text-2xl font-semibold tracking-tight">
+                Trusted people
+              </h1>
+              <p className="mt-2 max-w-[65ch] text-sm leading-6 text-pretty text-[var(--text-secondary)]">
+                Keep the people who should be contacted during an emergency in
+                one encrypted place.
+              </p>
+            </div>
+            <TrustedPeopleEditor
+              initialContacts={vault.getEmergencyCard()?.card.contacts ?? []}
+              initialPrincipals={vault.getEmergencyCard()?.card.principals ?? []}
+              onSaveContacts={vault.setEmergencyContacts}
+              onSavePrincipals={vault.setTrustedPrincipals}
             />
           </section>
         ) : null}
@@ -619,7 +671,9 @@ function LoadingVault() {
               />
             </div>
             <div className="min-w-0 group-data-[collapsible=icon]:hidden">
-              <p className="truncate text-sm font-semibold tracking-tight">Safeory</p>
+              <p className="truncate text-sm font-semibold tracking-tight">
+                Safeory
+              </p>
               <p className="truncate text-[11px] text-[var(--text-secondary)]">
                 Private life vault
               </p>
@@ -644,7 +698,7 @@ function LoadingVault() {
             <SidebarGroupLabel>Continuity</SidebarGroupLabel>
             <SidebarGroupContent>
               <div className="space-y-1 px-2">
-                {Array.from({ length: 2 }).map((_, index) => (
+                {Array.from({ length: 3 }).map((_, index) => (
                   <Skeleton
                     key={index}
                     className="h-8 w-full rounded-[var(--radius-default)]"
@@ -673,7 +727,9 @@ function LoadingVault() {
           aria-live="polite"
         >
           <div className="text-center">
-            <p className="text-sm font-medium text-[var(--text-primary)]">Opening Safeory</p>
+            <p className="text-sm font-medium text-[var(--text-primary)]">
+              Opening Safeory
+            </p>
             <p className="mt-1 text-xs text-[var(--text-secondary)]">
               Loading your encrypted local vault…
             </p>

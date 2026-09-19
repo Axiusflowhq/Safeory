@@ -5,8 +5,11 @@
 use wasm_bindgen::prelude::*;
 
 use vault_crypto::{RecoverySecret, SessionResumeSecret, SessionResumeWrapV1};
+use vault_sharing::PairingProofV1;
 
 use crate::{BrowserVault, DeadlineEntry, WasmVaultError, generate_strong_password};
+
+const SESSION_RESUME_PAYLOAD_VERSION: u16 = 2;
 
 fn js_err(e: WasmVaultError) -> JsValue {
     JsValue::from_str(&e.to_string())
@@ -68,7 +71,12 @@ impl WasmVault {
     #[wasm_bindgen(js_name = createSessionResumeJson)]
     pub fn create_session_resume_json(&self) -> Result<String, JsValue> {
         let (secret, wrapped) = self.inner.create_session_resume().map_err(js_err)?;
-        serde_json::to_string(&SessionResumePayload { secret, wrapped }).map_err(|_| ser_err())
+        serde_json::to_string(&SessionResumePayload {
+            format_version: SESSION_RESUME_PAYLOAD_VERSION,
+            secret,
+            wrapped,
+        })
+        .map_err(|_| ser_err())
     }
 
     /// Resume this loaded ciphertext snapshot from an opaque tab-session
@@ -77,6 +85,9 @@ impl WasmVault {
     pub fn unlock_with_session_resume_json(&mut self, payload_json: &str) -> Result<(), JsValue> {
         let payload: SessionResumePayload =
             serde_json::from_str(payload_json).map_err(|_| ser_err())?;
+        if payload.format_version != SESSION_RESUME_PAYLOAD_VERSION {
+            return Err(js_err(WasmVaultError::InvalidSessionResume));
+        }
         let secret = SessionResumeSecret::from_hex(&payload.secret)
             .map_err(|error| js_err(WasmVaultError::Crypto(error)))?;
         self.inner
@@ -204,6 +215,33 @@ impl WasmVault {
         self.inner.set_emergency_card(&card).map_err(js_err)
     }
 
+    /// Create an owner-side one-shot trusted-device pairing challenge. The
+    /// hidden verifier state remains only inside this unlocked WASM session.
+    #[wasm_bindgen(js_name = createTrustedDevicePairingChallengeJson)]
+    pub fn create_trusted_device_pairing_challenge_json(
+        &self,
+        principal_id: &str,
+        device_id: &str,
+    ) -> Result<String, JsValue> {
+        let principal_id = parse_uuid(principal_id)?;
+        let device_id = parse_uuid(device_id)?;
+        let challenge = self
+            .inner
+            .create_trusted_device_pairing_challenge(principal_id, device_id)
+            .map_err(js_err)?;
+        serde_json::to_string(&challenge).map_err(|_| ser_err())
+    }
+
+    /// Verify a recipient pairing proof against the pending one-shot challenge
+    /// and persist the Ed25519 signing-key binding on success.
+    #[wasm_bindgen(js_name = completeTrustedDevicePairingJson)]
+    pub fn complete_trusted_device_pairing_json(&self, proof_json: &str) -> Result<u64, JsValue> {
+        let proof: PairingProofV1 = serde_json::from_str(proof_json).map_err(|_| ser_err())?;
+        self.inner
+            .complete_trusted_device_pairing(&proof)
+            .map_err(js_err)
+    }
+
     /// Install a recovery kit from a hex-encoded secret.
     #[wasm_bindgen(js_name = installRecoveryKit)]
     pub fn install_recovery_kit(&self, secret_hex: &str) -> Result<(), JsValue> {
@@ -290,7 +328,9 @@ struct EmergencyCardEntry {
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SessionResumePayload {
+    format_version: u16,
     secret: String,
     wrapped: SessionResumeWrapV1,
 }

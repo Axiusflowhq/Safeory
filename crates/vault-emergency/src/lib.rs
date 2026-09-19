@@ -7,26 +7,23 @@
 //! never decrypt vault contents.
 
 use blahaj::{Share, Sharks};
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::convert::TryFrom;
 use thiserror::Error;
 use uuid::Uuid;
 use vault_crypto::{AccountRootKey, RecoverySecret};
-use vault_sharing::{DeviceKeyPair, ShareEnvelopeV1, SharePurpose};
+use vault_models::validate_access_policy;
+pub use vault_models::{
+    AccessCondition, AccessGrant, AccessPolicy, GrantDuration, LegacyCondition, Permission,
+    WaitPeriod,
+};
+use vault_sharing::{DeviceKeyPair, ShareEnvelopeV2, SharePurpose};
 use zeroize::Zeroizing;
 
-const MAX_GRANTS: usize = 64;
-const MAX_WHAT_CHARS: usize = 128;
-const MAX_APPROVERS: usize = 16;
 const MIN_SECRET_SHARES_LEN: usize = 2;
 
 #[derive(Error, Debug)]
 pub enum EmergencyError {
-    #[error("policy grant is invalid")]
-    InvalidGrant,
-    #[error("policy exceeds the supported number of grants")]
-    TooManyGrants,
     #[error("threshold configuration is invalid")]
     InvalidThreshold,
     #[error("recovery share bytes are invalid")]
@@ -39,189 +36,6 @@ pub enum EmergencyError {
     Sharing(#[from] vault_sharing::SharingError),
     #[error("cryptographic operation failed")]
     Crypto(#[from] vault_crypto::CryptoError),
-}
-
-/// Continuity condition under which a grant may apply.
-///
-/// V1 conditions per the frozen Trust Engine spec. Richer scenarios
-/// (travel, disaster, business emergency) land as compartments/policies later.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AccessCondition {
-    Normal,
-    Emergency,
-    Incapacity,
-    Death,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Permission {
-    View,
-    Edit,
-    Download,
-    Share,
-    Manage,
-}
-
-/// Server-coordinated delay before an emergency grant releases. The server
-/// enforces timing but cannot decrypt; this is documented policy enforcement,
-/// not a cryptographic time lock.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WaitPeriod {
-    Immediate,
-    OneHour,
-    OneDay,
-    SevenDays,
-    Custom(u64),
-}
-
-impl WaitPeriod {
-    #[must_use]
-    pub fn seconds(self) -> u64 {
-        match self {
-            Self::Immediate => 0,
-            Self::OneHour => 3_600,
-            Self::OneDay => 86_400,
-            Self::SevenDays => 604_800,
-            Self::Custom(seconds) => seconds,
-        }
-    }
-}
-
-/// How long a released grant stays usable. `None` from [`GrantDuration::seconds`]
-/// means "until revoked".
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GrantDuration {
-    UntilRevoked,
-    OneHour,
-    OneDay,
-    SevenDays,
-    Custom(u64),
-}
-
-impl GrantDuration {
-    #[must_use]
-    pub fn seconds(self) -> Option<u64> {
-        match self {
-            Self::UntilRevoked => None,
-            Self::OneHour => Some(3_600),
-            Self::OneDay => Some(86_400),
-            Self::SevenDays => Some(604_800),
-            Self::Custom(seconds) => Some(seconds),
-        }
-    }
-}
-
-/// Legacy/destruction condition that destroys designated keys instead of
-/// releasing them. Destruction and deny always win over release.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LegacyCondition {
-    Death,
-}
-
-/// One conditional grant of `what` to `trustee_id`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AccessGrant {
-    pub trustee_id: Uuid,
-    pub what: String,
-    pub permission: Permission,
-    pub condition: AccessCondition,
-    pub wait_period: WaitPeriod,
-    pub duration: GrantDuration,
-    pub approvals_required: u8,
-    pub approver_ids: BTreeSet<Uuid>,
-}
-
-impl AccessGrant {
-    /// Validates invariants: bounded `what`, approvals only from a declared
-    /// approver pool that excludes the trustee, and non-degenerate thresholds.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        trustee_id: Uuid,
-        what: impl Into<String>,
-        permission: Permission,
-        condition: AccessCondition,
-        wait_period: WaitPeriod,
-        duration: GrantDuration,
-        approvals_required: u8,
-        approver_ids: BTreeSet<Uuid>,
-    ) -> Result<Self, EmergencyError> {
-        let what = what.into();
-        if what.is_empty() || what.chars().count() > MAX_WHAT_CHARS {
-            return Err(EmergencyError::InvalidGrant);
-        }
-        // Bounded pool keeps approval counting exact and persisted policies small.
-        if approver_ids.len() > MAX_APPROVERS {
-            return Err(EmergencyError::InvalidGrant);
-        }
-        if matches!(wait_period, WaitPeriod::Custom(0)) {
-            return Err(EmergencyError::InvalidGrant);
-        }
-        if approvals_required > 0
-            && (usize::from(approvals_required) > approver_ids.len()
-                || approver_ids.contains(&trustee_id))
-        {
-            return Err(EmergencyError::InvalidGrant);
-        }
-        Ok(Self {
-            trustee_id,
-            what,
-            permission,
-            condition,
-            wait_period,
-            duration,
-            approvals_required,
-            approver_ids,
-        })
-    }
-}
-
-/// Per-object conditional access policy (encrypted inside the item payload).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AccessPolicy {
-    pub owner_only_default: bool,
-    pub grants: Vec<AccessGrant>,
-    pub private_forever: bool,
-    pub destruction: Option<LegacyCondition>,
-}
-
-impl AccessPolicy {
-    #[must_use]
-    pub fn new(owner_only_default: bool) -> Self {
-        Self {
-            owner_only_default,
-            grants: Vec::new(),
-            private_forever: false,
-            destruction: None,
-        }
-    }
-
-    /// Adds or replaces the grant for the same (trustee, what, condition)
-    /// triple so conflicting rules cannot accumulate silently.
-    pub fn add_grant(&mut self, grant: AccessGrant) -> Result<(), EmergencyError> {
-        if self.grants.len() >= MAX_GRANTS {
-            return Err(EmergencyError::TooManyGrants);
-        }
-        self.grants.retain(|g| {
-            !(g.trustee_id == grant.trustee_id
-                && g.what == grant.what
-                && g.condition == grant.condition)
-        });
-        self.grants.push(grant);
-        Ok(())
-    }
-
-    pub fn set_private_forever(&mut self) {
-        self.private_forever = true;
-    }
-
-    pub fn destroy_on(&mut self, condition: LegacyCondition) {
-        self.destruction = Some(condition);
-    }
 }
 
 /// Distinct approvals presented when requesting access.
@@ -257,7 +71,7 @@ pub enum AccessDecision {
     Destroyed,
 }
 
-/// Evaluates the policy for `trustee_id` under `condition`.
+/// Evaluates the policy for `trustee_id` and object scope `what` under `condition`.
 ///
 /// Enforcement order per the Trust Engine spec: destruction/deny wins over
 /// release, private-forever blocks death grants, explicit grants only, then
@@ -265,10 +79,14 @@ pub enum AccessDecision {
 #[must_use]
 pub fn evaluate(
     policy: &AccessPolicy,
+    what: &str,
     condition: AccessCondition,
     trustee_id: Uuid,
     approvals: &ApprovalProof,
 ) -> AccessDecision {
+    if validate_access_policy(policy).is_err() {
+        return AccessDecision::Denied;
+    }
     if policy.destruction == Some(LegacyCondition::Death) && condition == AccessCondition::Death {
         return AccessDecision::Destroyed;
     }
@@ -278,7 +96,7 @@ pub fn evaluate(
     let Some(grant) = policy
         .grants
         .iter()
-        .find(|g| g.trustee_id == trustee_id && g.condition == condition)
+        .find(|g| g.trustee_id == trustee_id && g.what == what && g.condition == condition)
     else {
         return AccessDecision::Denied;
     };
@@ -398,15 +216,15 @@ where
 /// Seals one recovery share to a trusted person's device public key. The
 /// backend only ever transports the returned envelope.
 pub fn seal_recovery_share(
-    sender_public: &[u8; 32],
+    sender: &DeviceKeyPair,
     recipient_public: &[u8; 32],
     share_bytes: &[u8],
-) -> Result<ShareEnvelopeV1, EmergencyError> {
+) -> Result<ShareEnvelopeV2, EmergencyError> {
     if share_bytes.len() < MIN_SECRET_SHARES_LEN {
         return Err(EmergencyError::InvalidShare);
     }
     Ok(vault_sharing::seal(
-        sender_public,
+        sender,
         recipient_public,
         share_bytes,
         SharePurpose::RecoveryShare,
@@ -415,7 +233,7 @@ pub fn seal_recovery_share(
 
 /// Opens a recovery-share envelope that was sealed for this device.
 pub fn open_recovery_share(
-    envelope: &ShareEnvelopeV1,
+    envelope: &ShareEnvelopeV2,
     recipient: &DeviceKeyPair,
     sender_public: &[u8; 32],
 ) -> Result<Zeroizing<Vec<u8>>, EmergencyError> {
@@ -459,6 +277,7 @@ mod tests {
         assert_eq!(
             evaluate(
                 &policy,
+                "life-insurance",
                 AccessCondition::Emergency,
                 Uuid::new_v4(),
                 &ApprovalProof::default()
@@ -484,6 +303,7 @@ mod tests {
         assert_eq!(
             evaluate(
                 &policy,
+                "life-insurance",
                 AccessCondition::Emergency,
                 wife,
                 &ApprovalProof::default()
@@ -497,6 +317,7 @@ mod tests {
         assert_eq!(
             evaluate(
                 &policy,
+                "life-insurance",
                 AccessCondition::Normal,
                 wife,
                 &ApprovalProof::default()
@@ -506,6 +327,7 @@ mod tests {
         assert_eq!(
             evaluate(
                 &policy,
+                "life-insurance",
                 AccessCondition::Emergency,
                 Uuid::new_v4(),
                 &ApprovalProof::default()
@@ -531,6 +353,7 @@ mod tests {
         assert_eq!(
             evaluate(
                 &policy,
+                "life-insurance",
                 AccessCondition::Emergency,
                 wife,
                 &ApprovalProof::default()
@@ -560,6 +383,7 @@ mod tests {
 
         let one = evaluate(
             &policy,
+            "life-insurance",
             AccessCondition::Incapacity,
             trustee,
             &ApprovalProof::new([father]),
@@ -576,6 +400,7 @@ mod tests {
         let outsider = Uuid::new_v4();
         let with_outsider = evaluate(
             &policy,
+            "life-insurance",
             AccessCondition::Incapacity,
             trustee,
             &ApprovalProof::new([father, outsider]),
@@ -590,6 +415,7 @@ mod tests {
 
         let two = evaluate(
             &policy,
+            "life-insurance",
             AccessCondition::Incapacity,
             trustee,
             &ApprovalProof::new([lawyer, brother]),
@@ -619,6 +445,7 @@ mod tests {
         assert_eq!(
             evaluate(
                 &policy,
+                "life-insurance",
                 AccessCondition::Death,
                 wife,
                 &ApprovalProof::default()
@@ -643,6 +470,7 @@ mod tests {
         assert_eq!(
             evaluate(
                 &private_policy,
+                "life-insurance",
                 AccessCondition::Death,
                 wife,
                 &ApprovalProof::default()
@@ -668,6 +496,7 @@ mod tests {
         assert_eq!(
             evaluate(
                 &policy,
+                "life-insurance",
                 AccessCondition::Death,
                 wife,
                 &ApprovalProof::default()
@@ -677,6 +506,7 @@ mod tests {
         assert_eq!(
             evaluate(
                 &policy,
+                "life-insurance",
                 AccessCondition::Emergency,
                 wife,
                 &ApprovalProof::default()
@@ -794,11 +624,131 @@ mod tests {
         assert_eq!(
             evaluate(
                 &policy,
+                "life-insurance",
                 AccessCondition::Emergency,
                 wife,
                 &ApprovalProof::default()
             ),
             AccessDecision::Waiting { seconds: 86_400 }
+        );
+    }
+
+    #[test]
+    fn evaluation_selects_the_requested_grant_scope() {
+        let trustee = Uuid::new_v4();
+        let mut policy = AccessPolicy::new(true);
+        policy
+            .add_grant(
+                AccessGrant::new(
+                    trustee,
+                    "life-insurance",
+                    Permission::View,
+                    AccessCondition::Emergency,
+                    WaitPeriod::Immediate,
+                    GrantDuration::UntilRevoked,
+                    0,
+                    BTreeSet::new(),
+                )
+                .expect("first grant"),
+            )
+            .expect("add first grant");
+        policy
+            .add_grant(
+                AccessGrant::new(
+                    trustee,
+                    "house-deed",
+                    Permission::Download,
+                    AccessCondition::Emergency,
+                    WaitPeriod::Immediate,
+                    GrantDuration::UntilRevoked,
+                    0,
+                    BTreeSet::new(),
+                )
+                .expect("second grant"),
+            )
+            .expect("add second grant");
+
+        assert_eq!(
+            evaluate(
+                &policy,
+                "house-deed",
+                AccessCondition::Emergency,
+                trustee,
+                &ApprovalProof::default(),
+            ),
+            AccessDecision::Granted {
+                permission: Permission::Download,
+                duration_seconds: None,
+            }
+        );
+        assert_eq!(
+            evaluate(
+                &policy,
+                "missing-scope",
+                AccessCondition::Emergency,
+                trustee,
+                &ApprovalProof::default(),
+            ),
+            AccessDecision::Denied
+        );
+    }
+
+    #[test]
+    fn replacing_existing_scope_succeeds_at_grant_limit() {
+        let trustee = Uuid::new_v4();
+        let mut policy = AccessPolicy::new(true);
+        for index in 0..vault_models::MAX_ACCESS_GRANTS {
+            policy
+                .add_grant(
+                    AccessGrant::new(
+                        trustee,
+                        format!("scope-{index}"),
+                        Permission::View,
+                        AccessCondition::Emergency,
+                        WaitPeriod::Immediate,
+                        GrantDuration::UntilRevoked,
+                        0,
+                        BTreeSet::new(),
+                    )
+                    .expect("valid grant"),
+                )
+                .expect("fill grant capacity");
+        }
+
+        policy
+            .add_grant(
+                AccessGrant::new(
+                    trustee,
+                    "scope-0",
+                    Permission::Manage,
+                    AccessCondition::Emergency,
+                    WaitPeriod::Immediate,
+                    GrantDuration::UntilRevoked,
+                    0,
+                    BTreeSet::new(),
+                )
+                .expect("replacement grant"),
+            )
+            .expect("replacement at capacity");
+
+        assert_eq!(policy.grants.len(), vault_models::MAX_ACCESS_GRANTS);
+        assert_eq!(policy.grants[0].permission, Permission::Manage);
+        assert!(
+            policy
+                .add_grant(
+                    AccessGrant::new(
+                        trustee,
+                        "overflow",
+                        Permission::View,
+                        AccessCondition::Emergency,
+                        WaitPeriod::Immediate,
+                        GrantDuration::UntilRevoked,
+                        0,
+                        BTreeSet::new(),
+                    )
+                    .expect("overflow grant shape"),
+                )
+                .is_err()
         );
     }
 
@@ -840,14 +790,11 @@ mod tests {
         let lawyer = DeviceKeyPair::generate().expect("lawyer device");
 
         let wife_envelope =
-            seal_recovery_share(&owner.public_bytes(), &wife.public_bytes(), &shares[0])
-                .expect("seal wife share");
-        let brother_envelope =
-            seal_recovery_share(&owner.public_bytes(), &brother.public_bytes(), &shares[1])
-                .expect("seal brother share");
-        let lawyer_envelope =
-            seal_recovery_share(&owner.public_bytes(), &lawyer.public_bytes(), &shares[2])
-                .expect("seal lawyer share");
+            seal_recovery_share(&owner, &wife.public_bytes(), &shares[0]).expect("seal wife share");
+        let brother_envelope = seal_recovery_share(&owner, &brother.public_bytes(), &shares[1])
+            .expect("seal brother share");
+        let lawyer_envelope = seal_recovery_share(&owner, &lawyer.public_bytes(), &shares[2])
+            .expect("seal lawyer share");
 
         // Each device can only open its own envelope.
         let wife_share =

@@ -8,4 +8,8 @@ export type {
   DeadlineSummary,
   EmergencyCard,
   EmergencyContact,
+  TrustedDevice,
+  TrustedPrincipal,
+  PairingChallengeV1,
+  PairingProofV1,
 } from "./session";

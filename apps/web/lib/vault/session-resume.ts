@@ -1,3 +1,5 @@
+import type { VaultSession } from "@safeory/contracts"
+
 const SESSION_RESUME_KEY = "safeory:session-resume:v1"
 const MAX_SESSION_RESUME_BYTES = 4 * 1024
 
@@ -46,6 +48,38 @@ export function saveSessionResume(payload: string): void {
     // The vault remains usable; it simply falls back to requiring unlock on
     // the next reload.
   }
+}
+
+/**
+ * Rotate the generation-bound reload credential and only publish it to
+ * sessionStorage after the encrypted snapshot mutation is durably persisted.
+ *
+ * Browser storage or non-durability issuance failures degrade to requiring a
+ * normal unlock after reload. A durability failure means the session itself is
+ * poisoned, so it must propagate to the caller's fail-closed recovery path.
+ */
+export async function refreshSessionResume(
+  session: Pick<VaultSession, "createSessionResume">
+): Promise<void> {
+  try {
+    saveSessionResume(await session.createSessionResume())
+  } catch (error) {
+    clearSessionResume()
+    if (error instanceof Error && error.name === "VaultDurabilityError")
+      throw error
+  }
+}
+
+/** Resume a persisted snapshot and rotate its one-use reload credential. */
+export async function resumeSessionFromReload(
+  session: Pick<
+    VaultSession,
+    "createSessionResume" | "unlockWithSessionResume"
+  >,
+  payload: string
+): Promise<void> {
+  await session.unlockWithSessionResume(payload)
+  await refreshSessionResume(session)
 }
 
 export function clearSessionResume(): boolean {

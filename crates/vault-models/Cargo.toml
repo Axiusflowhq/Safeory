@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 name = "vault-models"
 version = "0.1.0"
 edition.workspace = true
@@ -6,9 +6,11 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+ed25519-dalek.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
+x25519-dalek.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

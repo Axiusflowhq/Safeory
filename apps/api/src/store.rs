@@ -229,7 +229,10 @@ impl MetadataStore {
             .await?;
         }
 
-        transaction.commit().await?;
+        transaction
+            .commit()
+            .await
+            .map_err(CommitError::CommitOutcomeUnknown)?;
         let previous_storage_key = current.as_ref().map(|object| object.storage_key.clone());
         Ok(CommitResult {
             object: StoredObject {
@@ -283,6 +286,8 @@ pub(crate) enum StoreError {
 pub(crate) enum CommitError {
     #[error("PostgreSQL operation failed")]
     Database(#[from] sqlx::Error),
+    #[error("PostgreSQL commit outcome is unknown")]
+    CommitOutcomeUnknown(sqlx::Error),
     #[error("stored ciphertext metadata is invalid")]
     Store(#[from] StoreError),
     #[error("write precondition failed")]

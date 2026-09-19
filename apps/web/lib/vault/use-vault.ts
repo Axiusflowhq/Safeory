@@ -6,13 +6,16 @@ import {
   VaultDurabilityError,
   type DeadlineSummary,
   type EmergencyCard,
+  type EmergencyContact,
+  type TrustedPrincipal,
   type VaultSession,
 } from "@safeory/contracts"
 import { newId, type VaultItemJson } from "./items"
 import {
   clearSessionResume,
   loadSessionResumeForReload,
-  saveSessionResume,
+  refreshSessionResume,
+  resumeSessionFromReload,
 } from "./session-resume"
 import { loadVaultSession, wasmStatics } from "./vault"
 
@@ -42,16 +45,9 @@ function localTodayYmd(): string {
   return `${year}-${month}-${day}`
 }
 
-function refreshSessionResume(session: VaultSession): void {
-  try {
-    saveSessionResume(session.createSessionResume())
-  } catch {
-    clearSessionResume()
-  }
-}
-
 export function useVault() {
   const sessionRef = useRef<VaultSession | null>(null)
+  const operationTailRef = useRef<Promise<void>>(Promise.resolve())
   const [phase, setPhase] = useState<VaultPhase>("loading")
   const [items, setItems] = useState<ListedEntry[]>([])
   const [error, setError] = useState<string | null>(null)
@@ -81,7 +77,7 @@ export function useVault() {
     let active = true
 
     loadVaultSession()
-      .then((session) => {
+      .then(async (session) => {
         if (!active) return
         sessionRef.current = session
         if (!session.isInitialized()) {
@@ -93,15 +89,15 @@ export function useVault() {
         const resumePayload = loadSessionResumeForReload()
         if (resumePayload !== null) {
           try {
-            session.unlockWithSessionResume(resumePayload)
-          } catch {
+            await resumeSessionFromReload(session, resumePayload)
+          } catch (resumeError) {
             session.lock()
             clearSessionResume()
+            if (resumeError instanceof VaultDurabilityError) throw resumeError
             setPhase("unlock")
             return
           }
 
-          refreshSessionResume(session)
           try {
             refresh()
           } catch (resumeRefreshError) {
@@ -128,14 +124,18 @@ export function useVault() {
   }, [refresh])
 
   const run = useCallback(
-    (operation: (session: VaultSession) => void | Promise<void>) => {
+    (operation: (session: VaultSession) => void | Promise<void>): Promise<boolean> => {
       const session = sessionRef.current
-      if (!session) return
+      if (!session) return Promise.resolve(false)
 
       setError(null)
-      void Promise.resolve()
-        .then(() => operation(session))
-        .then(() => refresh())
+      const task = operationTailRef.current
+        .then(async () => {
+          if (sessionRef.current !== session) return false
+          await operation(session)
+          refresh()
+          return true
+        })
         .catch((operationError: unknown) => {
           if (operationError instanceof VaultDurabilityError) {
             clearSessionResume()
@@ -146,10 +146,16 @@ export function useVault() {
             setGeneratedSecret(null)
             setError(errorMessage(operationError))
             setPhase("load_error")
-            return
+            return false
           }
           setError(errorMessage(operationError))
+          return false
         })
+      operationTailRef.current = task.then(
+        () => undefined,
+        () => undefined
+      )
+      return task
     },
     [refresh]
   )
@@ -158,7 +164,7 @@ export function useVault() {
     (passphrase: string) =>
       run(async (session) => {
         await session.create(passphrase)
-        refreshSessionResume(session)
+        await refreshSessionResume(session)
         setPhase("open")
       }),
     [run]
@@ -166,9 +172,9 @@ export function useVault() {
 
   const unlock = useCallback(
     (passphrase: string) =>
-      run((session) => {
-        session.unlock(passphrase)
-        refreshSessionResume(session)
+      run(async (session) => {
+        await session.unlock(passphrase)
+        await refreshSessionResume(session)
         setPhase("open")
       }),
     [run]
@@ -176,9 +182,9 @@ export function useVault() {
 
   const unlockWithRecoveryKit = useCallback(
     (secretHex: string) =>
-      run((session) => {
-        session.unlockWithRecoveryKit(secretHex)
-        refreshSessionResume(session)
+      run(async (session) => {
+        await session.unlockWithRecoveryKit(secretHex)
+        await refreshSessionResume(session)
         setPhase("open")
       }),
     [run]
@@ -187,7 +193,9 @@ export function useVault() {
   const lock = useCallback(() => {
     try {
       if (!clearSessionResume()) {
-        setError("Unable to securely clear this tab's reload credential. The vault remains unlocked.")
+        setError(
+          "Unable to securely clear this tab's reload credential. The vault remains unlocked."
+        )
         return
       }
       sessionRef.current?.lock()
@@ -260,6 +268,57 @@ export function useVault() {
     [run]
   )
 
+  const setEmergencyContacts = useCallback(
+    (contacts: EmergencyContact[]) =>
+      run(async (session) => {
+        const current = session.getEmergencyCard()?.card ?? {
+          selected_item_ids: [],
+          contacts: [],
+          principals: [],
+          retired_principal_ids: [],
+          retired_device_ids: [],
+          retired_signing_public_key_hexes: [],
+          instructions: "",
+        }
+        await session.setEmergencyCard({ ...current, contacts })
+      }),
+    [run]
+  )
+
+  const setEmergencyInstructions = useCallback(
+    (instructions: string) =>
+      run(async (session) => {
+        const current = session.getEmergencyCard()?.card ?? {
+          selected_item_ids: [],
+          contacts: [],
+          principals: [],
+          retired_principal_ids: [],
+          retired_device_ids: [],
+          retired_signing_public_key_hexes: [],
+          instructions: "",
+        }
+        await session.setEmergencyCard({ ...current, instructions })
+      }),
+    [run]
+  )
+
+  const setTrustedPrincipals = useCallback(
+    (principals: TrustedPrincipal[]) =>
+      run(async (session) => {
+        const current = session.getEmergencyCard()?.card ?? {
+          selected_item_ids: [],
+          contacts: [],
+          principals: [],
+          retired_principal_ids: [],
+          retired_device_ids: [],
+          retired_signing_public_key_hexes: [],
+          instructions: "",
+        }
+        await session.setEmergencyCard({ ...current, principals })
+      }),
+    [run]
+  )
+
   const installRecoveryKit = useCallback(
     () =>
       run(async (session) => {
@@ -300,6 +359,9 @@ export function useVault() {
     getDeadlines,
     getEmergencyCard,
     setEmergencyCard,
+    setEmergencyContacts,
+    setEmergencyInstructions,
+    setTrustedPrincipals,
     installRecoveryKit,
     clearGeneratedSecret,
   }

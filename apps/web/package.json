@@ -8,7 +8,8 @@
     "build": "next build && node scripts/generate-csp.mjs",
     "lint": "eslint",
     "format": "prettier --write \"**/*.{ts,tsx}\"",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test tests/items.test.mjs tests/session-resume.test.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",

@@ -8,9 +8,11 @@
     "build": "corepack pnpm run build:wasm && corepack pnpm --filter @safeory/web --filter @safeory/extension build",
     "typecheck": "corepack pnpm --filter @safeory/contracts --filter @safeory/web --filter @safeory/extension typecheck",
     "lint": "corepack pnpm --filter @safeory/contracts --filter @safeory/web --filter @safeory/extension lint",
-    "audit:js": "pnpm audit --prod",
+    "audit:js": "corepack pnpm audit --prod",
     "check:icons": "node scripts/check-icon-policy.mjs",
     "test:rust": "cargo test --workspace",
-    "test:contracts": "corepack pnpm --filter @safeory/contracts test"
+    "test:contracts": "corepack pnpm --filter @safeory/contracts test",
+    "test:wasm": "corepack pnpm run build:wasm && node crates/vault-wasm/smoke.test.mjs",
+    "test:browser": "corepack pnpm --filter @safeory/contracts --filter @safeory/web --filter @safeory/extension test && corepack pnpm run test:wasm"
   }
 }

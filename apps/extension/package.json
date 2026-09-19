@@ -7,7 +7,8 @@
   "scripts": {
     "build": "tsc -b && vite build && vite build -c vite.background.config.ts && vite build -c vite.content.config.ts && node scripts/copy-manifest.mjs",
     "typecheck": "tsc -b --pretty false",
-    "lint": "oxlint src vite.config.ts vite.background.config.ts vite.content.config.ts"
+    "lint": "oxlint src vite.config.ts vite.background.config.ts vite.content.config.ts",
+    "test": "node --test tests/mutation.test.ts"
   },
   "dependencies": {
     "@safeory/contracts": "workspace:*",

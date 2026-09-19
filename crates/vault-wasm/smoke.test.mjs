@@ -28,6 +28,12 @@ const item = {
   attachments: [],
   legacy_disposition: "unspecified",
   account_closure_plan: { disposition: "unspecified", instructions: "" },
+  access_policy: {
+    owner_only_default: true,
+    grants: [],
+    private_forever: false,
+    destruction: null,
+  },
   fields: { body: "hunter2" },
   notes: null,
 };
@@ -73,7 +79,23 @@ if (restored2.isUnlocked()) throw new Error("wrong passphrase must not unlock");
 
 // 8. Emergency Card: null initially, set + read + hidden from list.
 if (restored.getEmergencyCardJson() !== null) throw new Error("card should be absent initially");
-const card = { selected_item_ids: [item.id], contacts: [], instructions: "Call my sister" };
+const principalId = "22222222-2222-4222-8222-222222222222";
+const deviceId = "33333333-3333-4333-8333-333333333333";
+const deviceKey = "09" + "00".repeat(31);
+const card = {
+  selected_item_ids: [item.id],
+  contacts: [],
+  principals: [{
+    id: principalId,
+    name: "Ada",
+    relation: "Sibling",
+    devices: [{ id: deviceId, label: "Phone", encryption_public_key_hex: deviceKey }],
+  }],
+  retired_principal_ids: [],
+  retired_device_ids: [],
+  retired_signing_public_key_hexes: [],
+  instructions: "Call my sister",
+};
 const cardRev = restored.setEmergencyCardJson(JSON.stringify(card));
 if (cardRev !== 1n) throw new Error("card create should be revision 1, got " + cardRev);
 const cardBack = JSON.parse(restored.getEmergencyCardJson());
@@ -82,7 +104,44 @@ if (JSON.parse(restored.listItemsJson()).length !== 1) {
   throw new Error("emergency card must be hidden from the item list");
 }
 
-// 9. Recovery kit: generate, install, verify, unlock fresh instance with it.
+// 9. v10-compatible trusted-principal + access-policy round trip through real WASM.
+const itemWithGrant = JSON.parse(restored.getItemJson(item.id));
+itemWithGrant.access_policy.grants.push({
+  trustee_id: principalId,
+  what: "record",
+  permission: "view",
+  condition: "emergency",
+  wait_period: "one_day",
+  duration: "until_revoked",
+  approvals_required: 0,
+  approver_ids: [],
+});
+const itemRev = restored.updateItemJson(JSON.stringify(itemWithGrant), 0n);
+if (itemRev !== 1n) throw new Error("grant update should advance item revision to 1");
+const granted = JSON.parse(restored.getItemJson(item.id));
+if (granted.access_policy.grants[0]?.trustee_id !== principalId) {
+  throw new Error("principal-bound access grant did not round trip");
+}
+
+const withoutPrincipal = { ...cardBack.card, principals: [] };
+const cardRev2 = restored.setEmergencyCardJson(JSON.stringify(withoutPrincipal));
+if (cardRev2 !== 2n) throw new Error("principal removal should advance card revision to 2");
+const retiredCard = JSON.parse(restored.getEmergencyCardJson()).card;
+if (!retiredCard.retired_principal_ids.includes(principalId)) {
+  throw new Error("removed principal UUID was not retired");
+}
+if (!retiredCard.retired_device_ids.includes(deviceId)) {
+  throw new Error("removed device UUID was not retired");
+}
+let revivalFailed = false;
+try {
+  restored.setEmergencyCardJson(JSON.stringify({ ...retiredCard, principals: card.principals }));
+} catch {
+  revivalFailed = true;
+}
+if (!revivalFailed) throw new Error("retired principal UUID must not be reusable");
+
+// 10. Recovery kit: generate, install, verify, unlock fresh instance with it.
 const secretHex = WasmVault.generateRecoverySecret();
 if (!/^[0-9a-f]{64}$/.test(secretHex)) throw new Error("recovery secret should be 64 hex chars");
 restored.installRecoveryKit(secretHex);
@@ -96,7 +155,7 @@ if (JSON.parse(viaKit.getItemJson(item.id)).title !== "Bank password") {
   throw new Error("recovery-kit-unlocked decrypt mismatch");
 }
 
-// 10. Password generation: length + all character classes.
+// 11. Password generation: length + all character classes.
 const pw = WasmVault.generatePassword(24);
 if (pw.length !== 24) throw new Error("password length mismatch");
 for (const re of [/[a-z]/, /[A-Z]/, /[0-9]/, /[^A-Za-z0-9]/]) {

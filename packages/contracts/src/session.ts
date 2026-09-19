@@ -30,6 +30,8 @@ export interface WasmVaultLike {
   trashItem(id: string, expectedRevision: number | bigint, deletedAtMs: number | bigint): bigint;
   getEmergencyCardJson(): string | null;
   setEmergencyCardJson(cardJson: string): bigint;
+  createTrustedDevicePairingChallengeJson(principalId: string, deviceId: string): string;
+  completeTrustedDevicePairingJson(proofJson: string): bigint;
   installRecoveryKit(secretHex: string): void;
   hasRecoveryKit(): boolean;
   verifyRecoveryKit(secretHex: string): boolean;
@@ -68,9 +70,52 @@ export interface EmergencyContact {
   notes: string;
 }
 
+export interface TrustedDevice {
+  id: string;
+  label: string;
+  /** X25519 recipient-encryption key; not sender authentication by itself. */
+  encryption_public_key_hex: string;
+  /** Ed25519 verification key installed only after the dedicated dual-key pairing proof. */
+  signing_public_key_hex: string | null;
+}
+
+export interface TrustedPrincipal {
+  id: string;
+  name: string;
+  relation: string;
+  devices: TrustedDevice[];
+}
+
+export interface PairingChallengeV1 {
+  format_version: 1;
+  request_id: string;
+  principal_id: string;
+  device_id: string;
+  encryption_public: number[];
+  verifier_ephemeral_public: number[];
+  nonce: number[];
+  ciphertext: number[];
+}
+
+export interface PairingProofV1 {
+  format_version: 1;
+  request_id: string;
+  principal_id: string;
+  device_id: string;
+  signing_public: number[];
+  encryption_public: number[];
+  verifier_ephemeral_public: number[];
+  challenge: number[];
+  signature: number[];
+}
+
 export interface EmergencyCard {
   selected_item_ids: string[];
   contacts: EmergencyContact[];
+  principals: TrustedPrincipal[];
+  retired_principal_ids: string[];
+  retired_device_ids: string[];
+  retired_signing_public_key_hexes: string[];
   instructions: string;
 }
 
@@ -129,16 +174,34 @@ export class VaultSession {
     this.vault.lock();
   }
 
-  /** Create an opaque, session-scoped browser reload credential. */
-  createSessionResume(): string {
-    this.assertHealthy();
-    return this.vault.createSessionResumeJson();
+  /**
+   * Rotate and durably persist the generation-bound browser reload credential.
+   * The credential is returned only after the snapshot CAS succeeds, so a
+   * concurrent tab cannot successfully issue a resume credential from stale
+   * persisted state.
+   */
+  createSessionResume(): Promise<string> {
+    return this.mutateAndPersist(() => this.vault.createSessionResumeJson());
   }
 
-  /** Resume a loaded ciphertext snapshot from an opaque reload credential. */
-  unlockWithSessionResume(payloadJson: string): void {
-    this.assertHealthy();
-    this.vault.unlockWithSessionResumeJson(payloadJson);
+  /**
+   * Resume from the latest durable snapshot. Re-reading IndexedDB before
+   * authentication prevents a tab that loaded an older snapshot from replaying
+   * a credential invalidated by another tab's successful rotation.
+   */
+  unlockWithSessionResume(payloadJson: string): Promise<void> {
+    return this.enqueueMutation(async () => {
+      this.assertHealthy();
+      const latest = await loadSnapshot();
+      this.assertHealthy();
+      if (latest.version !== this.persistenceVersion) {
+        const refreshed = this.factory(latest.snapshotJson);
+        refreshed.lock();
+        this.vault = refreshed;
+        this.persistenceVersion = latest.version;
+      }
+      this.vault.unlockWithSessionResumeJson(payloadJson);
+    });
   }
 
   /** Add a new item; persists the updated ciphertext snapshot. */
@@ -194,6 +257,25 @@ export class VaultSession {
   /** Set the Emergency Card; persists and returns the new revision. */
   async setEmergencyCard(card: EmergencyCard): Promise<bigint> {
     return this.mutateAndPersist(() => this.vault.setEmergencyCardJson(JSON.stringify(card)));
+  }
+
+  /** Create a one-shot owner-side pairing challenge. Pending verifier state is
+   * session-local and is lost on lock/reload. This does not mutate ciphertext. */
+  createTrustedDevicePairingChallenge(
+    principalId: string,
+    deviceId: string
+  ): PairingChallengeV1 {
+    this.assertHealthy();
+    return JSON.parse(
+      this.vault.createTrustedDevicePairingChallengeJson(principalId, deviceId)
+    ) as PairingChallengeV1;
+  }
+
+  /** Verify a recipient response and persist the resulting signing-key binding. */
+  async completeTrustedDevicePairing(proof: PairingProofV1): Promise<bigint> {
+    return this.mutateAndPersist(() =>
+      this.vault.completeTrustedDevicePairingJson(JSON.stringify(proof))
+    );
   }
 
   /** Install a recovery kit from a hex secret; persists the new wrap. */

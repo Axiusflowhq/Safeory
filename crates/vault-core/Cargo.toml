@@ -12,6 +12,7 @@ thiserror.workspace = true
 uuid.workspace = true
 vault-crypto = { path = "../vault-crypto", version = "=0.1.0" }
 vault-models = { path = "../vault-models", version = "=0.1.0" }
+vault-sharing = { path = "../vault-sharing", version = "=0.1.0" }
 vault-storage = { path = "../vault-storage", version = "=0.1.0" }
 
 [dev-dependencies]

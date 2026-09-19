@@ -11,7 +11,9 @@ use sha2::Sha256;
 use std::collections::BTreeMap;
 use thiserror::Error;
 use uuid::Uuid;
-use vault_models::{AccountClosurePlan, ItemKind, LegacyDisposition, VaultItem, VaultItemState};
+use vault_models::{
+    AccessPolicy, AccountClosurePlan, ItemKind, LegacyDisposition, VaultItem, VaultItemState,
+};
 use zeroize::Zeroizing;
 
 const FORMAT_VERSION: u16 = 1;
@@ -21,7 +23,10 @@ const ATTACHMENT_ITEM_PAYLOAD_SCHEMA_VERSION: u16 = 3;
 const LEGACY_DISPOSITION_ITEM_PAYLOAD_SCHEMA_VERSION: u16 = 4;
 const ACCOUNT_CLOSURE_ITEM_PAYLOAD_SCHEMA_VERSION: u16 = 5;
 const INVENTORY_ITEM_PAYLOAD_SCHEMA_VERSION: u16 = 6;
-const ITEM_PAYLOAD_SCHEMA_VERSION: u16 = 7;
+const EMERGENCY_CARD_EMAIL_ITEM_PAYLOAD_SCHEMA_VERSION: u16 = 7;
+const ACCESS_POLICY_ITEM_PAYLOAD_SCHEMA_VERSION: u16 = 8;
+const TRUSTED_PRINCIPAL_ITEM_PAYLOAD_SCHEMA_VERSION: u16 = 9;
+const ITEM_PAYLOAD_SCHEMA_VERSION: u16 = 10;
 const ATTACHMENT_PAYLOAD_SCHEMA_VERSION: u16 = 1;
 const ALGORITHM: &str = "xchacha20poly1305";
 const ITEM_WRAP_INFO: &[u8] = b"lifevault:v1:item-wrap";
@@ -96,6 +101,7 @@ impl From<PreDispositionVaultItem> for VaultItem {
             attachments: item.attachments,
             legacy_disposition: LegacyDisposition::Unspecified,
             account_closure_plan: AccountClosurePlan::default(),
+            access_policy: AccessPolicy::default(),
             fields: item.fields,
             notes: item.notes,
         }
@@ -126,6 +132,7 @@ impl From<PreClosureVaultItem> for VaultItem {
             attachments: item.attachments,
             legacy_disposition: item.legacy_disposition,
             account_closure_plan: AccountClosurePlan::default(),
+            access_policy: AccessPolicy::default(),
             fields: item.fields,
             notes: item.notes,
         }
@@ -873,6 +880,9 @@ pub fn decrypt_item_state(
 ) -> Result<VaultItemState, CryptoError> {
     ensure_supported(encrypted.format_version, &encrypted.algorithm)?;
     if encrypted.payload_schema_version != ITEM_PAYLOAD_SCHEMA_VERSION
+        && encrypted.payload_schema_version != TRUSTED_PRINCIPAL_ITEM_PAYLOAD_SCHEMA_VERSION
+        && encrypted.payload_schema_version != ACCESS_POLICY_ITEM_PAYLOAD_SCHEMA_VERSION
+        && encrypted.payload_schema_version != EMERGENCY_CARD_EMAIL_ITEM_PAYLOAD_SCHEMA_VERSION
         && encrypted.payload_schema_version != INVENTORY_ITEM_PAYLOAD_SCHEMA_VERSION
         && encrypted.payload_schema_version != ACCOUNT_CLOSURE_ITEM_PAYLOAD_SCHEMA_VERSION
         && encrypted.payload_schema_version != LEGACY_DISPOSITION_ITEM_PAYLOAD_SCHEMA_VERSION
@@ -931,6 +941,9 @@ pub fn decrypt_item_state(
         }
         ACCOUNT_CLOSURE_ITEM_PAYLOAD_SCHEMA_VERSION
         | INVENTORY_ITEM_PAYLOAD_SCHEMA_VERSION
+        | EMERGENCY_CARD_EMAIL_ITEM_PAYLOAD_SCHEMA_VERSION
+        | ACCESS_POLICY_ITEM_PAYLOAD_SCHEMA_VERSION
+        | TRUSTED_PRINCIPAL_ITEM_PAYLOAD_SCHEMA_VERSION
         | ITEM_PAYLOAD_SCHEMA_VERSION => serde_json::from_slice(&plaintext)?,
         _ => return Err(CryptoError::UnsupportedFormat),
     };
@@ -1539,7 +1552,7 @@ mod tests {
     }
 
     #[test]
-    fn new_item_writes_use_payload_v7_and_preserve_account_closure_plan() {
+    fn new_item_writes_use_payload_v10_and_preserve_account_closure_plan() {
         let root = AccountRootKey::generate().expect("root key");
         let mut item =
             VaultItem::password("account plan", "user", "secret", "https://example.test", "");
@@ -1548,19 +1561,61 @@ mod tests {
             disposition: vault_models::AccountClosureDisposition::CloseAccount,
             instructions: "Export statements, then close manually.".to_owned(),
         };
+        item.access_policy
+            .add_grant(
+                vault_models::AccessGrant::new(
+                    Uuid::new_v4(),
+                    "credential",
+                    vault_models::Permission::View,
+                    vault_models::AccessCondition::Emergency,
+                    vault_models::WaitPeriod::OneDay,
+                    vault_models::GrantDuration::SevenDays,
+                    0,
+                    Default::default(),
+                )
+                .expect("valid access grant"),
+            )
+            .expect("add access grant");
 
-        let encrypted = encrypt_item(&root, &item, 1).expect("encrypt item payload v7");
+        let encrypted = encrypt_item(&root, &item, 1).expect("encrypt item payload v10");
         assert_eq!(
             encrypted.payload_schema_version,
             ITEM_PAYLOAD_SCHEMA_VERSION
         );
-        assert_eq!(ITEM_PAYLOAD_SCHEMA_VERSION, 7);
-        let restored = decrypt_item(&root, &encrypted).expect("decrypt item payload v7");
+        assert_eq!(ITEM_PAYLOAD_SCHEMA_VERSION, 10);
+        let restored = decrypt_item(&root, &encrypted).expect("decrypt item payload v10");
         assert_eq!(
             restored.legacy_disposition,
             LegacyDisposition::PrivateForever
         );
         assert_eq!(restored.account_closure_plan, item.account_closure_plan);
+        assert_eq!(restored.access_policy, item.access_policy);
+    }
+
+    #[test]
+    fn payload_v7_without_access_policy_remains_readable_with_owner_only_default() {
+        let root = AccountRootKey::generate().expect("root key");
+        let item = VaultItem::secure_note("pre-grants", "still private");
+        let mut state = serde_json::to_value(VaultItemState::Active { item: item.clone() })
+            .expect("serialize v7-shaped state");
+        state["item"]
+            .as_object_mut()
+            .expect("active item object")
+            .remove("access_policy");
+        let plaintext = serde_json::to_vec(&state).expect("encode v7-shaped state");
+        let encrypted = encrypt_payload(
+            &root,
+            item.id,
+            &plaintext,
+            7,
+            EMERGENCY_CARD_EMAIL_ITEM_PAYLOAD_SCHEMA_VERSION,
+        )
+        .expect("encrypt v7-shaped payload");
+
+        assert_eq!(EMERGENCY_CARD_EMAIL_ITEM_PAYLOAD_SCHEMA_VERSION, 7);
+        let restored = decrypt_item(&root, &encrypted).expect("decrypt v7 payload");
+        assert_eq!(restored.id, item.id);
+        assert_eq!(restored.access_policy, AccessPolicy::default());
     }
 
     #[test]
@@ -1610,13 +1665,13 @@ mod tests {
             "",
             "inventory metadata",
         );
-        let encrypted = encrypt_item(&root, &item, 1).expect("encrypt possession payload v7");
+        let encrypted = encrypt_item(&root, &item, 1).expect("encrypt possession payload v10");
         assert_eq!(
             encrypted.payload_schema_version,
             ITEM_PAYLOAD_SCHEMA_VERSION
         );
-        assert_eq!(ITEM_PAYLOAD_SCHEMA_VERSION, 7);
-        let restored = decrypt_item(&root, &encrypted).expect("decrypt possession payload v7");
+        assert_eq!(ITEM_PAYLOAD_SCHEMA_VERSION, 10);
+        let restored = decrypt_item(&root, &encrypted).expect("decrypt possession payload v10");
         assert_eq!(
             restored.fields.get("category").map(String::as_str),
             Some("Photography")
@@ -1648,7 +1703,7 @@ mod tests {
     }
 
     #[test]
-    fn emergency_contact_email_uses_v7_and_v6_without_email_remains_readable() {
+    fn emergency_contact_email_uses_current_payload_and_v6_without_email_remains_readable() {
         let root = AccountRootKey::generate().expect("root key");
         let card = vault_models::EmergencyCard {
             selected_item_ids: Vec::new(),
@@ -1659,20 +1714,24 @@ mod tests {
                 email: "ada@example.test".to_owned(),
                 notes: "Call first".to_owned(),
             }],
+            principals: Vec::new(),
+            retired_principal_ids: Default::default(),
+            retired_device_ids: Default::default(),
+            retired_signing_public_key_hexes: Default::default(),
             instructions: "Use either contact method.".to_owned(),
         };
         let item = VaultItem::emergency_card(&card);
 
-        let encrypted = encrypt_item(&root, &item, 1).expect("encrypt emergency card payload v7");
+        let encrypted = encrypt_item(&root, &item, 1).expect("encrypt emergency card payload v10");
         assert_eq!(
             encrypted.payload_schema_version,
             ITEM_PAYLOAD_SCHEMA_VERSION
         );
-        assert_eq!(ITEM_PAYLOAD_SCHEMA_VERSION, 7);
-        let restored = decrypt_item(&root, &encrypted).expect("decrypt emergency card payload v7");
+        assert_eq!(ITEM_PAYLOAD_SCHEMA_VERSION, 10);
+        let restored = decrypt_item(&root, &encrypted).expect("decrypt emergency card payload v10");
         let restored_card = restored
             .parse_emergency_card()
-            .expect("parse v7 emergency card");
+            .expect("parse current emergency card");
         assert_eq!(restored_card.contacts[0].email, "ada@example.test");
 
         let legacy_card = serde_json::json!({
@@ -1706,6 +1765,103 @@ mod tests {
             .parse_emergency_card()
             .expect("parse old emergency card without email");
         assert_eq!(restored_v6_card.contacts[0].email, "");
+    }
+
+    #[test]
+    fn payload_v8_emergency_card_without_principals_remains_readable() {
+        let root = AccountRootKey::generate().expect("root key");
+        let card = vault_models::EmergencyCard::empty();
+        let item = VaultItem::emergency_card(&card);
+        let mut state = serde_json::to_value(VaultItemState::Active { item: item.clone() })
+            .expect("serialize v8-shaped state");
+        let card_json = state["item"]["fields"]["card"]
+            .as_str()
+            .expect("emergency card field");
+        let mut nested: serde_json::Value =
+            serde_json::from_str(card_json).expect("parse nested emergency card");
+        nested
+            .as_object_mut()
+            .expect("card object")
+            .remove("principals");
+        nested
+            .as_object_mut()
+            .expect("card object")
+            .remove("retired_principal_ids");
+        nested
+            .as_object_mut()
+            .expect("card object")
+            .remove("retired_device_ids");
+        state["item"]["fields"]["card"] = serde_json::Value::String(nested.to_string());
+        let plaintext = serde_json::to_vec(&state).expect("encode v8-shaped payload");
+        let encrypted = encrypt_payload(
+            &root,
+            item.id,
+            &plaintext,
+            8,
+            ACCESS_POLICY_ITEM_PAYLOAD_SCHEMA_VERSION,
+        )
+        .expect("encrypt v8-shaped payload");
+
+        assert_eq!(ACCESS_POLICY_ITEM_PAYLOAD_SCHEMA_VERSION, 8);
+        let restored = decrypt_item(&root, &encrypted).expect("decrypt v8 payload");
+        let restored_card = restored
+            .parse_emergency_card()
+            .expect("parse v8 emergency card");
+        assert!(restored_card.principals.is_empty());
+        assert!(restored_card.retired_principal_ids.is_empty());
+        assert!(restored_card.retired_device_ids.is_empty());
+    }
+
+    #[test]
+    fn payload_v9_trusted_device_without_signing_key_remains_unpaired() {
+        let root = AccountRootKey::generate().expect("root key");
+        let mut card = vault_models::EmergencyCard::empty();
+        card.principals.push(vault_models::TrustedPrincipal {
+            id: Uuid::new_v4(),
+            name: "Ada".to_owned(),
+            relation: "Sibling".to_owned(),
+            devices: vec![vault_models::TrustedDevice {
+                id: Uuid::new_v4(),
+                label: "Phone".to_owned(),
+                encryption_public_key_hex:
+                    "1111111111111111111111111111111111111111111111111111111111111111".to_owned(),
+                signing_public_key_hex: None,
+            }],
+        });
+        let item = VaultItem::emergency_card(&card);
+        let mut state = serde_json::to_value(VaultItemState::Active { item: item.clone() })
+            .expect("serialize v9-shaped state");
+        let card_json = state["item"]["fields"]["card"]
+            .as_str()
+            .expect("emergency card field");
+        let mut nested: serde_json::Value =
+            serde_json::from_str(card_json).expect("parse nested emergency card");
+        nested["principals"][0]["devices"][0]
+            .as_object_mut()
+            .expect("device object")
+            .remove("signing_public_key_hex");
+        state["item"]["fields"]["card"] = serde_json::Value::String(nested.to_string());
+        let plaintext = serde_json::to_vec(&state).expect("encode v9-shaped payload");
+        let encrypted = encrypt_payload(
+            &root,
+            item.id,
+            &plaintext,
+            9,
+            TRUSTED_PRINCIPAL_ITEM_PAYLOAD_SCHEMA_VERSION,
+        )
+        .expect("encrypt v9-shaped payload");
+
+        assert_eq!(TRUSTED_PRINCIPAL_ITEM_PAYLOAD_SCHEMA_VERSION, 9);
+        let restored = decrypt_item(&root, &encrypted).expect("decrypt v9 payload");
+        let restored_card = restored
+            .parse_emergency_card()
+            .expect("parse v9 emergency card");
+        assert_eq!(restored_card.principals.len(), 1);
+        assert!(
+            restored_card.principals[0].devices[0]
+                .signing_public_key_hex
+                .is_none()
+        );
     }
 
     #[test]
@@ -1922,7 +2078,7 @@ mod tests {
     }
 
     #[test]
-    fn item_payload_v5_through_v7_require_a_valid_account_closure_plan() {
+    fn item_payload_v5_through_v10_require_a_valid_account_closure_plan() {
         let root = AccountRootKey::generate().expect("root key");
         let object_id = Uuid::new_v4();
         let base_item = serde_json::json!({
@@ -1948,6 +2104,9 @@ mod tests {
         for schema_version in [
             ACCOUNT_CLOSURE_ITEM_PAYLOAD_SCHEMA_VERSION,
             INVENTORY_ITEM_PAYLOAD_SCHEMA_VERSION,
+            EMERGENCY_CARD_EMAIL_ITEM_PAYLOAD_SCHEMA_VERSION,
+            ACCESS_POLICY_ITEM_PAYLOAD_SCHEMA_VERSION,
+            TRUSTED_PRINCIPAL_ITEM_PAYLOAD_SCHEMA_VERSION,
             ITEM_PAYLOAD_SCHEMA_VERSION,
         ] {
             let missing = encrypt_payload(&root, object_id, &missing, 1, schema_version)
@@ -1981,6 +2140,9 @@ mod tests {
             for schema_version in [
                 ACCOUNT_CLOSURE_ITEM_PAYLOAD_SCHEMA_VERSION,
                 INVENTORY_ITEM_PAYLOAD_SCHEMA_VERSION,
+                EMERGENCY_CARD_EMAIL_ITEM_PAYLOAD_SCHEMA_VERSION,
+                ACCESS_POLICY_ITEM_PAYLOAD_SCHEMA_VERSION,
+                TRUSTED_PRINCIPAL_ITEM_PAYLOAD_SCHEMA_VERSION,
                 ITEM_PAYLOAD_SCHEMA_VERSION,
             ] {
                 let encrypted = encrypt_payload(&root, object_id, &plaintext, 1, schema_version)

@@ -7,6 +7,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
+    sync::Mutex,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -19,13 +20,19 @@ use vault_crypto::{
     unwrap_root_key_with_recovery_secret, wrap_root_key, wrap_root_key_with_recovery_secret,
 };
 use vault_models::{
-    AccountClosurePlan, EMERGENCY_CARD_ID, EmergencyCard, ItemKind, LegacyDisposition, VaultItem,
-    VaultItemState, VaultItemValidationError,
-    validate_emergency_card as validate_emergency_card_model, validate_vault_item,
+    AccessPolicy, AccountClosurePlan, EMERGENCY_CARD_ID, EmergencyCard, ItemKind,
+    LegacyDisposition, VaultItem, VaultItemState, VaultItemValidationError,
+    carry_forward_trusted_identity_retirements,
+    validate_emergency_card as validate_emergency_card_model, validate_trusted_devices_unpaired,
+    validate_trusted_identity_continuity, validate_vault_item,
 };
 #[cfg(test)]
 use vault_models::{MAX_FIELD_VALUE_CHARS, MAX_ITEM_NOTES_CHARS, MAX_ITEM_TITLE_CHARS};
-use vault_storage::{StorageError, VaultStorage};
+use vault_sharing::{
+    PairingChallengeV1, PairingProofV1, PairingVerifierState, SharingError,
+    create_pairing_challenge, verify_pairing_proof,
+};
+use vault_storage::{RestoreSourceFingerprint, StorageError, VaultStorage};
 
 const PASSWORD_LOWERCASE: &[u8] = b"abcdefghijkmnopqrstuvwxyz";
 const PASSWORD_UPPERCASE: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ";
@@ -37,6 +44,7 @@ const PASSWORD_MIN_LENGTH: usize = 12;
 const PASSWORD_MAX_LENGTH: usize = 128;
 const MAX_ITEM_ATTACHMENTS: usize = 16;
 const MAX_ATTACHMENT_STORAGE_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_PENDING_TRUSTED_DEVICE_PAIRINGS: usize = 16;
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct AttachmentSummary {
@@ -229,10 +237,12 @@ impl VaultBackupPlan {
 pub struct PreparedVaultRestore {
     backup_path: PathBuf,
     root_key: AccountRootKey,
+    source_fingerprint: RestoreSourceFingerprint,
 }
 
 pub struct LockedVaultRestore {
     backup_path: PathBuf,
+    source_fingerprint: RestoreSourceFingerprint,
 }
 
 impl PreparedVaultRestore {
@@ -240,25 +250,29 @@ impl PreparedVaultRestore {
     /// passphrase before installation. Callers must only use this on a staged
     /// candidate copy, never on the user's source backup file.
     pub fn rewrap_candidate_master_passphrase(
-        self,
+        mut self,
         new_passphrase: &str,
     ) -> Result<Self, VaultError> {
         if new_passphrase.chars().count() < 12 {
             return Err(VaultError::PassphraseTooShort);
         }
         let wrapped = wrap_root_key(new_passphrase, &self.root_key)?;
-        let storage = VaultStorage::open(&self.backup_path)?;
-        storage.replace_root_wrap(&wrapped)?;
-        drop(storage);
+        self.source_fingerprint = VaultStorage::rewrap_restore_source_if_fingerprint(
+            &self.backup_path,
+            &self.source_fingerprint,
+            &wrapped,
+        )?;
         Ok(self)
     }
 
     pub fn install_to(self, live_path: impl AsRef<Path>) -> Result<VaultSession, VaultError> {
         let storage = VaultStorage::open(live_path)?;
-        storage.replace_from_database(&self.backup_path)?;
+        storage
+            .replace_from_database_if_fingerprint(&self.backup_path, &self.source_fingerprint)?;
         Ok(VaultSession {
             storage,
             root_key: self.root_key,
+            pending_pairings: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -266,16 +280,21 @@ impl PreparedVaultRestore {
         let Self {
             backup_path,
             root_key,
+            source_fingerprint,
         } = self;
         drop(root_key);
-        LockedVaultRestore { backup_path }
+        LockedVaultRestore {
+            backup_path,
+            source_fingerprint,
+        }
     }
 }
 
 impl LockedVaultRestore {
     pub fn install_to(self, live_path: impl AsRef<Path>) -> Result<(), VaultError> {
         let storage = VaultStorage::open(live_path)?;
-        storage.replace_from_database(&self.backup_path)?;
+        storage
+            .replace_from_database_if_fingerprint(&self.backup_path, &self.source_fingerprint)?;
         Ok(())
     }
 }
@@ -393,6 +412,18 @@ pub enum VaultError {
     InvalidLegacyDisposition,
     #[error("account closure plans are supported only for credential records")]
     InvalidAccountClosurePlan,
+    #[error("trusted-person access policy is invalid")]
+    InvalidAccessPolicy,
+    #[error("trusted-person principal is invalid")]
+    InvalidTrustedPrincipal,
+    #[error("reserved vault record must be changed through its dedicated operation")]
+    ReservedSystemItem,
+    #[error("trusted-device pairing operation failed")]
+    Sharing(#[from] SharingError),
+    #[error("trusted-device pairing challenge is missing or already consumed")]
+    PairingChallengeUnavailable,
+    #[error("trusted-device pairing state is unavailable")]
+    PairingStateUnavailable,
     #[error("version history is not available for this item")]
     HistoryNotAvailable,
     #[error("attachment file operation failed")]
@@ -464,6 +495,12 @@ fn sample_index(source: &mut RandomSource, upper_bound: usize) -> Result<usize, 
 pub struct VaultSession {
     storage: VaultStorage,
     root_key: AccountRootKey,
+    pending_pairings: Mutex<BTreeMap<Uuid, PendingTrustedDevicePairing>>,
+}
+
+struct PendingTrustedDevicePairing {
+    package: PairingChallengeV1,
+    state: PairingVerifierState,
 }
 
 impl VaultSession {
@@ -475,17 +512,28 @@ impl VaultSession {
         let root_key = AccountRootKey::generate()?;
         let wrapped = wrap_root_key(passphrase, &root_key)?;
         storage.initialize_root_wrap(&wrapped)?;
-        Ok(Self { storage, root_key })
+        Ok(Self {
+            storage,
+            root_key,
+            pending_pairings: Mutex::new(BTreeMap::new()),
+        })
     }
 
     pub fn unlock(path: impl AsRef<Path>, passphrase: &str) -> Result<Self, VaultError> {
         let storage = VaultStorage::open(path)?;
         let wrapped = storage.load_root_wrap()?;
         let root_key = unwrap_root_key(passphrase, &wrapped)?;
-        Ok(Self { storage, root_key })
+        Ok(Self {
+            storage,
+            root_key,
+            pending_pairings: Mutex::new(BTreeMap::new()),
+        })
     }
 
     pub fn put_item(&self, item: &VaultItem, revision: u64) -> Result<(), VaultError> {
+        if item.id == EMERGENCY_CARD_ID {
+            return Err(VaultError::ReservedSystemItem);
+        }
         if !item.attachments.is_empty() {
             return Err(VaultError::AttachmentReferencesManagedSeparately);
         }
@@ -496,6 +544,9 @@ impl VaultSession {
     }
 
     pub fn update_item(&self, item: &VaultItem, expected_revision: u64) -> Result<u64, VaultError> {
+        if item.id == EMERGENCY_CARD_ID {
+            return Err(VaultError::ReservedSystemItem);
+        }
         validate_item(item)?;
         let (state, current_revision) = self.get_state_with_revision(item.id)?;
         if current_revision != expected_revision {
@@ -881,6 +932,34 @@ impl VaultSession {
         self.update_item(&item, expected_revision)
     }
 
+    pub fn set_access_policy(
+        &self,
+        id: Uuid,
+        expected_revision: u64,
+        policy: AccessPolicy,
+    ) -> Result<u64, VaultError> {
+        let (mut item, current_revision) = self.get_item_with_revision(id)?;
+        if current_revision != expected_revision {
+            return Err(VaultError::Storage(StorageError::StaleRevision));
+        }
+        item.access_policy = policy;
+        if id == EMERGENCY_CARD_ID {
+            let card = item
+                .parse_emergency_card()
+                .ok_or(VaultError::InvalidTrustedPrincipal)?;
+            validate_emergency_card(&card)?;
+            validate_item(&item)?;
+            let revision = expected_revision
+                .checked_add(1)
+                .ok_or(VaultError::RevisionExhausted)?;
+            let encrypted = encrypt_item(&self.root_key, &item, revision)?;
+            self.storage
+                .update_item_if_revision(&encrypted, expected_revision)?;
+            return Ok(revision);
+        }
+        self.update_item(&item, expected_revision)
+    }
+
     pub fn list_items(&self) -> Result<Vec<VaultItem>, VaultError> {
         Ok(self
             .list_items_with_revisions()?
@@ -906,6 +985,9 @@ impl VaultSession {
         expected_revision: u64,
         deleted_at_ms: u64,
     ) -> Result<u64, VaultError> {
+        if id == EMERGENCY_CARD_ID {
+            return Err(VaultError::ReservedSystemItem);
+        }
         let (state, current_revision) = self.get_state_with_revision(id)?;
         if current_revision != expected_revision {
             return Err(VaultError::Storage(StorageError::StaleRevision));
@@ -953,6 +1035,9 @@ impl VaultSession {
     }
 
     pub fn restore_item(&self, id: Uuid, expected_revision: u64) -> Result<u64, VaultError> {
+        if id == EMERGENCY_CARD_ID {
+            return Err(VaultError::ReservedSystemItem);
+        }
         let (state, current_revision) = self.get_state_with_revision(id)?;
         if current_revision != expected_revision {
             return Err(VaultError::Storage(StorageError::StaleRevision));
@@ -972,6 +1057,9 @@ impl VaultSession {
     }
 
     pub fn purge_item(&self, id: Uuid, expected_revision: u64) -> Result<u64, VaultError> {
+        if id == EMERGENCY_CARD_ID {
+            return Err(VaultError::ReservedSystemItem);
+        }
         let (state, current_revision) = self.get_state_with_revision(id)?;
         if current_revision != expected_revision {
             return Err(VaultError::Storage(StorageError::StaleRevision));
@@ -1067,15 +1155,160 @@ impl VaultSession {
 
     pub fn set_emergency_card(&self, card: &EmergencyCard) -> Result<u64, VaultError> {
         validate_emergency_card(card)?;
-        let item = VaultItem::emergency_card(card);
         match self.get_state_with_revision(EMERGENCY_CARD_ID) {
             Err(VaultError::Storage(StorageError::ItemNotFound)) => {
-                self.put_item(&item, 1)?;
+                validate_trusted_devices_unpaired(card)
+                    .map_err(|_| VaultError::InvalidTrustedPrincipal)?;
+                let item = VaultItem::emergency_card(card);
+                let encrypted = encrypt_item(&self.root_key, &item, 1)?;
+                self.storage.insert_item(&encrypted)?;
+                if let Ok(mut pending) = self.pending_pairings.lock() {
+                    pending.clear();
+                }
                 Ok(1)
             }
-            Ok((_, revision)) => self.update_item(&item, revision),
+            Ok((VaultItemState::Active { mut item }, revision)) => {
+                let previous_card = item
+                    .parse_emergency_card()
+                    .ok_or(VaultError::InvalidTrustedPrincipal)?;
+                let mut next_card = card.clone();
+                carry_forward_trusted_identity_retirements(&previous_card, &mut next_card);
+                validate_emergency_card(&next_card)?;
+                validate_trusted_identity_continuity(&previous_card, &next_card)
+                    .map_err(|_| VaultError::InvalidTrustedPrincipal)?;
+                let replacement = VaultItem::emergency_card(&next_card);
+                item.fields.insert(
+                    "card".to_owned(),
+                    replacement
+                        .fields
+                        .get("card")
+                        .expect("emergency card constructor always stores card content")
+                        .clone(),
+                );
+                validate_item(&item)?;
+                let next_revision = revision
+                    .checked_add(1)
+                    .ok_or(VaultError::RevisionExhausted)?;
+                let encrypted = encrypt_item(&self.root_key, &item, next_revision)?;
+                self.storage.update_item_if_revision(&encrypted, revision)?;
+                if let Ok(mut pending) = self.pending_pairings.lock() {
+                    pending.clear();
+                }
+                Ok(next_revision)
+            }
+            Ok((VaultItemState::Trashed { .. } | VaultItemState::Tombstone { .. }, _)) => {
+                Err(VaultError::ItemNotActive)
+            }
             Err(other) => Err(other),
         }
+    }
+
+    /// Start a one-shot dual-key possession proof for an existing unpaired
+    /// trusted device. The hidden verifier nonce remains only in this unlocked
+    /// session; dropping the session cancels all pending pairings.
+    pub fn create_trusted_device_pairing_challenge(
+        &self,
+        principal_id: Uuid,
+        device_id: Uuid,
+    ) -> Result<PairingChallengeV1, VaultError> {
+        let (card, _) = self
+            .get_emergency_card()?
+            .ok_or(VaultError::PairingChallengeUnavailable)?;
+        let device = card
+            .principals
+            .iter()
+            .find(|principal| principal.id == principal_id)
+            .and_then(|principal| {
+                principal
+                    .devices
+                    .iter()
+                    .find(|device| device.id == device_id)
+            })
+            .ok_or(VaultError::PairingChallengeUnavailable)?;
+        if device.signing_public_key_hex.is_some() {
+            return Err(VaultError::InvalidTrustedPrincipal);
+        }
+        let encryption_public = decode_hex_32(&device.encryption_public_key_hex)
+            .ok_or(VaultError::InvalidTrustedPrincipal)?;
+        let (package, state) =
+            create_pairing_challenge(principal_id, device_id, &encryption_public)?;
+        let mut pending = self
+            .pending_pairings
+            .lock()
+            .map_err(|_| VaultError::PairingStateUnavailable)?;
+        pending.retain(|_, existing| {
+            existing.package.principal_id != principal_id || existing.package.device_id != device_id
+        });
+        if pending.len() >= MAX_PENDING_TRUSTED_DEVICE_PAIRINGS {
+            return Err(VaultError::PairingStateUnavailable);
+        }
+        pending.insert(
+            package.request_id,
+            PendingTrustedDevicePairing {
+                package: package.clone(),
+                state,
+            },
+        );
+        Ok(package)
+    }
+
+    /// Consume one pending pairing challenge and, after verifying possession of
+    /// both the X25519 recipient key and Ed25519 signing key, install the signing
+    /// verification key on that exact trusted-device UUID.
+    pub fn complete_trusted_device_pairing(
+        &self,
+        proof: &PairingProofV1,
+    ) -> Result<u64, VaultError> {
+        let pending = self
+            .pending_pairings
+            .lock()
+            .map_err(|_| VaultError::PairingStateUnavailable)?
+            .remove(&proof.request_id)
+            .ok_or(VaultError::PairingChallengeUnavailable)?;
+        let signing_public = verify_pairing_proof(&pending.package, &pending.state, proof)?;
+
+        let (VaultItemState::Active { mut item }, revision) =
+            self.get_state_with_revision(EMERGENCY_CARD_ID)?
+        else {
+            return Err(VaultError::ItemNotActive);
+        };
+        let mut card = item
+            .parse_emergency_card()
+            .ok_or(VaultError::InvalidTrustedPrincipal)?;
+        let device = card
+            .principals
+            .iter_mut()
+            .find(|principal| principal.id == proof.principal_id)
+            .and_then(|principal| {
+                principal
+                    .devices
+                    .iter_mut()
+                    .find(|device| device.id == proof.device_id)
+            })
+            .ok_or(VaultError::PairingChallengeUnavailable)?;
+        if device.signing_public_key_hex.is_some()
+            || decode_hex_32(&device.encryption_public_key_hex) != Some(proof.encryption_public)
+        {
+            return Err(VaultError::InvalidTrustedPrincipal);
+        }
+        device.signing_public_key_hex = Some(encode_hex_32(&signing_public));
+        validate_emergency_card(&card)?;
+        let replacement = VaultItem::emergency_card(&card);
+        item.fields.insert(
+            "card".to_owned(),
+            replacement
+                .fields
+                .get("card")
+                .expect("emergency card constructor always stores card content")
+                .clone(),
+        );
+        validate_item(&item)?;
+        let next_revision = revision
+            .checked_add(1)
+            .ok_or(VaultError::RevisionExhausted)?;
+        let encrypted = encrypt_item(&self.root_key, &item, next_revision)?;
+        self.storage.update_item_if_revision(&encrypted, revision)?;
+        Ok(next_revision)
     }
 
     pub fn install_recovery_kit(&self, secret: &RecoverySecret) -> Result<(), VaultError> {
@@ -1205,7 +1438,10 @@ impl VaultSession {
         &mut self,
         prepared: PreparedVaultRestore,
     ) -> Result<(), VaultError> {
-        self.storage.replace_from_database(&prepared.backup_path)?;
+        self.storage.replace_from_database_if_fingerprint(
+            &prepared.backup_path,
+            &prepared.source_fingerprint,
+        )?;
         self.root_key = prepared.root_key;
         Ok(())
     }
@@ -1227,7 +1463,11 @@ impl VaultSession {
             .load_recovery_wrap()?
             .ok_or(StorageError::NotInitialized)?;
         let root_key = unwrap_root_key_with_recovery_secret(secret, &wrapped)?;
-        Ok(Self { storage, root_key })
+        Ok(Self {
+            storage,
+            root_key,
+            pending_pairings: Mutex::new(BTreeMap::new()),
+        })
     }
 
     fn get_state_with_revision(&self, id: Uuid) -> Result<(VaultItemState, u64), VaultError> {
@@ -1268,6 +1508,7 @@ where
 {
     validate_storage_contents_with_cancel(&storage, &root_key, cancelled)?;
     let _ = storage.load_recovery_wrap()?;
+    let source_fingerprint = storage.restore_source_fingerprint()?;
     if cancelled() {
         return Err(VaultError::OperationCancelled);
     }
@@ -1275,6 +1516,7 @@ where
     Ok(PreparedVaultRestore {
         backup_path,
         root_key,
+        source_fingerprint,
     })
 }
 
@@ -1475,12 +1717,60 @@ fn validate_item(item: &VaultItem) -> Result<(), VaultError> {
         Err(VaultItemValidationError::InvalidAccountClosurePlan) => {
             Err(VaultError::InvalidAccountClosurePlan)
         }
+        Err(VaultItemValidationError::InvalidAccessPolicy) => Err(VaultError::InvalidAccessPolicy),
+        Err(VaultItemValidationError::InvalidTrustedPrincipal) => {
+            Err(VaultError::InvalidTrustedPrincipal)
+        }
         Err(VaultItemValidationError::TooLarge) => Err(VaultError::ItemTooLarge),
     }
 }
 
 fn validate_emergency_card(card: &EmergencyCard) -> Result<(), VaultError> {
-    validate_emergency_card_model(card).map_err(|_| VaultError::ItemTooLarge)
+    match validate_emergency_card_model(card) {
+        Ok(()) => Ok(()),
+        Err(VaultItemValidationError::InvalidTrustedPrincipal) => {
+            Err(VaultError::InvalidTrustedPrincipal)
+        }
+        Err(VaultItemValidationError::TooLarge) => Err(VaultError::ItemTooLarge),
+        Err(
+            VaultItemValidationError::InvalidLegacyDisposition
+            | VaultItemValidationError::InvalidAccountClosurePlan
+            | VaultItemValidationError::InvalidAccessPolicy,
+        ) => Err(VaultError::InvalidTrustedPrincipal),
+    }
+}
+
+fn decode_hex_32(value: &str) -> Option<[u8; 32]> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let encoded = value.as_bytes();
+    let mut output = [0u8; 32];
+    for (index, byte) in output.iter_mut().enumerate() {
+        let high = hex_nibble(encoded[index * 2])?;
+        let low = hex_nibble(encoded[index * 2 + 1])?;
+        *byte = (high << 4) | low;
+    }
+    Some(output)
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn encode_hex_32(value: &[u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(64);
+    for byte in value {
+        output.push(char::from(HEX[usize::from(byte >> 4)]));
+        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    output
 }
 
 #[cfg(test)]
@@ -1963,6 +2253,10 @@ mod tests {
                 email: String::new(),
                 notes: String::new(),
             }],
+            principals: Vec::new(),
+            retired_principal_ids: BTreeSet::new(),
+            retired_device_ids: BTreeSet::new(),
+            retired_signing_public_key_hexes: BTreeSet::new(),
             instructions: "Call first.".to_owned(),
         };
         assert_eq!(
@@ -2237,6 +2531,80 @@ mod tests {
             .expect("load restored credential");
         assert_eq!(current_revision, restored_revision);
         assert_eq!(restored.account_closure_plan, plan);
+    }
+
+    #[test]
+    fn access_policy_is_cas_safe_validated_and_survives_lifecycle() {
+        let dir = tempdir().expect("temp directory");
+        let database = dir.path().join("vault.sqlite3");
+        let session = VaultSession::create(&database, TEST_PASSPHRASE).expect("create vault");
+        let item = VaultItem::secure_note("continuity", "private body");
+        let id = item.id;
+        session.put_item(&item, 1).expect("store item");
+
+        let trustee = Uuid::new_v4();
+        let mut policy = AccessPolicy::default();
+        policy
+            .add_grant(
+                vault_models::AccessGrant::new(
+                    trustee,
+                    "record",
+                    vault_models::Permission::Download,
+                    vault_models::AccessCondition::Emergency,
+                    vault_models::WaitPeriod::OneDay,
+                    vault_models::GrantDuration::SevenDays,
+                    0,
+                    BTreeSet::new(),
+                )
+                .expect("valid grant"),
+            )
+            .expect("add grant");
+
+        let revision = session
+            .set_access_policy(id, 1, policy.clone())
+            .expect("persist access policy");
+        assert_eq!(revision, 2);
+        assert_eq!(
+            session.get_item(id).expect("load item").access_policy,
+            policy
+        );
+        assert!(matches!(
+            session.set_access_policy(id, 1, AccessPolicy::default()),
+            Err(VaultError::Storage(StorageError::StaleRevision))
+        ));
+
+        let mut invalid = AccessPolicy::default();
+        invalid.grants.push(vault_models::AccessGrant {
+            trustee_id: trustee,
+            what: String::new(),
+            permission: vault_models::Permission::View,
+            condition: vault_models::AccessCondition::Emergency,
+            wait_period: vault_models::WaitPeriod::Immediate,
+            duration: vault_models::GrantDuration::UntilRevoked,
+            approvals_required: 0,
+            approver_ids: BTreeSet::new(),
+        });
+        assert!(matches!(
+            session.set_access_policy(id, revision, invalid),
+            Err(VaultError::InvalidAccessPolicy)
+        ));
+
+        let trashed_revision = session.trash_item(id, revision, 42).expect("trash item");
+        let trashed = session
+            .list_trashed_items_with_revisions()
+            .expect("list trash")
+            .into_iter()
+            .find(|(candidate, _, _)| candidate.id == id)
+            .expect("trashed item");
+        assert_eq!(trashed.0.access_policy, policy);
+        let restored_revision = session
+            .restore_item(id, trashed_revision)
+            .expect("restore item");
+        let (restored, current_revision) = session
+            .get_item_with_revision(id)
+            .expect("load restored item");
+        assert_eq!(current_revision, restored_revision);
+        assert_eq!(restored.access_policy, policy);
     }
 
     #[test]
@@ -2937,6 +3305,165 @@ mod tests {
     }
 
     #[test]
+    fn prepared_restore_rejects_replaced_candidate_without_mutating_live_vault() {
+        let dir = tempdir().expect("temp directory");
+        let source_database = dir.path().join("prepared-source.sqlite3");
+        let replacement_database = dir.path().join("prepared-replacement.sqlite3");
+        let candidate = dir.path().join("prepared-candidate.sqlite3");
+        let replacement = dir.path().join("prepared-replacement-backup.sqlite3");
+        let live_database = dir.path().join("prepared-live.sqlite3");
+
+        let source =
+            VaultSession::create(&source_database, TEST_PASSPHRASE).expect("create source vault");
+        let source_item = VaultItem::secure_note("authenticated source", "source body");
+        source.put_item(&source_item, 1).expect("store source item");
+        source
+            .backup_database_to(&candidate)
+            .expect("backup authenticated candidate");
+        drop(source);
+
+        let replacement_session = VaultSession::create(&replacement_database, TEST_PASSPHRASE)
+            .expect("create replacement vault");
+        replacement_session
+            .put_item(
+                &VaultItem::secure_note("replacement source", "replacement body"),
+                1,
+            )
+            .expect("store replacement item");
+        replacement_session
+            .backup_database_to(&replacement)
+            .expect("backup replacement candidate");
+        drop(replacement_session);
+
+        let mut live =
+            VaultSession::create(&live_database, TEST_PASSPHRASE).expect("create live vault");
+        let live_item = VaultItem::secure_note("live marker", "must survive failed restore");
+        live.put_item(&live_item, 1).expect("store live marker");
+
+        let prepared = VaultSession::prepare_restore(&candidate, TEST_PASSPHRASE)
+            .expect("prepare authenticated restore");
+        fs::copy(&replacement, &candidate).expect("replace prepared candidate");
+
+        assert!(matches!(
+            live.commit_prepared_restore(prepared),
+            Err(VaultError::Storage(StorageError::RestoreSourceChanged))
+        ));
+        assert!(
+            live.get_item(live_item.id)
+                .expect("live marker remains after rejected restore")
+                == live_item
+        );
+        assert!(live.get_item(source_item.id).is_err());
+    }
+
+    #[test]
+    fn locked_restore_rejects_replaced_candidate_without_mutating_target() {
+        let dir = tempdir().expect("temp directory");
+        let source_database = dir.path().join("locked-fenced-source.sqlite3");
+        let replacement_database = dir.path().join("locked-fenced-replacement.sqlite3");
+        let candidate = dir.path().join("locked-fenced-candidate.sqlite3");
+        let replacement = dir.path().join("locked-fenced-replacement-backup.sqlite3");
+        let target_database = dir.path().join("locked-fenced-target.sqlite3");
+
+        let source =
+            VaultSession::create(&source_database, TEST_PASSPHRASE).expect("create source vault");
+        source
+            .put_item(&VaultItem::secure_note("source", "body"), 1)
+            .expect("store source item");
+        source
+            .backup_database_to(&candidate)
+            .expect("backup authenticated candidate");
+        drop(source);
+
+        let replacement_session = VaultSession::create(&replacement_database, TEST_PASSPHRASE)
+            .expect("create replacement vault");
+        replacement_session
+            .put_item(&VaultItem::secure_note("replacement", "body"), 1)
+            .expect("store replacement item");
+        replacement_session
+            .backup_database_to(&replacement)
+            .expect("backup replacement candidate");
+        drop(replacement_session);
+
+        let target =
+            VaultSession::create(&target_database, TEST_PASSPHRASE).expect("create target vault");
+        let target_item = VaultItem::secure_note("target marker", "must remain");
+        target
+            .put_item(&target_item, 1)
+            .expect("store target marker");
+        drop(target);
+
+        let locked_restore = VaultSession::prepare_restore(&candidate, TEST_PASSPHRASE)
+            .expect("prepare authenticated restore")
+            .into_locked_install();
+        fs::copy(&replacement, &candidate).expect("replace prepared candidate");
+
+        assert!(matches!(
+            locked_restore.install_to(&target_database),
+            Err(VaultError::Storage(StorageError::RestoreSourceChanged))
+        ));
+        let target = VaultSession::unlock(&target_database, TEST_PASSPHRASE)
+            .expect("unlock target after rejected restore");
+        assert!(
+            target
+                .get_item(target_item.id)
+                .expect("target marker survives rejected restore")
+                == target_item
+        );
+    }
+
+    #[test]
+    fn rewrap_rejects_replaced_candidate_before_changing_its_root_wrap() {
+        const NEW_PASSPHRASE: &str = "a different master passphrase after restore";
+
+        let dir = tempdir().expect("temp directory");
+        let source_database = dir.path().join("rewrap-fenced-source.sqlite3");
+        let replacement_database = dir.path().join("rewrap-fenced-replacement.sqlite3");
+        let candidate = dir.path().join("rewrap-fenced-candidate.sqlite3");
+        let replacement = dir.path().join("rewrap-fenced-replacement-backup.sqlite3");
+
+        let source =
+            VaultSession::create(&source_database, TEST_PASSPHRASE).expect("create source vault");
+        source
+            .put_item(&VaultItem::secure_note("source", "body"), 1)
+            .expect("store source item");
+        source
+            .backup_database_to(&candidate)
+            .expect("backup authenticated candidate");
+        drop(source);
+
+        let replacement_session = VaultSession::create(&replacement_database, TEST_PASSPHRASE)
+            .expect("create replacement vault");
+        let replacement_item = VaultItem::secure_note("replacement", "body");
+        replacement_session
+            .put_item(&replacement_item, 1)
+            .expect("store replacement item");
+        replacement_session
+            .backup_database_to(&replacement)
+            .expect("backup replacement candidate");
+        drop(replacement_session);
+
+        let prepared = VaultSession::prepare_restore(&candidate, TEST_PASSPHRASE)
+            .expect("prepare authenticated restore");
+        fs::copy(&replacement, &candidate).expect("replace prepared candidate");
+
+        assert!(matches!(
+            prepared.rewrap_candidate_master_passphrase(NEW_PASSPHRASE),
+            Err(VaultError::Storage(StorageError::RestoreSourceChanged))
+        ));
+        let replacement_after_failure = VaultSession::unlock(&candidate, TEST_PASSPHRASE)
+            .expect("original replacement passphrase remains valid");
+        assert!(
+            replacement_after_failure
+                .get_item(replacement_item.id)
+                .expect("replacement item remains readable")
+                == replacement_item
+        );
+        drop(replacement_after_failure);
+        assert!(VaultSession::unlock(&candidate, NEW_PASSPHRASE).is_err());
+    }
+
+    #[test]
     fn trash_restore_and_tombstone_preserve_monotonic_revision() {
         let dir = tempdir().expect("temp directory");
         let database = dir.path().join("vault.sqlite3");
@@ -3043,6 +3570,10 @@ mod tests {
                 email: "ada@example.test".to_owned(),
                 notes: "Call first".to_owned(),
             }],
+            principals: Vec::new(),
+            retired_principal_ids: BTreeSet::new(),
+            retired_device_ids: BTreeSet::new(),
+            retired_signing_public_key_hexes: BTreeSet::new(),
             instructions: "Follow the printed steps".to_owned(),
         };
         assert_eq!(session.set_emergency_card(&card).expect("set rev 1"), 1);
@@ -3066,6 +3597,218 @@ mod tests {
     }
 
     #[test]
+    fn emergency_card_reserved_id_rejects_generic_mutation_paths() {
+        let dir = tempdir().expect("temp directory");
+        let database = dir.path().join("vault.sqlite3");
+        let session = VaultSession::create(&database, TEST_PASSPHRASE).expect("create vault");
+        let card = EmergencyCard::empty();
+        let raw = VaultItem::emergency_card(&card);
+
+        assert!(matches!(
+            session.put_item(&raw, 1),
+            Err(VaultError::ReservedSystemItem)
+        ));
+        assert_eq!(session.set_emergency_card(&card).expect("create card"), 1);
+
+        let mut generic = session
+            .get_item(EMERGENCY_CARD_ID)
+            .expect("load emergency singleton");
+        generic.fields.insert("card".to_owned(), "{}".to_owned());
+        assert!(matches!(
+            session.update_item(&generic, 1),
+            Err(VaultError::ReservedSystemItem)
+        ));
+        assert!(matches!(
+            session.trash_item(EMERGENCY_CARD_ID, 1, 42),
+            Err(VaultError::ReservedSystemItem)
+        ));
+        assert!(matches!(
+            session.restore_item(EMERGENCY_CARD_ID, 1),
+            Err(VaultError::ReservedSystemItem)
+        ));
+        assert!(matches!(
+            session.purge_item(EMERGENCY_CARD_ID, 1),
+            Err(VaultError::ReservedSystemItem)
+        ));
+
+        let (stored, revision) = session
+            .get_emergency_card()
+            .expect("load card")
+            .expect("card present");
+        assert_eq!(revision, 1);
+        assert_eq!(stored, card);
+    }
+
+    #[test]
+    fn trusted_device_pairing_persists_signing_key_and_consumes_challenge_once() {
+        use vault_sharing::{DeviceKeyPair, DeviceSigningKeyPair, answer_pairing_challenge};
+
+        let dir = tempdir().expect("temp directory");
+        let database = dir.path().join("vault.sqlite3");
+        let session = VaultSession::create(&database, TEST_PASSPHRASE).expect("create vault");
+        let principal_id = Uuid::new_v4();
+        let device_id = Uuid::new_v4();
+        let encryption_key = DeviceKeyPair::generate().expect("recipient key");
+        let signing_key = DeviceSigningKeyPair::generate().expect("signing key");
+        let mut card = EmergencyCard::empty();
+        card.principals.push(vault_models::TrustedPrincipal {
+            id: principal_id,
+            name: "Ada".to_owned(),
+            relation: "Sibling".to_owned(),
+            devices: vec![vault_models::TrustedDevice {
+                id: device_id,
+                label: "Phone".to_owned(),
+                encryption_public_key_hex: encode_hex_32(&encryption_key.public_bytes()),
+                signing_public_key_hex: None,
+            }],
+        });
+        assert_eq!(session.set_emergency_card(&card).expect("store card"), 1);
+
+        let challenge = session
+            .create_trusted_device_pairing_challenge(principal_id, device_id)
+            .expect("create challenge");
+        let proof = answer_pairing_challenge(&challenge, &encryption_key, &signing_key)
+            .expect("answer challenge");
+        let mut edited_card = card.clone();
+        edited_card.instructions = "Generic card edit cancels pending pairings".to_owned();
+        assert_eq!(
+            session
+                .set_emergency_card(&edited_card)
+                .expect("edit card while pairing is pending"),
+            2
+        );
+        assert!(matches!(
+            session.complete_trusted_device_pairing(&proof),
+            Err(VaultError::PairingChallengeUnavailable)
+        ));
+
+        let challenge = session
+            .create_trusted_device_pairing_challenge(principal_id, device_id)
+            .expect("create replacement challenge");
+        let proof = answer_pairing_challenge(&challenge, &encryption_key, &signing_key)
+            .expect("answer replacement challenge");
+        assert_eq!(
+            session
+                .complete_trusted_device_pairing(&proof)
+                .expect("complete pairing"),
+            3
+        );
+        let (stored, revision) = session
+            .get_emergency_card()
+            .expect("load card")
+            .expect("card present");
+        assert_eq!(revision, 3);
+        assert_eq!(
+            stored.principals[0].devices[0].signing_public_key_hex,
+            Some(encode_hex_32(&signing_key.public_bytes()))
+        );
+        assert!(matches!(
+            session.complete_trusted_device_pairing(&proof),
+            Err(VaultError::PairingChallengeUnavailable)
+        ));
+
+        let signing_public_key_hex = encode_hex_32(&signing_key.public_bytes());
+        let mut revoked = stored.clone();
+        revoked.principals[0].devices.clear();
+        assert_eq!(
+            session
+                .set_emergency_card(&revoked)
+                .expect("revoke paired device"),
+            4
+        );
+        let (revoked, _) = session
+            .get_emergency_card()
+            .expect("load revoked card")
+            .expect("card present");
+        assert!(
+            revoked
+                .retired_signing_public_key_hexes
+                .contains(&signing_public_key_hex)
+        );
+
+        let replacement_device_id = Uuid::new_v4();
+        let replacement_encryption_key = DeviceKeyPair::generate().expect("replacement key");
+        let mut replacement = revoked;
+        replacement.principals[0]
+            .devices
+            .push(vault_models::TrustedDevice {
+                id: replacement_device_id,
+                label: "Replacement phone".to_owned(),
+                encryption_public_key_hex: encode_hex_32(
+                    &replacement_encryption_key.public_bytes(),
+                ),
+                signing_public_key_hex: None,
+            });
+        assert_eq!(
+            session
+                .set_emergency_card(&replacement)
+                .expect("add replacement device"),
+            5
+        );
+        let replacement_challenge = session
+            .create_trusted_device_pairing_challenge(principal_id, replacement_device_id)
+            .expect("create replacement-device challenge");
+        let reused_signing_proof = answer_pairing_challenge(
+            &replacement_challenge,
+            &replacement_encryption_key,
+            &signing_key,
+        )
+        .expect("answer with retired signing key");
+        assert!(matches!(
+            session.complete_trusted_device_pairing(&reused_signing_proof),
+            Err(VaultError::InvalidTrustedPrincipal)
+        ));
+        let (unchanged, revision) = session
+            .get_emergency_card()
+            .expect("load unchanged card")
+            .expect("card present");
+        assert_eq!(revision, 5);
+        assert!(
+            unchanged.principals[0].devices[0]
+                .signing_public_key_hex
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn emergency_card_update_preserves_hidden_access_policy() {
+        use vault_models::{AccessPolicy, EmergencyCard, EmergencyContact};
+
+        let dir = tempdir().expect("temp directory");
+        let database = dir.path().join("vault.sqlite3");
+        let session = VaultSession::create(&database, TEST_PASSPHRASE).expect("create vault");
+
+        let mut card = EmergencyCard::empty();
+        card.instructions = "Original instructions".to_owned();
+        assert_eq!(session.set_emergency_card(&card).expect("create card"), 1);
+
+        let mut policy = AccessPolicy::new(false);
+        policy.set_private_forever();
+        assert_eq!(
+            session
+                .set_access_policy(EMERGENCY_CARD_ID, 1, policy.clone())
+                .expect("set hidden policy"),
+            2
+        );
+
+        card.contacts.push(EmergencyContact {
+            name: "Ada".to_owned(),
+            relation: "Sibling".to_owned(),
+            phone: "+1-555-0100".to_owned(),
+            email: "ada@example.test".to_owned(),
+            notes: "Call first".to_owned(),
+        });
+        card.instructions = "Updated instructions".to_owned();
+        assert_eq!(session.set_emergency_card(&card).expect("update card"), 3);
+
+        let stored = session
+            .get_item(EMERGENCY_CARD_ID)
+            .expect("load encrypted card item");
+        assert_eq!(stored.access_policy, policy);
+        assert_eq!(stored.parse_emergency_card(), Some(card));
+    }
+
+    #[test]
     fn oversized_emergency_card_is_rejected() {
         use vault_models::{EmergencyCard, EmergencyContact};
 
@@ -3076,6 +3819,10 @@ mod tests {
         let too_many_items = EmergencyCard {
             selected_item_ids: (0..129).map(|_| Uuid::new_v4()).collect(),
             contacts: Vec::new(),
+            principals: Vec::new(),
+            retired_principal_ids: BTreeSet::new(),
+            retired_device_ids: BTreeSet::new(),
+            retired_signing_public_key_hexes: BTreeSet::new(),
             instructions: String::new(),
         };
         assert!(matches!(
@@ -3094,6 +3841,10 @@ mod tests {
                     notes: String::new(),
                 })
                 .collect(),
+            principals: Vec::new(),
+            retired_principal_ids: BTreeSet::new(),
+            retired_device_ids: BTreeSet::new(),
+            retired_signing_public_key_hexes: BTreeSet::new(),
             instructions: String::new(),
         };
         assert!(matches!(
@@ -3110,6 +3861,10 @@ mod tests {
                 email: "x".repeat(MAX_ITEM_TITLE_CHARS + 1),
                 notes: String::new(),
             }],
+            principals: Vec::new(),
+            retired_principal_ids: BTreeSet::new(),
+            retired_device_ids: BTreeSet::new(),
+            retired_signing_public_key_hexes: BTreeSet::new(),
             instructions: String::new(),
         };
         assert!(matches!(
@@ -3132,7 +3887,12 @@ mod tests {
         corrupted
             .fields
             .insert("card".to_owned(), "not-valid-json{".to_owned());
-        session.update_item(&corrupted, 1).expect("corrupt card");
+        let encrypted =
+            encrypt_item(&session.root_key, &corrupted, 2).expect("encrypt corrupt row");
+        session
+            .storage
+            .update_item_if_revision(&encrypted, 1)
+            .expect("inject corrupt storage row");
         assert!(matches!(
             session.get_emergency_card(),
             Err(VaultError::Storage(StorageError::InconsistentEncryptedRow))

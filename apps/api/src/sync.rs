@@ -20,8 +20,8 @@ use crate::{
         parse_public_key_hex, registration_token_hash,
     },
     model::{
-        DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT, ObjectMetadataResponse, PolicyError, StoredObject,
-        WritePrecondition, parse_strong_etag, strong_etag, validate_write_policy,
+        DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT, MAX_WIRE_REVISION, ObjectMetadataResponse, PolicyError,
+        StoredObject, WritePrecondition, parse_strong_etag, strong_etag, validate_write_policy,
     },
     store::{AuthContext, CommitError, StoreError},
 };
@@ -198,6 +198,42 @@ pub(crate) async fn put_object(
         .await
     {
         Ok(committed) => committed,
+        Err(CommitError::CommitOutcomeUnknown(_error)) => {
+            warn!(
+                "PostgreSQL commit acknowledgement failed; reconciling ciphertext metadata before cleanup"
+            );
+            match state.metadata.get_object(auth.account_id, object_id).await {
+                Ok(Some(object))
+                    if object_matches_candidate(
+                        &object,
+                        candidate_revision,
+                        ciphertext_size_bytes,
+                        ciphertext_sha256,
+                        &storage_key,
+                    ) =>
+                {
+                    crate::store::CommitResult {
+                        object,
+                        previous_storage_key: current
+                            .as_ref()
+                            .map(|object| object.storage_key.clone()),
+                        created: current.is_none(),
+                    }
+                }
+                Ok(_) => {
+                    warn!(
+                        "PostgreSQL commit reconciliation did not yet expose the candidate; retaining ciphertext because commit outcome is unknown"
+                    );
+                    return Err(ApiError::Unavailable);
+                }
+                Err(_error) => {
+                    warn!(
+                        "PostgreSQL commit reconciliation failed; retaining candidate ciphertext because it may be committed"
+                    );
+                    return Err(ApiError::Unavailable);
+                }
+            }
+        }
         Err(error) => {
             best_effort_delete(&state, &storage_key, "discard uncommitted object").await;
             return Err(match error {
@@ -207,6 +243,7 @@ pub(crate) async fn put_object(
                     backend_store_error("commit object", StoreError::Database(error))
                 }
                 CommitError::Store(error) => backend_store_error("commit object", error),
+                CommitError::CommitOutcomeUnknown(_) => unreachable!("handled above"),
             });
         }
     };
@@ -312,9 +349,9 @@ fn parse_candidate_revision(headers: &HeaderMap) -> Result<i64, ApiError> {
     let revision = value
         .parse::<i64>()
         .map_err(|_| ApiError::BadRequest("x-safeory-revision is invalid"))?;
-    if revision < 0 {
+    if !(0..=MAX_WIRE_REVISION).contains(&revision) {
         return Err(ApiError::BadRequest(
-            "x-safeory-revision must be nonnegative",
+            "x-safeory-revision is outside the supported range",
         ));
     }
     Ok(revision)
@@ -378,6 +415,19 @@ async fn best_effort_delete(state: &AppState, key: &str, operation: &'static str
             "object-store cleanup failed; ciphertext blob is unreachable"
         );
     }
+}
+
+fn object_matches_candidate(
+    object: &StoredObject,
+    revision: i64,
+    ciphertext_size_bytes: i64,
+    ciphertext_sha256: [u8; 32],
+    storage_key: &str,
+) -> bool {
+    object.revision == revision
+        && object.ciphertext_size_bytes == ciphertext_size_bytes
+        && object.ciphertext_sha256 == ciphertext_sha256
+        && object.storage_key == storage_key
 }
 
 fn policy_error(error: PolicyError) -> ApiError {
@@ -492,6 +542,11 @@ mod tests {
             HeaderValue::from_static("7"),
         );
         assert_eq!(parse_candidate_revision(&headers).ok(), Some(7));
+        headers.insert(
+            HeaderName::from_static(REVISION_HEADER),
+            HeaderValue::from_static("9007199254740992"),
+        );
+        assert!(parse_candidate_revision(&headers).is_err());
     }
 
     #[test]
@@ -505,5 +560,45 @@ mod tests {
             HeaderValue::from_static("application/octet-stream; charset=binary"),
         );
         assert!(require_octet_stream(&headers).is_ok());
+    }
+
+    #[test]
+    fn commit_reconciliation_requires_the_exact_uploaded_candidate() {
+        let candidate = StoredObject {
+            object_id: Uuid::new_v4(),
+            revision: 7,
+            ciphertext_size_bytes: 123,
+            ciphertext_sha256: [0x5a; 32],
+            change_seq: 9,
+            storage_key: "opaque-candidate".to_owned(),
+        };
+
+        assert!(object_matches_candidate(
+            &candidate,
+            7,
+            123,
+            [0x5a; 32],
+            "opaque-candidate"
+        ));
+
+        let mut different = candidate.clone();
+        different.storage_key = "newer-object".to_owned();
+        assert!(!object_matches_candidate(
+            &different,
+            7,
+            123,
+            [0x5a; 32],
+            "opaque-candidate"
+        ));
+
+        different = candidate.clone();
+        different.ciphertext_sha256[0] ^= 1;
+        assert!(!object_matches_candidate(
+            &different,
+            7,
+            123,
+            [0x5a; 32],
+            "opaque-candidate"
+        ));
     }
 }

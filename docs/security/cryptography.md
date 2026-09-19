@@ -10,6 +10,7 @@ Changes to algorithms, KDF parameters, envelope formats, or key hierarchy requir
 - `argon2` (RustCrypto) for Argon2id.
 - `chacha20poly1305` (RustCrypto) for XChaCha20-Poly1305.
 - `hkdf` + `sha2` (RustCrypto) for HKDF-SHA-256 domain separation.
+- `ed25519-dalek` for trusted-device signing and strict signature verification.
 - `getrandom` for OS CSPRNG bytes.
 - `zeroize` for best-effort clearing of owned secret buffers.
 
@@ -119,15 +120,36 @@ Implemented additional domains (Trust Engine foundation):
   Argon2id passphrase wrap for that exact recovered root using the user's new
   master passphrase. Only the staged candidate is rewrapped; the selected source
   backup is not modified, and the captured recovery wrap is preserved.
-- `safeory:v1:share-wrap` — per-envelope wrap key from an ephemeral-static
-  X25519 DH shared secret, HKDF salt `SHA256(ephemeral_pub || recipient_pub)`,
-  XChaCha20-Poly1305 payload with AAD binding sender/recipient/fingerprint/
-  ephemeral/purpose. Recipient fingerprint (`SHA256(domain || pubkey)[..16]`)
-  is bound into the AAD so an envelope cannot be retargeted silently.
-  `sender_public` is self-asserted: `open` checks it against a
-  caller-supplied expectation, so sender authorization belongs to the
-  grant-policy layer, not the transport envelope. Long-term device secrets
-  rely on `x25519-dalek`'s `zeroize` drop handling (default feature, kept on).
+- `safeory:v2:share-wrap` — per-envelope wrap key combines two X25519 shared
+  secrets: a fresh ephemeral-sender -> recipient DH for per-envelope secrecy and
+  a sender-static -> recipient DH. XChaCha20-Poly1305 AAD (`safeory:share:v2`) binds
+  format/algorithm, sender, recipient, recipient fingerprint, ephemeral key, and
+  purpose. A third party that merely knows both public keys cannot forge an
+  envelope as that sender, but the intended recipient can compute the same static
+  DH value for any claimed sender public key and can therefore forge an envelope
+  to itself. `sender_public` is context binding only, not sender authentication,
+  a signature, or proof of possession; it remains unauthenticated even after a
+  separate device is paired. Any future approval/release message must carry its
+  own domain-separated Ed25519 signature and resolve the active device to a
+  principal at decision time. Legacy v1 envelopes are
+  rejected fail-closed at the v2 boundary. Long-term device
+  secrets rely on `x25519-dalek`'s `zeroize` drop handling (default feature,
+  kept on).
+- `safeory:trusted-device-pairing-challenge:v1` plus
+  `safeory:v1:trusted-device-pairing-challenge-wrap` — owner-generated one-time
+  256-bit challenge encrypted under a fresh ephemeral X25519 -> recipient DH.
+  The challenge AAD and KDF bind request UUID, principal UUID, device UUID, the
+  persisted X25519 recipient key, and the owner ephemeral public key.
+- `safeory:trusted-device-pairing:v1\0` — fixed binary Ed25519 pairing-proof
+  transcript binding version, request UUID, principal UUID, device UUID, the
+  candidate Ed25519 verification key, the persisted X25519 recipient key, owner
+  ephemeral X25519 key, and decrypted challenge. Verification uses
+  `ed25519-dalek::VerifyingKey::verify_strict` and rejects weak verification
+  keys. The verifier keeps the challenge in session-local state and consumes it
+  on the first completion attempt. Successful pairing therefore demonstrates
+  possession of both device private keys at pairing time. It does not prove the
+  person's real-world identity, grant item access, start a timer, notify anyone,
+  or release a key.
 - Threshold recovery uses standard Shamir secret sharing over GF(256) via the
   reviewed `blahaj` crate (`zeroize_memory` feature on) — the maintained fork
   carrying the RUSTSEC-2024-0398 polynomial-coefficient-bias fix that the
@@ -176,11 +198,11 @@ Rust/zeroization cannot guarantee erasure of copies made by the compiler, OS, sw
 - Browser attachment/export work must use user-mediated browser file APIs. Plaintext bytes may exist transiently in browser memory during an explicit operation; no server component receives them.
 ### Plaintext item bounds
 
-Before item encryption, the portable Rust core rejects records that exceed the supported local limits: titles are bounded to 256 Unicode scalar values, an item may contain at most 32 fields, at most 64 item links, and at most 16 attachment references; field names are bounded to 64 characters, each field value to 100,000 characters, notes to 100,000 characters, and credential account-closure instructions to 100,000 characters. The storage boundary additionally caps the vault at 65,536 encrypted item rows, each encoded encrypted item record at 128 MiB, and encoded root/recovery wraps at 16 KiB before those attacker-controlled BLOBs are materialized. Version history retains at most 20 earlier encrypted revisions per item, 131,072 history rows vault-wide, and 1 GiB of history ciphertext; every historical row uses the same 128 MiB encoded-envelope ceiling. Attachments are currently bounded to 64 MiB plaintext per file, 16 per item, 16,384 attachment objects (including tombstones) per vault, and 1 GiB of encrypted attachment storage per vault; filenames are bounded to 255 Unicode scalar values. Restore/read paths enforce the core-record, history, and attachment object/count/BLOB bounds before materializing attacker-controlled collections. These are resource-abuse bounds, not cryptographic limits.
+Before item encryption, the portable Rust core rejects records that exceed the supported local limits: titles are bounded to 256 Unicode scalar values, an item may contain at most 32 fields, at most 64 item links, and at most 16 attachment references; field names are bounded to 64 characters, each field value to 100,000 characters, notes to 100,000 characters, and credential account-closure instructions to 100,000 characters. The Emergency Card is additionally bounded to 128 selected items, 32 continuity contacts, 32 trusted principals, 8 recipient-encryption devices per principal, 256 retired principal UUIDs, and 1,024 retired device UUIDs. The storage boundary additionally caps the vault at 65,536 encrypted item rows, each encoded encrypted item record at 128 MiB, and encoded root/recovery wraps at 16 KiB before those attacker-controlled BLOBs are materialized. Version history retains at most 20 earlier encrypted revisions per item, 131,072 history rows vault-wide, and 1 GiB of history ciphertext; every historical row uses the same 128 MiB encoded-envelope ceiling. Attachments are currently bounded to 64 MiB plaintext per file, 16 per item, 16,384 attachment objects (including tombstones) per vault, and 1 GiB of encrypted attachment storage per vault; filenames are bounded to 255 Unicode scalar values. Restore/read paths enforce the core-record, history, attachment, and Emergency Card collection bounds before materializing attacker-controlled collections. These are resource-abuse bounds, not cryptographic limits.
 
 ## Versioning and migration
 
-Root wraps, item envelopes, and attachment envelopes carry independent format/payload versions. Item payload schema v3 introduced encrypted attachment references. Item payload schema v4 added the required encrypted per-record legacy-planning disposition. Item payload schema v5 added the required encrypted `AccountClosurePlan`; v1-v3 decode with `LegacyDisposition::Unspecified` plus a default closure plan, and v4 preserves its legacy disposition while injecting only the default closure plan. Subscription records were added within the v5 shape through the `subscription` item-kind enum value plus ordinary encrypted fields; a pre-subscription decoder fails closed on that unknown enum value for v1-v4. Item payload schema v6 established the downgrade boundary for the expanded possession field set (`category` and `location`): current readers still accept v5, but older v5 binaries reject v6 before deserialization rather than reading and later rewriting a possession while dropping fields they do not preserve. Item payload schema v7 is the current write version and establishes the same downgrade boundary for optional Emergency Card contact email. Current readers accept v6 cards that predate email and default the missing contact email to empty; older v6 binaries reject v7 before deserialization, so they cannot load a newer Emergency Card and later erase its email field on rewrite. The possession fields and Emergency Card contact email remain ordinary data inside the authenticated encrypted item payload. Current-schema top-level fields are strict: missing or unknown mandatory planning fields fail deserialization. The schema version is authenticated in item-payload AAD, so relabeling ciphertext across payload versions fails authentication. Readers reject unknown mandatory algorithms/versions rather than guessing. SQLite schema v4 adds encrypted_item_history and is unchanged by payload v7; migration from v1-v3 creates the history table empty and does not synthesize old versions. Each history row is the exact previous authenticated EncryptedItemV1 envelope copied verbatim inside the same transaction that advances the current item revision. History capture therefore does not decrypt/re-encrypt archive copies, and a stale or failed CAS cannot leave a history row. Trash/restore preserve existing history without adding lifecycle-only snapshots; permanent purge deletes all history for that item atomically. Encrypted database backup/restore preserves and validates history rows and bounds. Future payload migrations read with the old format and write a new authenticated format without silently deleting records that fail migration.
+Root wraps, item envelopes, and attachment envelopes carry independent format/payload versions. Item payload schema v3 introduced encrypted attachment references. Item payload schema v4 added the required encrypted per-record legacy-planning disposition. Item payload schema v5 added the required encrypted `AccountClosurePlan`; v1-v3 decode with `LegacyDisposition::Unspecified` plus a default closure plan, and v4 preserves its legacy disposition while injecting only the default closure plan. Subscription records were added within the v5 shape through the `subscription` item-kind enum value plus ordinary encrypted fields; a pre-subscription decoder fails closed on that unknown enum value for v1-v4. Item payload schema v6 established the downgrade boundary for the expanded possession field set (`category` and `location`): current readers still accept v5, but older v5 binaries reject v6 before deserialization rather than reading and later rewriting a possession while dropping fields they do not preserve. Item payload schema v7 established the same downgrade boundary for optional Emergency Card contact email. Current readers accept v6 cards that predate email and default the missing contact email to empty. Item payload schema v8 added the per-item encrypted `AccessPolicy`; v1-v7 payloads read with the owner-only/no-grants default, while older v7 binaries reject v8 before deserialization. Item payload schema v9 added the Emergency Card's separate encrypted trusted-principal/device registry plus encrypted retired-principal/device UUID sets. Item payload schema v10 is the current write version and adds an optional Ed25519 verification key to each trusted device plus bounded encrypted retirement tombstones for removed Ed25519 verification keys. Current readers accept v9 devices with the new fields absent and treat them as explicitly unpaired with no retired signing identities; older v9 binaries reject v10 before deserialization so they cannot rewrite a paired Emergency Card while silently dropping signing identity or revocation metadata. Principal UUIDs remain the stable identifiers referenced by grants. Device UUIDs carry canonical, validated non-degenerate X25519 recipient-encryption public keys and, only after the dedicated pairing mutation succeeds, a validated Ed25519 verification key. Generic Emergency Card creation/editing cannot manufacture or replace a signing binding. Existing device UUIDs cannot be rebound to another principal or encryption/signing key, and removed principal/device UUIDs remain retired so they cannot later be reused to make an old unresolved grant resolve to a different identity. When a paired device is removed, its Ed25519 verification key is also retired and cannot be paired again under a fresh device or principal UUID. Device rotation therefore requires a fresh device UUID and fresh key pair. The possession fields, Emergency Card contact email/principal registry/retirement sets, and access policy remain ordinary data inside the authenticated encrypted item payload. Current-schema top-level fields are strict: missing or unknown mandatory planning fields fail deserialization. The schema version is authenticated in item-payload AAD, so relabeling ciphertext across payload versions fails authentication. Readers reject unknown mandatory algorithms/versions rather than guessing. SQLite schema v4 adds encrypted_item_history and is unchanged by payload v10; migration from v1-v3 creates the history table empty and does not synthesize old versions. Each history row is the exact previous authenticated EncryptedItemV1 envelope copied verbatim inside the same transaction that advances the current item revision. History capture therefore does not decrypt/re-encrypt archive copies, and a stale or failed CAS cannot leave a history row. Trash/restore preserve existing history without adding lifecycle-only snapshots; permanent purge deletes all history for that item atomically. Encrypted database backup/restore preserves and validates history rows and bounds. Future payload migrations read with the old format and write a new authenticated format without silently deleting records that fail migration.
 
 The encrypted item envelope also carries a payload schema version. Readers reject
 newer payload schemas before deserialization, preventing an older binary from
@@ -188,4 +210,4 @@ silently reading and later rewriting a newer payload while dropping unknown data
 
 ## Emergency access (future)
 
-Emergency grants will wrap only authorized keys to the trusted recipient's public key using reviewed public-key primitives/libraries. The server controls release timing but never decrypts the capsule. V1 waiting periods are policy enforcement, not cryptographic time-lock encryption.
+Emergency grants will wrap only authorized keys to the trusted recipient's public key using reviewed public-key primitives/libraries. The future release coordinator will control timing but never decrypt the capsule. V1 waiting periods are policy enforcement, not cryptographic time-lock encryption.

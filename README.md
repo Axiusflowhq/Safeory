@@ -16,11 +16,11 @@ Implemented now:
 - `apps/web`, the primary full-vault interface, with setup/unlock/recovery, schema-driven record editing, Emergency Card, recovery kit, search, trash, and a local Today/deadlines view;
 - `apps/extension`, an MV3 browser extension with an isolated background vault, exact-origin credential matching, trusted-click discovery, bounded request throttling, one-shot fill authorization, and a compact credential surface;
 - ciphertext-only browser snapshot validation, IndexedDB CAS persistence, and fail-closed durability poisoning when an in-memory mutation cannot be saved;
-- portable emergency/recovery primitives, encrypted legacy/account-closure planning metadata, bounded history and attachment formats in the native core, plus the Trust Engine policy and threshold-sharing foundations;
+- portable emergency/recovery primitives, encrypted legacy/account-closure planning metadata, bounded history and attachment formats in the native core, plus Trust Engine policy/threshold foundations and local dual-key trusted-device pairing verification;
 - `apps/api` plus a local Docker integration stack for account/device coordination and opaque encrypted-object sync using PostgreSQL, Valkey, S3-compatible object storage, and SMTP; the production target is AWS as documented in `docs/architecture/aws.md`;
 - pinned Rust/JS lockfiles and dependency/security CI policy.
 
-Not implemented yet: complete browser attachment/export parity, full trusted-person grant UX and timed emergency release, automated account closure, account/passkey flows, and end-to-end multi-device sync UX.
+Not implemented yet: complete browser attachment/export parity, recipient-side durable browser device-key storage/pairing responder, timed emergency release, automated account closure, account/passkey flows, and end-to-end multi-device sync UX.
 
 ## Validation
 ```text
@@ -33,9 +33,14 @@ rustup target add wasm32-unknown-unknown
 cargo install wasm-pack --version 0.15.0 --locked
 node scripts/build-vault-wasm.mjs
 corepack pnpm install --frozen-lockfile
+cp .env.example .env
+docker compose config --quiet
 corepack pnpm typecheck
+corepack pnpm test:browser
 corepack pnpm lint
+corepack pnpm check:icons
 corepack pnpm build
+corepack pnpm audit:js
 ```
 
 Security design and known dependency risks live under `docs/security/`.

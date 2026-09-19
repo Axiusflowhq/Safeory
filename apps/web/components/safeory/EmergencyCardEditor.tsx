@@ -1,65 +1,28 @@
 "use client"
 
 import { useState } from "react"
-import type { EmergencyCard, EmergencyContact } from "@safeory/contracts"
-import {
-  Add01Icon,
-  Delete02Icon,
-  ShieldKeyIcon,
-  UserAdd01Icon,
-} from "@hugeicons/core-free-icons"
+import type { EmergencyCard } from "@safeory/contracts"
+import { ShieldKeyIcon } from "@hugeicons/core-free-icons"
 import { HugeiconsIcon } from "@hugeicons/react"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import {
-  Field,
-  FieldDescription,
-  FieldGroup,
-  FieldLabel,
-} from "@/components/ui/field"
-import { Input } from "@/components/ui/input"
-import { Separator } from "@/components/ui/separator"
+import { Field, FieldDescription, FieldLabel } from "@/components/ui/field"
 import { Textarea } from "@/components/ui/textarea"
 
 interface Props {
   initial: EmergencyCard | null
-  onSave: (card: EmergencyCard) => void
+  onSaveInstructions: (instructions: string) => void
 }
 
-const emptyContact: EmergencyContact = {
-  name: "",
-  relation: "",
-  phone: "",
-  email: "",
-  notes: "",
-}
-
-export function EmergencyCardEditor({ initial, onSave }: Props) {
+export function EmergencyCardEditor({ initial, onSaveInstructions }: Props) {
   const [instructions, setInstructions] = useState(initial?.instructions ?? "")
-  const [contacts, setContacts] = useState<EmergencyContact[]>(
-    initial?.contacts ?? []
-  )
-
-  function updateContact(index: number, patch: Partial<EmergencyContact>) {
-    setContacts((previous) =>
-      previous.map((contact, contactIndex) =>
-        contactIndex === index ? { ...contact, ...patch } : contact
-      )
-    )
-  }
 
   return (
     <form
       onSubmit={(event) => {
         event.preventDefault()
-        onSave({
-          selected_item_ids: initial?.selected_item_ids ?? [],
-          instructions,
-          contacts: contacts.filter(
-            (contact) => contact.name.trim().length > 0
-          ),
-        })
+        onSaveInstructions(instructions)
       }}
       className="space-y-6"
     >
@@ -78,7 +41,7 @@ export function EmergencyCardEditor({ initial, onSave }: Props) {
                 Emergency card
               </h2>
               <p className="max-w-[65ch] text-sm text-pretty text-[var(--text-secondary)]">
-                Private instructions and people to contact in an emergency.
+                Private instructions for what should happen in an emergency.
               </p>
             </div>
           </div>
@@ -103,185 +66,6 @@ export function EmergencyCardEditor({ initial, onSave }: Props) {
           your vault.
         </FieldDescription>
       </Field>
-
-      <Separator />
-
-      <section className="space-y-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h3 className="text-sm font-medium">Emergency contacts</h3>
-            <p className="mt-0.5 max-w-[65ch] text-sm text-pretty text-[var(--text-secondary)]">
-              Add people who should be contacted or can help carry out your
-              plan.
-            </p>
-          </div>
-          {contacts.length > 0 ? (
-            <Button
-              type="button"
-              variant="secondary"
-              size="sm"
-              onClick={() =>
-                setContacts((previous) => [...previous, { ...emptyContact }])
-              }
-            >
-              <HugeiconsIcon
-                icon={UserAdd01Icon}
-                strokeWidth={2}
-                data-icon="inline-start"
-              />
-              Add contact
-            </Button>
-          ) : null}
-        </div>
-
-        {contacts.length === 0 ? (
-          <div className="rounded-[var(--radius-default)] border border-dashed bg-[var(--surface-secondary)] px-5 py-8 text-center">
-            <div className="mx-auto mb-3 flex size-9 items-center justify-center rounded-[var(--radius-large)] bg-[var(--surface-secondary)]">
-              <HugeiconsIcon
-                icon={Add01Icon}
-                strokeWidth={2}
-                className="size-4 text-[var(--text-secondary)]"
-              />
-            </div>
-            <p className="text-sm font-medium">No contacts yet</p>
-            <p className="mx-auto mt-1 max-w-[65ch] text-sm text-pretty text-[var(--text-secondary)]">
-              You can save the card without contacts, or add someone now.
-            </p>
-            <Button
-              type="button"
-              variant="secondary"
-              size="sm"
-              className="mt-4"
-              onClick={() =>
-                setContacts((previous) => [...previous, { ...emptyContact }])
-              }
-            >
-              <HugeiconsIcon
-                icon={UserAdd01Icon}
-                strokeWidth={2}
-                data-icon="inline-start"
-              />
-              Add contact
-            </Button>
-          </div>
-        ) : (
-          <div className="space-y-3">
-            {contacts.map((contact, index) => (
-              <div
-                key={index}
-                className="rounded-[var(--radius-default)] border bg-[var(--surface)] p-4 shadow-[var(--fancy-shadow-basic)]"
-              >
-                <div className="mb-4 flex items-center justify-between gap-3">
-                  <div className="min-w-0">
-                    <p
-                      className="truncate text-sm font-medium"
-                      title={contact.name.trim() || `Contact ${index + 1}`}
-                    >
-                      {contact.name.trim() || `Contact ${index + 1}`}
-                    </p>
-                    <p className="text-xs text-[var(--text-secondary)]">
-                      {contact.relation.trim() || "Relationship not specified"}
-                    </p>
-                  </div>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    aria-label={`Remove contact ${index + 1}`}
-                    onClick={() =>
-                      setContacts((previous) =>
-                        previous.filter(
-                          (_, contactIndex) => contactIndex !== index
-                        )
-                      )
-                    }
-                  >
-                    <HugeiconsIcon
-                      icon={Delete02Icon}
-                      strokeWidth={2}
-                      className="text-[var(--danger)]"
-                    />
-                  </Button>
-                </div>
-
-                <FieldGroup className="grid gap-4 sm:grid-cols-2">
-                  <Field>
-                    <FieldLabel htmlFor={`safeory-contact-${index}-name`}>
-                      Name
-                    </FieldLabel>
-                    <Input
-                      id={`safeory-contact-${index}-name`}
-                      value={contact.name}
-                      onChange={(event) =>
-                        updateContact(index, { name: event.target.value })
-                      }
-                      placeholder="Full name"
-                    />
-                  </Field>
-                  <Field>
-                    <FieldLabel htmlFor={`safeory-contact-${index}-relation`}>
-                      Relationship
-                    </FieldLabel>
-                    <Input
-                      id={`safeory-contact-${index}-relation`}
-                      value={contact.relation}
-                      onChange={(event) =>
-                        updateContact(index, { relation: event.target.value })
-                      }
-                      placeholder="Partner, sibling, adviser…"
-                    />
-                  </Field>
-                  <Field>
-                    <FieldLabel htmlFor={`safeory-contact-${index}-phone`}>
-                      Phone
-                    </FieldLabel>
-                    <Input
-                      id={`safeory-contact-${index}-phone`}
-                      type="tel"
-                      inputMode="tel"
-                      value={contact.phone}
-                      onChange={(event) =>
-                        updateContact(index, { phone: event.target.value })
-                      }
-                      placeholder="+1 555 0100"
-                    />
-                  </Field>
-                  <Field>
-                    <FieldLabel htmlFor={`safeory-contact-${index}-email`}>
-                      Email
-                    </FieldLabel>
-                    <Input
-                      id={`safeory-contact-${index}-email`}
-                      type="email"
-                      inputMode="email"
-                      value={contact.email}
-                      onChange={(event) =>
-                        updateContact(index, { email: event.target.value })
-                      }
-                      placeholder="name@example.com"
-                    />
-                  </Field>
-                  <Field className="sm:col-span-2">
-                    <FieldLabel htmlFor={`safeory-contact-${index}-notes`}>
-                      Notes
-                    </FieldLabel>
-                    <Textarea
-                      id={`safeory-contact-${index}-notes`}
-                      value={contact.notes}
-                      onChange={(event) =>
-                        updateContact(index, { notes: event.target.value })
-                      }
-                      placeholder="Optional context or instructions for this contact"
-                      rows={3}
-                      className="resize-y"
-                    />
-                  </Field>
-                </FieldGroup>
-              </div>
-            ))}
-          </div>
-        )}
-      </section>
 
       <div className="flex justify-end border-t pt-5">
         <Button type="submit">Save emergency card</Button>

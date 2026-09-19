@@ -6,6 +6,10 @@ use crate::auth::{hex_encode, parse_public_key_hex};
 
 pub(crate) const MAX_LIST_LIMIT: u16 = 256;
 pub(crate) const DEFAULT_LIST_LIMIT: u16 = 100;
+/// Browser clients represent revisions as JSON/TypeScript numbers. Keep the
+/// wire value within JavaScript's exact integer range so round-trips cannot
+/// silently change a revision and so no client can exhaust an object at i64::MAX.
+pub(crate) const MAX_WIRE_REVISION: i64 = 9_007_199_254_740_991;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ObjectVersion {
@@ -51,7 +55,7 @@ pub(crate) fn validate_write_policy(
     candidate_revision: i64,
     precondition: &WritePrecondition,
 ) -> Result<(), PolicyError> {
-    if candidate_revision < 0 {
+    if !(0..=MAX_WIRE_REVISION).contains(&candidate_revision) {
         return Err(PolicyError::InvalidRevision);
     }
 
@@ -61,6 +65,9 @@ pub(crate) fn validate_write_policy(
             Err(PolicyError::PreconditionFailed)
         }
         (Some(current), WritePrecondition::Match(expected)) => {
+            if !(0..=MAX_WIRE_REVISION).contains(&current.revision) {
+                return Err(PolicyError::InvalidRevision);
+            }
             if current.version() != *expected {
                 return Err(PolicyError::PreconditionFailed);
             }
@@ -88,7 +95,7 @@ pub(crate) fn parse_strong_etag(value: &str) -> Option<ObjectVersion> {
     let payload = inner.strip_prefix("safeory-r")?;
     let (revision, hash) = payload.split_once('-')?;
     let revision = revision.parse::<i64>().ok()?;
-    if revision < 0 {
+    if !(0..=MAX_WIRE_REVISION).contains(&revision) {
         return None;
     }
     let ciphertext_sha256 = parse_public_key_hex(hash)?;
@@ -111,6 +118,9 @@ impl TryFrom<&StoredObject> for ObjectMetadataResponse {
     type Error = ();
 
     fn try_from(value: &StoredObject) -> Result<Self, Self::Error> {
+        if !(0..=MAX_WIRE_REVISION).contains(&value.revision) {
+            return Err(());
+        }
         Ok(Self {
             object_id: value.object_id,
             revision: u64::try_from(value.revision).map_err(|_| ())?,
@@ -177,5 +187,31 @@ mod tests {
             validate_write_policy(Some(&current), 4, &wrong),
             Err(PolicyError::PreconditionFailed)
         );
+    }
+
+    #[test]
+    fn revision_policy_is_bounded_to_exact_browser_integer_range() {
+        assert_eq!(
+            validate_write_policy(None, MAX_WIRE_REVISION, &WritePrecondition::CreateOnly),
+            Ok(())
+        );
+        assert_eq!(
+            validate_write_policy(None, MAX_WIRE_REVISION + 1, &WritePrecondition::CreateOnly),
+            Err(PolicyError::InvalidRevision)
+        );
+
+        let current = stored(MAX_WIRE_REVISION, 3);
+        let expected = WritePrecondition::Match(current.version());
+        assert_eq!(
+            validate_write_policy(Some(&current), MAX_WIRE_REVISION, &expected),
+            Err(PolicyError::InvalidRevision)
+        );
+
+        let too_large = ObjectVersion {
+            revision: MAX_WIRE_REVISION + 1,
+            ciphertext_sha256: [0; 32],
+        };
+        assert!(parse_strong_etag(&strong_etag(&too_large)).is_none());
+        assert!(ObjectMetadataResponse::try_from(&stored(MAX_WIRE_REVISION + 1, 4)).is_err());
     }
 }

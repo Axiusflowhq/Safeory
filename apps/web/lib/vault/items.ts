@@ -18,6 +18,69 @@ export type ItemKind =
   | "receipt"
   | "subscription"
 
+export type LegacyDisposition =
+  "unspecified" | "selected_for_legacy" | "private_forever" | "destroy_on_death"
+
+export type AccountClosureDisposition =
+  "unspecified" | "keep_open" | "close_account" | "review_manually"
+
+export interface AccountClosurePlan {
+  disposition: AccountClosureDisposition
+  instructions: string
+}
+
+export const RECORD_ACCESS_SCOPE = "record"
+export const MAX_ACCESS_GRANTS = 64
+
+export type Permission = "view" | "edit" | "download" | "share" | "manage"
+export type AccessCondition = "normal" | "emergency" | "incapacity" | "death"
+export type WaitPeriod =
+  | "immediate"
+  | "one_hour"
+  | "one_day"
+  | "seven_days"
+  | { custom: number }
+export type GrantDuration =
+  | "until_revoked"
+  | "one_hour"
+  | "one_day"
+  | "seven_days"
+  | { custom: number }
+
+export interface AccessGrant {
+  trustee_id: string
+  what: string
+  permission: Permission
+  condition: AccessCondition
+  wait_period: WaitPeriod
+  duration: GrantDuration
+  approvals_required: number
+  approver_ids: string[]
+}
+
+export interface AccessPolicy {
+  owner_only_default: boolean
+  grants: AccessGrant[]
+  private_forever: boolean
+  destruction: "death" | null
+  [key: string]: unknown
+}
+
+export function ownerOnlyAccessPolicy(): AccessPolicy {
+  return {
+    owner_only_default: true,
+    grants: [],
+    private_forever: false,
+    destruction: null,
+  }
+}
+
+export interface ItemPlanningPreferences {
+  legacyDisposition: LegacyDisposition
+  accountClosurePlan: AccountClosurePlan
+  accessPolicy?: AccessPolicy
+}
+
 /**
  * Mirrors `vault_models::VaultItem` while allowing forward-compatible fields
  * added by the core to survive a UI edit round-trip.
@@ -28,8 +91,9 @@ export interface VaultItemJson {
   title: string
   links: string[]
   attachments: string[]
-  legacy_disposition: string
-  account_closure_plan: { disposition: string; instructions: string }
+  legacy_disposition: LegacyDisposition
+  account_closure_plan: AccountClosurePlan
+  access_policy: AccessPolicy
   fields: Record<string, string>
   notes: string | null
   [key: string]: unknown
@@ -61,6 +125,7 @@ function baseItem(id: string, kind: ItemKind, title: string): VaultItemJson {
     attachments: [],
     legacy_disposition: "unspecified",
     account_closure_plan: { disposition: "unspecified", instructions: "" },
+    access_policy: ownerOnlyAccessPolicy(),
     fields: {},
     notes: null,
   }
@@ -159,11 +224,17 @@ export function buildItem(
   kind: ItemKind,
   title: string,
   fields: Record<string, string>,
-  notes: string
+  notes: string,
+  planning: ItemPlanningPreferences
 ): VaultItemJson {
   const item = baseItem(id, kind, title)
   item.fields = { ...fields }
   item.notes = notes.length > 0 ? notes : null
+  item.legacy_disposition = planning.legacyDisposition
+  if (planning.accessPolicy) item.access_policy = planning.accessPolicy
+  if (kind === "password") {
+    item.account_closure_plan = { ...planning.accountClosurePlan }
+  }
   return item
 }
 
@@ -178,7 +249,8 @@ export function buildEditedItem(
   kind: ItemKind,
   title: string,
   fields: Record<string, string>,
-  notes: string
+  notes: string,
+  planning: ItemPlanningPreferences
 ): VaultItemJson {
   const nextFields = { ...existing.fields }
   for (const spec of KIND_FIELDS[kind] ?? []) {
@@ -192,6 +264,12 @@ export function buildEditedItem(
     id: existing.id,
     kind,
     title,
+    legacy_disposition: planning.legacyDisposition,
+    account_closure_plan:
+      kind === "password"
+        ? { ...planning.accountClosurePlan }
+        : existing.account_closure_plan,
+    access_policy: planning.accessPolicy ?? existing.access_policy,
     fields: nextFields,
     notes: notes.length > 0 ? notes : null,
   }

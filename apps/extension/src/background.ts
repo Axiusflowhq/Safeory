@@ -6,6 +6,7 @@
  */
 
 import init, { WasmVault } from "vault-wasm";
+import { createSerializedMutationRunner } from "./mutation";
 import { loadSnapshot, saveSnapshot } from "./storage";
 import type {
   ContentRequest,
@@ -23,6 +24,7 @@ type ExtensionWasmVault = WasmVault & {
 
 let vault: ExtensionWasmVault | null = null;
 let initPromise: Promise<void> | null = null;
+let vaultLoadPromise: Promise<ExtensionWasmVault> | null = null;
 
 const CONTENT_FIND_COOLDOWN_MS = 1_000;
 const CONTENT_FILL_AUTH_TTL_MS = 30_000;
@@ -52,14 +54,44 @@ function ensureInit(): Promise<void> {
 async function getVault(): Promise<ExtensionWasmVault> {
   await ensureInit();
   if (vault) return vault;
-  const snapshot = await loadSnapshot();
-  vault = (snapshot === null ? new WasmVault() : WasmVault.fromSnapshotJson(snapshot)) as ExtensionWasmVault;
-  return vault;
+  vaultLoadPromise ??= loadSnapshot()
+    .then((snapshot) => {
+      const loaded = (snapshot === null
+        ? new WasmVault()
+        : WasmVault.fromSnapshotJson(snapshot)) as ExtensionWasmVault;
+      vault = loaded;
+      return loaded;
+    })
+    .finally(() => {
+      vaultLoadPromise = null;
+    });
+  return vaultLoadPromise;
 }
 
-async function persist(): Promise<void> {
-  if (vault) await saveSnapshot(vault.snapshotJson());
-}
+/**
+ * Serialize persistent mutations and fail closed if chrome.storage cannot
+ * durably save the resulting ciphertext snapshot. Dropping the mutated WASM
+ * instance guarantees a later request reloads the last durable snapshot and
+ * starts locked instead of accidentally persisting a previously failed change.
+ */
+const mutateAndPersist = createSerializedMutationRunner<ExtensionWasmVault>({
+  acquire: getVault,
+  persist: async (current) => {
+    try {
+      await saveSnapshot(current.snapshotJson());
+    } catch {
+      throw new Error("Saving the encrypted vault failed. Reload before continuing.");
+    }
+  },
+  discard: (current) => {
+    if (vault === current) vault = null;
+    try {
+      current.lock();
+    } catch {
+      // Dropping the shared reference is authoritative even if lock fails.
+    }
+  },
+});
 
 // --- Credential extraction from the generic item model ---
 
@@ -75,13 +107,11 @@ function listCredentials(v: ExtensionWasmVault): CredentialSummary[] {
 }
 
 async function addCredential(
-  v: WasmVault,
   title: string,
   username: string,
   password: string,
   website: string,
 ): Promise<PopupResponse> {
-  if (!v.isUnlocked()) return { type: "error", error: "locked" };
   const normalizedTitle = title.trim();
   if (normalizedTitle.length === 0) return { type: "error", error: "title is required" };
   const normalizedWebsite = website.trim();
@@ -106,8 +136,10 @@ async function addCredential(
     fields: { username, password, website: websiteOrigin },
     notes: null,
   };
-  v.putItemJson(JSON.stringify(item));
-  await persist();
+  await mutateAndPersist((current) => {
+    if (!current.isUnlocked()) throw new Error("locked");
+    current.putItemJson(JSON.stringify(item));
+  });
   return { type: "ok" };
 }
 
@@ -298,17 +330,25 @@ chrome.runtime.onMessage.addListener((raw: unknown, sender, sendResponse) => {
         if (!lookup.ok) {
           return { type: "error", error: "request throttled" } satisfies ContentResponse;
         }
-        return findCredentials(await getVault(), context.origin, lookup.authorization);
+        return mutateAndPersist.access((v) =>
+          findCredentials(v, context.origin, lookup.authorization),
+        );
       }
       case "fillCredential": {
         const context = contentContextFromSender(sender);
         if (context === null) {
           return { type: "error", error: "unauthorized sender" } satisfies ContentResponse;
         }
-        if (!consumeFillAuthorization(context, msg.authorization)) {
-          return { type: "fill", ok: false, error: "authorization required" } satisfies ContentResponse;
-        }
-        return fillCredential(await getVault(), msg.id, context.origin);
+        return mutateAndPersist.access((v) => {
+          if (!consumeFillAuthorization(context, msg.authorization)) {
+            return {
+              type: "fill",
+              ok: false,
+              error: "authorization required",
+            } satisfies ContentResponse;
+          }
+          return fillCredential(v, msg.id, context.origin);
+        });
       }
 
       // Popup surface (trusted extension page).
@@ -316,59 +356,55 @@ chrome.runtime.onMessage.addListener((raw: unknown, sender, sendResponse) => {
         if (!isExtensionPageSender(sender)) {
           return { type: "error", error: "unauthorized sender" } satisfies PopupResponse;
         }
-        const v = await getVault();
-        return {
+        return mutateAndPersist.access((v) => ({
           type: "state",
           initialized: v.isInitialized(),
           unlocked: v.isUnlocked(),
           credentialCount: v.isUnlocked() ? listCredentials(v).length : 0,
-        } satisfies PopupResponse;
+        } satisfies PopupResponse));
       }
       case "create": {
         if (!isExtensionPageSender(sender)) {
           return { type: "error", error: "unauthorized sender" } satisfies PopupResponse;
         }
-        const v = await getVault();
-        v.create(msg.passphrase);
-        await persist();
+        await mutateAndPersist((v) => v.create(msg.passphrase));
         return { type: "ok" } satisfies PopupResponse;
       }
       case "unlock": {
         if (!isExtensionPageSender(sender)) {
           return { type: "error", error: "unauthorized sender" } satisfies PopupResponse;
         }
-        const v = await getVault();
-        v.unlock(msg.passphrase);
+        await mutateAndPersist.access((v) => v.unlock(msg.passphrase));
         return { type: "ok" } satisfies PopupResponse;
       }
       case "unlockWithRecoveryKit": {
         if (!isExtensionPageSender(sender)) {
           return { type: "error", error: "unauthorized sender" } satisfies PopupResponse;
         }
-        const v = await getVault();
-        v.unlockWithRecoveryKit(msg.secretHex);
+        await mutateAndPersist.access((v) => v.unlockWithRecoveryKit(msg.secretHex));
         return { type: "ok" } satisfies PopupResponse;
       }
       case "lock": {
         if (!isExtensionPageSender(sender)) {
           return { type: "error", error: "unauthorized sender" } satisfies PopupResponse;
         }
-        const v = await getVault();
-        v.lock();
+        await mutateAndPersist.access((v) => v.lock());
         return { type: "ok" } satisfies PopupResponse;
       }
       case "listCredentials": {
         if (!isExtensionPageSender(sender)) {
           return { type: "error", error: "unauthorized sender" } satisfies PopupResponse;
         }
-        return { type: "credentials", items: listCredentials(await getVault()) } satisfies PopupResponse;
+        return mutateAndPersist.access((v) => ({
+          type: "credentials",
+          items: listCredentials(v),
+        } satisfies PopupResponse));
       }
       case "addCredential": {
         if (!isExtensionPageSender(sender)) {
           return { type: "error", error: "unauthorized sender" } satisfies PopupResponse;
         }
         return await addCredential(
-          await getVault(),
           msg.title,
           msg.username,
           msg.password,
@@ -379,7 +415,7 @@ chrome.runtime.onMessage.addListener((raw: unknown, sender, sendResponse) => {
         if (!isExtensionPageSender(sender)) {
           return { type: "error", error: "unauthorized sender" } satisfies PopupResponse;
         }
-        return await copyPassword(await getVault(), msg.id);
+        return mutateAndPersist.access((v) => copyPassword(v, msg.id));
       }
       case "generatePassword":
         if (!isExtensionPageSender(sender)) {

@@ -6,17 +6,38 @@ This register records security-relevant direct dependencies and narrowly scoped 
 
 ## New direct crypto dependency: `x25519-dalek` 2.0.1 (pinned)
 
-- Pulled in by `vault-sharing` for the ephemeral-static X25519 device-share
-  envelope (`safeory:v1:share-wrap`). Pinned `=2.0.1` with `static_secrets`
+- Pulled in by `vault-sharing` for the X25519 device-share envelope
+  (`safeory:v2:share-wrap`) and by `vault-models` to reject non-contributory
+  recipient-encryption public keys before they enter the trusted-principal
+  registry. Pinned `=2.0.1` with `static_secrets`
   (default features kept on so the `zeroize` drop handling for `StaticSecret`
   / `SharedSecret` stays active — verified against the vendored source; the
   memory-handling section of `cryptography.md` depends on this).
 - No custom curve code: ephemeral keygen, DH, and contributory checks all come
-  from the audited crate; Safeory only adds HKDF key separation and
-  AEAD envelope framing with reviewed RustCrypto primitives.
+  from the audited crate; Safeory only adds key encoding/bounds, HKDF key
+  separation, and AEAD envelope framing with reviewed RustCrypto primitives.
 - Watch items: keep pinned; re-verify `zeroize`-as-default on every upgrade;
   `cargo audit`/`cargo deny` must stay green (any new advisory follows the
   review rule below, not a silent ignore).
+
+## New direct crypto dependency: `ed25519-dalek` 3.0.0 (pinned)
+
+- Pulled in by `vault-sharing` for the dedicated trusted-device signing identity
+  and by `vault-models` to validate persisted Ed25519 verification keys. It is
+  pinned `=3.0.0`; Safeory uses raw 32-byte verification keys, 64-byte
+  signatures, `verify_strict`, and the crate's weak-key check. The signing key is
+  role-separated from the existing X25519 recipient-encryption key.
+- Pairing signs a fixed binary, domain-separated transcript after the candidate
+  device decrypts a one-time X25519 challenge. This proves possession of both
+  private keys at pairing time; it does not verify a human identity and does not
+  make the existing X25519 share-envelope sender field a signature.
+- The dependency brings `curve25519-dalek` 5 alongside `x25519-dalek` 2.0.1's
+  older curve25519 line. That duplicate is intentional for now: deduplicating by
+  upgrading X25519 would change a separately reviewed secret/zeroization path and
+  must not be bundled into the signing change merely to reduce the graph.
+- Watch items: keep pinned; do not enable legacy/hazmat features; review any
+  Ed25519 or curve25519 advisory immediately; re-run `cargo audit` and `cargo
+  deny` on every upgrade.
 
 ## New direct crypto dependency: `blahaj` 0.6.0 (pinned)
 

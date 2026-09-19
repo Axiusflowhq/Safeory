@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 name = "vault-emergency"
 version = "0.1.0"
 edition.workspace = true
@@ -7,12 +7,9 @@ license.workspace = true
 
 [dependencies]
 blahaj.workspace = true
-serde.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 vault-crypto = { path = "../vault-crypto", version = "=0.1.0" }
+vault-models = { path = "../vault-models", version = "=0.1.0" }
 vault-sharing = { path = "../vault-sharing", version = "=0.1.0" }
 zeroize.workspace = true
-
-[dev-dependencies]
-vault-models = { path = "../vault-models", version = "=0.1.0" }

@@ -6,6 +6,8 @@ use rusqlite::{
     Connection, OptionalExtension, Transaction, TransactionBehavior, backup::Backup, params,
 };
 #[cfg(feature = "sqlite")]
+use sha2::{Digest, Sha256};
+#[cfg(feature = "sqlite")]
 use std::{path::Path, time::Duration};
 use thiserror::Error;
 use uuid::Uuid;
@@ -17,6 +19,10 @@ use vault_crypto::{
 use vault_crypto::{EncryptedItemV1, RecoveryKitWrapV1, RootKeyWrapV1};
 
 const CURRENT_SCHEMA_VERSION: i64 = 4;
+#[cfg(feature = "sqlite")]
+const RESTORE_SOURCE_FINGERPRINT_DOMAIN: &[u8] = b"safeory:v1:restore-source-fingerprint";
+#[cfg(feature = "sqlite")]
+pub type RestoreSourceFingerprint = [u8; 32];
 /// Resource ceiling for local encrypted item rows. This is intentionally far
 /// above normal product use while keeping validation/list allocations bounded.
 pub const ITEM_MAX_OBJECTS: u64 = 65_536;
@@ -104,6 +110,8 @@ pub enum StorageError {
     IntegrityCheckFailed,
     #[error("unsupported local database schema version {0}")]
     UnsupportedSchemaVersion(i64),
+    #[error("restore source changed after it was authenticated")]
+    RestoreSourceChanged,
 }
 
 #[cfg(feature = "sqlite")]
@@ -260,6 +268,20 @@ impl VaultStorage {
             return Err(StorageError::NotInitialized);
         }
         Ok(())
+    }
+
+    pub fn restore_source_fingerprint(&self) -> Result<RestoreSourceFingerprint, StorageError> {
+        fingerprint_restore_source(&self.connection, "main")
+    }
+
+    pub fn rewrap_restore_source_if_fingerprint(
+        path: impl AsRef<Path>,
+        expected_fingerprint: &RestoreSourceFingerprint,
+        wrapped: &RootKeyWrapV1,
+    ) -> Result<RestoreSourceFingerprint, StorageError> {
+        let connection = Connection::open(path)?;
+        connection.pragma_update(None, "foreign_keys", "ON")?;
+        replace_root_wrap_on_connection_if_fingerprint(&connection, expected_fingerprint, wrapped)
     }
 
     pub fn is_initialized(&self) -> Result<bool, StorageError> {
@@ -1119,11 +1141,27 @@ impl VaultStorage {
     }
 
     pub fn replace_from_database(&self, path: impl AsRef<Path>) -> Result<(), StorageError> {
+        self.replace_from_database_inner(path.as_ref(), None)
+    }
+
+    pub fn replace_from_database_if_fingerprint(
+        &self,
+        path: impl AsRef<Path>,
+        expected_fingerprint: &RestoreSourceFingerprint,
+    ) -> Result<(), StorageError> {
+        self.replace_from_database_inner(path.as_ref(), Some(expected_fingerprint))
+    }
+
+    fn replace_from_database_inner(
+        &self,
+        path: &Path,
+        expected_fingerprint: Option<&RestoreSourceFingerprint>,
+    ) -> Result<(), StorageError> {
         let connection = Connection::open(&self.path)?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
         connection.execute(
             "ATTACH DATABASE ?1 AS safeory_restore",
-            params![path.as_ref().to_string_lossy().as_ref()],
+            params![path.to_string_lossy().as_ref()],
         )?;
         let transaction = connection.unchecked_transaction()?;
         let max_record = i64::try_from(ATTACHMENT_MAX_ENCRYPTED_RECORD_BYTES)
@@ -1264,6 +1302,12 @@ impl VaultStorage {
         {
             return Err(StorageError::InconsistentEncryptedRow);
         }
+        if let Some(expected_fingerprint) = expected_fingerprint {
+            let actual_fingerprint = fingerprint_restore_source(&transaction, "safeory_restore")?;
+            if actual_fingerprint != *expected_fingerprint {
+                return Err(StorageError::RestoreSourceChanged);
+            }
+        }
         transaction.execute("DELETE FROM vault_meta", [])?;
         transaction.execute(
             "INSERT INTO vault_meta(singleton, root_key_wrap) SELECT singleton, root_key_wrap FROM safeory_restore.vault_meta",
@@ -1326,6 +1370,205 @@ impl VaultStorage {
             items,
         })
     }
+}
+
+#[cfg(feature = "sqlite")]
+fn replace_root_wrap_on_connection_if_fingerprint(
+    connection: &Connection,
+    expected_fingerprint: &RestoreSourceFingerprint,
+    wrapped: &RootKeyWrapV1,
+) -> Result<RestoreSourceFingerprint, StorageError> {
+    let encoded = serde_json::to_vec(wrapped)?;
+    if encoded.len() > ROOT_WRAP_MAX_ENCODED_BYTES {
+        return Err(StorageError::InconsistentEncryptedRow);
+    }
+    let transaction = Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
+    let has_triggers: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'trigger')",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_triggers {
+        return Err(StorageError::RestoreSourceChanged);
+    }
+    let actual_fingerprint = fingerprint_restore_source(&transaction, "main")?;
+    if actual_fingerprint != *expected_fingerprint {
+        return Err(StorageError::RestoreSourceChanged);
+    }
+    let changed = transaction.execute(
+        "UPDATE vault_meta SET root_key_wrap = ?1 WHERE singleton = 1",
+        params![encoded],
+    )?;
+    if changed != 1 {
+        return Err(StorageError::NotInitialized);
+    }
+    let updated_fingerprint = fingerprint_restore_source(&transaction, "main")?;
+    transaction.commit()?;
+    Ok(updated_fingerprint)
+}
+
+#[cfg(feature = "sqlite")]
+fn fingerprint_restore_source(
+    connection: &Connection,
+    schema: &str,
+) -> Result<RestoreSourceFingerprint, StorageError> {
+    let schema = match schema {
+        "main" => "main",
+        "safeory_restore" => "safeory_restore",
+        _ => unreachable!("restore fingerprint schema is internal"),
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(RESTORE_SOURCE_FINGERPRINT_DOMAIN);
+
+    fingerprint_table_start(&mut hasher, b"schema_migrations");
+    let mut statement = connection.prepare(&format!(
+        "SELECT version FROM {schema}.schema_migrations ORDER BY version ASC"
+    ))?;
+    let rows = statement.query_map([], |row| row.get::<_, i64>(0))?;
+    for row in rows {
+        fingerprint_row_start(&mut hasher);
+        fingerprint_i64(&mut hasher, row?);
+    }
+
+    fingerprint_table_start(&mut hasher, b"vault_meta");
+    let mut statement = connection.prepare(&format!(
+        "SELECT singleton, root_key_wrap FROM {schema}.vault_meta ORDER BY singleton ASC"
+    ))?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+    })?;
+    for row in rows {
+        let (singleton, root_key_wrap) = row?;
+        fingerprint_row_start(&mut hasher);
+        fingerprint_i64(&mut hasher, singleton);
+        fingerprint_bytes(&mut hasher, &root_key_wrap);
+    }
+
+    fingerprint_table_start(&mut hasher, b"encrypted_items");
+    let mut statement = connection.prepare(&format!(
+        "SELECT object_id, revision, encrypted_record FROM {schema}.encrypted_items ORDER BY object_id ASC"
+    ))?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, Vec<u8>>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (object_id, revision, encrypted_record) = row?;
+        fingerprint_row_start(&mut hasher);
+        fingerprint_bytes(&mut hasher, object_id.as_bytes());
+        fingerprint_i64(&mut hasher, revision);
+        fingerprint_bytes(&mut hasher, &encrypted_record);
+    }
+
+    fingerprint_table_start(&mut hasher, b"recovery_kit");
+    let mut statement = connection.prepare(&format!(
+        "SELECT singleton, kit_wrap FROM {schema}.recovery_kit ORDER BY singleton ASC"
+    ))?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+    })?;
+    for row in rows {
+        let (singleton, kit_wrap) = row?;
+        fingerprint_row_start(&mut hasher);
+        fingerprint_i64(&mut hasher, singleton);
+        fingerprint_bytes(&mut hasher, &kit_wrap);
+    }
+
+    fingerprint_table_start(&mut hasher, b"encrypted_attachments");
+    let mut statement = connection.prepare(&format!(
+        "SELECT attachment_id, revision, encrypted_record FROM {schema}.encrypted_attachments ORDER BY attachment_id ASC"
+    ))?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, Vec<u8>>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (attachment_id, revision, encrypted_record) = row?;
+        fingerprint_row_start(&mut hasher);
+        fingerprint_bytes(&mut hasher, attachment_id.as_bytes());
+        fingerprint_i64(&mut hasher, revision);
+        fingerprint_bytes(&mut hasher, &encrypted_record);
+    }
+
+    fingerprint_table_start(&mut hasher, b"attachment_chunks");
+    let mut statement = connection.prepare(&format!(
+        "SELECT attachment_id, chunk_index, ciphertext FROM {schema}.attachment_chunks ORDER BY attachment_id ASC, chunk_index ASC"
+    ))?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, Vec<u8>>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (attachment_id, chunk_index, ciphertext) = row?;
+        fingerprint_row_start(&mut hasher);
+        fingerprint_bytes(&mut hasher, attachment_id.as_bytes());
+        fingerprint_i64(&mut hasher, chunk_index);
+        fingerprint_bytes(&mut hasher, &ciphertext);
+    }
+
+    fingerprint_table_start(&mut hasher, b"encrypted_item_history");
+    let history_exists: bool = connection.query_row(
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM {schema}.sqlite_master WHERE type = 'table' AND name = 'encrypted_item_history')"
+        ),
+        [],
+        |row| row.get(0),
+    )?;
+    hasher.update([u8::from(history_exists)]);
+    if history_exists {
+        let mut statement = connection.prepare(&format!(
+            "SELECT history_id, object_id, revision, encrypted_record FROM {schema}.encrypted_item_history ORDER BY history_id ASC"
+        ))?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Vec<u8>>(3)?,
+            ))
+        })?;
+        for row in rows {
+            let (history_id, object_id, revision, encrypted_record) = row?;
+            fingerprint_row_start(&mut hasher);
+            fingerprint_i64(&mut hasher, history_id);
+            fingerprint_bytes(&mut hasher, object_id.as_bytes());
+            fingerprint_i64(&mut hasher, revision);
+            fingerprint_bytes(&mut hasher, &encrypted_record);
+        }
+    }
+
+    Ok(hasher.finalize().into())
+}
+
+#[cfg(feature = "sqlite")]
+fn fingerprint_table_start(hasher: &mut Sha256, name: &[u8]) {
+    hasher.update([0xff]);
+    fingerprint_bytes(hasher, name);
+}
+
+#[cfg(feature = "sqlite")]
+fn fingerprint_row_start(hasher: &mut Sha256) {
+    hasher.update([0x01]);
+}
+
+#[cfg(feature = "sqlite")]
+fn fingerprint_i64(hasher: &mut Sha256, value: i64) {
+    hasher.update(value.to_be_bytes());
+}
+
+#[cfg(feature = "sqlite")]
+fn fingerprint_bytes(hasher: &mut Sha256, value: &[u8]) {
+    hasher.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+    hasher.update(value);
 }
 
 #[cfg(feature = "sqlite")]

@@ -45,9 +45,9 @@ recovery secrets, and unlocked search stay on authorized clients.
 
 ## Phase map (ordered; each phase keeps all verification gates green)
 ### Phase 1 — Finish V1 local platform + WASM extraction (core complete)
-**Verification status: 233 Rust tests pass (0 failed) workspace-wide in
-release; `cargo deny` advisories/bans/licenses/sources all ok; web +
-extension + contracts typecheck/lint/build green.**
+**Verification status: workspace Rust tests and dependency-policy gates are
+green; contracts typecheck/test/lint and web + extension typecheck/test/lint/build
+gates are green, including the generated-WASM Node smoke test.**
 - ✅ DONE: `vault-storage` is now storage-agnostic. A `VaultStore` trait
   carries the portable data path; `rusqlite` is an optional `sqlite` feature
   (default-on for native SQLite users, off for WASM). Added a serializable `KVSnapshot`
@@ -74,7 +74,12 @@ extension + contracts typecheck/lint/build green.**
   from lists, CAS revisions), recovery kit (generate/install/verify/
   unlock-with via hex secret), and strong-password generation, each mirrored
   from `vault-core` with fail-closed tests. Verified in Node across the real
-  WASM boundary (smoke.test.mjs covers all ten behaviors).
+  WASM boundary (`smoke.test.mjs` is part of `test:browser` and covers the
+  browser-vault crypto/durability surface including principal/grant/retirement
+  state; v10 pairing protocol/completion semantics are covered by native Rust
+  tests, including the `vault-wasm` crate, while generated-WASM smoke does not
+  exercise pairing until a shipped recipient responder can drive that flow end
+  to end).
 - ✅ DONE: `apps/web` vault UI — sidebar by record type with counts, item
   list + search, and schema-driven create/edit forms for ALL record kinds
   (credentials with inline generator, notes, documents, insurance, financial,
@@ -98,14 +103,19 @@ extension + contracts typecheck/lint/build green.**
   **popup** mini-vault (unlock/lock, credential list/add, password generator).
   Ciphertext snapshot persists via `chrome.storage.local`. typecheck/lint/
   build all green.
-- TODO: close remaining PLAN.md local-only partials (grant persistence in
-  payloads, trusted-person local model UX).
+- ✅ DONE: encrypted per-item grant persistence, separate continuity-contact and
+  stable local principal registries, bounded recipient-encryption device bindings,
+  and browser grant-planning UX for per-record rules. TODO: a durable
+  recipient-side device-key backend/pairing responder plus signed release/approval
+  enforcement before any grant is actionable outside local planning. Local
+  dual-key pairing verification is implemented; it does not enable release.
 - ✅ DONE: Today/deadlines is exposed as a redacted unlocked-only WASM projection and rendered lazily in the web app. TODO: browser attachments and item links/jump navigation; add headless-browser `wasm-pack test` when a browser is available.
-- Keep gates: `cargo fmt/clippy/test/audit/deny`, pnpm typecheck/lint/build.
+- Keep gates: frozen-lockfile install, `cargo fmt/clippy/test/audit/deny`, Compose
+  config validation, pnpm typecheck/test:browser/lint/check:icons/build/audit:js.
 
 ### Phase 2 — Credential core upgrade (pure `vault-*` crates)
 Make credentials a first-class password-manager record, not a secure note:
-- Payload schema v5: structured login item (multiple URLs/hosts, username,
+- A future payload schema after current v10: structured login item (multiple URLs/hosts, username,
   password, password history, encrypted TOTP seed, notes, custom fields).
 - Password-strength audit in `vault-core` (local scoring, reuse detection,
   age alerts) feeding the Today panel and the extension badge.

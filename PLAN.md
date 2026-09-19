@@ -28,8 +28,8 @@ Rule: cloud integration starts only after the local platform below is stable.
 ### PEOPLE
 | # | Item | Status |
 |---|------|--------|
-| 10 | Trusted people | 🟡 Partial — emergency contacts live in the Emergency Card; no trust graph, no device keys UX |
-| 11 | Granular permissions | 🟡 Crypto/policy core only — `vault-emergency` evaluates View/Edit/Download/Share/Manage; no persistence in payloads, no UX |
+| 10 | Trusted people | 🟡 Partial — encrypted continuity contacts are separate from stable principal UUIDs; devices have role-separated X25519/Ed25519 identities with local dual-key pairing proof, while remote trust/release coordination remains |
+| 11 | Granular permissions | 🟡 Partial — per-item encrypted `AccessPolicy` persistence + fail-closed evaluation + browser planning UX for explicit principal-bound record rules are implemented; authenticated release/approval enforcement remains |
 
 ### PLAN
 | # | Item | Status |
@@ -46,7 +46,7 @@ Rule: cloud integration starts only after the local platform below is stable.
 | 17 | Client-side encryption | ✅ Done — XChaCha20-Poly1305, per-item keys, Argon2id KEK |
 | 18 | Zero-knowledge server | 🟡 Partial — `apps/api` implements account/device coordination and opaque revision-fenced ciphertext sync; production AWS account/auth integration and end-to-end client sync are still in progress |
 | 19 | Local encrypted vault | ✅ Done — SQLite ciphertext-only, rollback-journal tested |
-| 20 | E2EE sharing | 🟡 Crypto layer done (`vault-sharing`: X25519 ephemeral-static, fingerprint-bound, purpose-separated); no transport |
+| 20 | E2EE sharing | 🟡 Partial — `vault-sharing` v2 provides recipient-confidential X25519 envelopes plus a separate Ed25519 trusted-device pairing/signing foundation; share-v2's `sender_public` itself remains unauthenticated and there is no transport/release protocol |
 | 21 | Recovery kit | ✅ Done — save/print, install/confirm, live-key replacement, unlock-with-kit, recovery-authenticated backup restore with new passphrase, 2-of-3 social recovery crypto + e2e test |
 | 22 | Device management | 🟡 Partial — configurable auto-lock, lock-on-background, settings, Strict local lock shortcut; no multi-device, no revoke, no travel mode |
 | 23 | Portable export | ✅ Done — readable JSON + encrypted DB backup to user-chosen paths |
@@ -57,7 +57,7 @@ Rule: cloud integration starts only after the local platform below is stable.
 - Compartment key hierarchy: spec'd, not coded (`safeory:v1:compartment-wrap`).
 
 ## Backlog — ordered, post-V1
-1. Grant persistence inside item payloads + trusted-person management UX.
+1. Finish trusted-device pairing delivery: the dual-key X25519+Ed25519 proof, v10 persisted signing binding, native/WASM completion boundary, and contracts are implemented. Add a durable browser/device secure-key-store backend plus recipient-side pairing responder before exposing the product pairing workflow or treating browser devices as long-lived authenticators. Contacts remain separate; pairing proves device-key possession, not human identity.
 2. Emergency timed-release state machine (local simulation first, then durable PostgreSQL + worker coordination on AWS).
 3. Enforce legacy/private-forever/destruction intent through trusted-person + emergency-release state once that machinery exists.
 4. Plan test (simulation) + preparedness score beyond today's local readiness checks.
@@ -75,5 +75,6 @@ autofill is a core extension feature and is intentionally in scope.
 ## Verification gates (must stay green)
 `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
 `cargo test --workspace`, `cargo audit`, `cargo deny check advisories bans licenses sources`,
-`pnpm typecheck`, `pnpm lint`, `pnpm build`. Dependency additions follow the review
+frozen-lockfile JavaScript install, Compose config validation, `pnpm typecheck`, `pnpm test:browser`, `pnpm lint`,
+`pnpm check:icons`, `pnpm build`, and `pnpm audit:js`. Dependency additions follow the review
 rule in `docs/security/dependency-risk-register.md` — deny failures block, no silent ignores.

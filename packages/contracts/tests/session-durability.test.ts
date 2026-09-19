@@ -12,15 +12,23 @@ class FakeVault implements WasmVaultLike {
   unlocked: boolean;
   recoveryInstalled: boolean;
   putCount = 0;
+  sessionResumeCount = 0;
   snapshotCount = 0;
   deadlineJson = "[]";
   failMutation = false;
   private readonly onPut: (() => void) | undefined;
+  private readonly expectedResumePayload: string | null;
 
-  constructor(unlocked = true, recoveryInstalled = false, onPut?: () => void) {
+  constructor(
+    unlocked = true,
+    recoveryInstalled = false,
+    onPut?: () => void,
+    expectedResumePayload: string | null = null,
+  ) {
     this.unlocked = unlocked;
     this.recoveryInstalled = recoveryInstalled;
     this.onPut = onPut;
+    this.expectedResumePayload = expectedResumePayload;
   }
 
   isInitialized(): boolean {
@@ -42,10 +50,14 @@ class FakeVault implements WasmVaultLike {
   }
 
   createSessionResumeJson(): string {
-    return JSON.stringify({ secret: "resume", wrapped: {} });
+    this.sessionResumeCount += 1;
+    return JSON.stringify({ secret: `resume-${this.sessionResumeCount}`, wrapped: {} });
   }
 
-  unlockWithSessionResumeJson(): void {
+  unlockWithSessionResumeJson(payloadJson: string): void {
+    if (this.expectedResumePayload !== null && payloadJson !== this.expectedResumePayload) {
+      throw new Error("stale resume payload");
+    }
     this.unlocked = true;
   }
 
@@ -88,6 +100,23 @@ class FakeVault implements WasmVaultLike {
     return 1n;
   }
 
+  createTrustedDevicePairingChallengeJson(principalId: string, deviceId: string): string {
+    return JSON.stringify({
+      format_version: 1,
+      request_id: "00000000-0000-4000-8000-000000000001",
+      principal_id: principalId,
+      device_id: deviceId,
+      encryption_public: Array(32).fill(1),
+      verifier_ephemeral_public: Array(32).fill(2),
+      nonce: Array(24).fill(3),
+      ciphertext: Array(48).fill(4),
+    });
+  }
+
+  completeTrustedDevicePairingJson(): bigint {
+    return 2n;
+  }
+
   installRecoveryKit(): void {
     this.recoveryInstalled = true;
   }
@@ -111,8 +140,8 @@ type SessionConstructor = new (
   persistenceVersion: number,
 ) => VaultSession;
 
-function newSession(factory: VaultFactory, vault: WasmVaultLike): VaultSession {
-  return new (VaultSession as unknown as SessionConstructor)(factory, vault, 0);
+function newSession(factory: VaultFactory, vault: WasmVaultLike, persistenceVersion = 0): VaultSession {
+  return new (VaultSession as unknown as SessionConstructor)(factory, vault, persistenceVersion);
 }
 
 function installFailingIndexedDb(): void {
@@ -132,6 +161,40 @@ function installFailingIndexedDb(): void {
         put() {
           const request: Record<string, unknown> = { error: new Error("disk full") };
           queueMicrotask(() => (request.onerror as (() => void) | undefined)?.());
+          return request;
+        },
+      };
+      tx.objectStore = () => store;
+      return tx;
+    },
+  };
+
+  globalThis.indexedDB = {
+    open() {
+      const request: Record<string, unknown> = { error: null, result: db };
+      queueMicrotask(() => (request.onsuccess as (() => void) | undefined)?.());
+      return request;
+    },
+  } as unknown as IDBFactory;
+}
+
+function installSnapshotIndexedDb(record: {
+  format: number;
+  version: number;
+  snapshotJson: string | null;
+}): void {
+  const db = {
+    close() {},
+    transaction() {
+      const tx: Record<string, unknown> = { error: null };
+      const store = {
+        get() {
+          const request: Record<string, unknown> = { error: null, result: undefined };
+          queueMicrotask(() => {
+            request.result = record;
+            (request.onsuccess as (() => void) | undefined)?.();
+            queueMicrotask(() => (tx.oncomplete as (() => void) | undefined)?.());
+          });
           return request;
         },
       };
@@ -183,6 +246,45 @@ test("WASM mutation errors remain recoverable and do not poison the session", as
   await assert.rejects(session.putItem("{}"), /validation failed/);
   assert.equal(session.isUnlocked(), true);
   assert.deepEqual(session.listItems(), []);
+});
+
+test("session resume rotation is returned only after durable persistence succeeds", async () => {
+  installFailingIndexedDb();
+  const liveVault = new FakeVault(true, false);
+  const session = newSession(() => new FakeVault(false, false), liveVault);
+
+  await assert.rejects(session.createSessionResume(), VaultDurabilityError);
+  assert.equal(liveVault.sessionResumeCount, 1);
+  assert.equal(session.isUnlocked(), false);
+  await assert.rejects(session.createSessionResume(), VaultDurabilityError);
+  assert.equal(
+    liveVault.sessionResumeCount,
+    1,
+    "a poisoned session must not issue another credential",
+  );
+});
+
+test("session resume reloads newer durable state before accepting a cross-tab payload", async () => {
+  const latestSnapshot = JSON.stringify({ generation: 2 });
+  installSnapshotIndexedDb({
+    format: 1,
+    version: 2,
+    snapshotJson: latestSnapshot,
+  });
+  let factorySnapshot: string | null = null;
+  const staleVault = new FakeVault(false, false, undefined, "stale");
+  const factory: VaultFactory = (snapshot) => {
+    factorySnapshot = snapshot;
+    return new FakeVault(false, false, undefined, "fresh");
+  };
+  const session = newSession(factory, staleVault, 1);
+
+  await assert.rejects(session.unlockWithSessionResume("stale"), /stale resume payload/);
+  assert.equal(factorySnapshot, latestSnapshot);
+  assert.equal(session.isUnlocked(), false);
+
+  await session.unlockWithSessionResume("fresh");
+  assert.equal(session.isUnlocked(), true);
 });
 
 test("deadline reads are parsed without persistence or mutation", () => {
