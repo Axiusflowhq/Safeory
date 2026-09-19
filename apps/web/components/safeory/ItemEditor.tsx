@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useRef, useState } from "react"
 import { SparklesIcon, ViewIcon, ViewOffIcon } from "@hugeicons/core-free-icons"
 import { HugeiconsIcon } from "@hugeicons/react"
 
@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button"
 import {
   Field,
   FieldDescription,
+  FieldError,
   FieldGroup,
   FieldLabel,
 } from "@/components/ui/field"
@@ -64,6 +65,8 @@ export function ItemEditor({
   })
   const [notes, setNotes] = useState(existing?.item.notes ?? "")
   const [revealed, setRevealed] = useState<Record<string, boolean>>({})
+  const [titleError, setTitleError] = useState<string | null>(null)
+  const titleInputRef = useRef<HTMLInputElement>(null)
 
   function setField(key: string, value: string) {
     setFields((previous) => ({ ...previous, [key]: value }))
@@ -86,9 +89,13 @@ export function ItemEditor({
     <form
       onSubmit={(event) => {
         event.preventDefault()
-        if (title.trim().length > 0) {
-          save()
+        if (title.trim().length === 0) {
+          setTitleError("Enter a title so you can find this item later.")
+          titleInputRef.current?.focus()
+          return
         }
+        setTitleError(null)
+        save()
       }}
       className="space-y-6"
     >
@@ -97,7 +104,7 @@ export function ItemEditor({
           <h2 className="text-lg font-semibold tracking-tight">
             {isEdit ? "Edit item" : "Add to vault"}
           </h2>
-          <p className="mt-1 text-sm text-[var(--text-secondary)]">
+          <p className="mt-1 max-w-[65ch] text-sm text-pretty text-[var(--text-secondary)]">
             {isEdit
               ? "Update the encrypted details for this item."
               : "Details are encrypted before they are stored in your vault."}
@@ -110,16 +117,29 @@ export function ItemEditor({
         <Field>
           <FieldLabel htmlFor="safeory-item-title">Title</FieldLabel>
           <Input
+            ref={titleInputRef}
             id="safeory-item-title"
             autoFocus
             value={title}
-            onChange={(event) => setTitle(event.target.value)}
+            onChange={(event) => {
+              setTitle(event.target.value)
+              if (titleError) setTitleError(null)
+            }}
             placeholder="A name you will recognize"
             className="h-10"
+            aria-invalid={titleError ? true : undefined}
+            aria-describedby={
+              titleError
+                ? "safeory-item-title-help safeory-item-title-error"
+                : "safeory-item-title-help"
+            }
           />
-          <FieldDescription>
+          <FieldDescription id="safeory-item-title-help">
             Use a clear name so this item is easy to find later.
           </FieldDescription>
+          {titleError ? (
+            <FieldError id="safeory-item-title-error">{titleError}</FieldError>
+          ) : null}
         </Field>
 
         <Separator />
@@ -188,10 +208,29 @@ export function ItemEditor({
                         }))
                       }
                     >
-                      <HugeiconsIcon
-                        icon={shown ? ViewOffIcon : ViewIcon}
-                        strokeWidth={2}
-                      />
+                      <span
+                        aria-hidden="true"
+                        className="relative size-3.5 shrink-0"
+                      >
+                        <HugeiconsIcon
+                          icon={ViewIcon}
+                          strokeWidth={2}
+                          className={
+                            shown
+                              ? "absolute inset-0 size-3.5 scale-75 opacity-0 blur-[4px] motion-safe:transition-[transform,opacity,filter] motion-safe:duration-150 motion-safe:ease-out"
+                              : "blur-0 absolute inset-0 size-3.5 scale-100 opacity-100 motion-safe:transition-[transform,opacity,filter] motion-safe:duration-150 motion-safe:ease-out"
+                          }
+                        />
+                        <HugeiconsIcon
+                          icon={ViewOffIcon}
+                          strokeWidth={2}
+                          className={
+                            shown
+                              ? "blur-0 absolute inset-0 size-3.5 scale-100 opacity-100 motion-safe:transition-[transform,opacity,filter] motion-safe:duration-150 motion-safe:ease-out"
+                              : "absolute inset-0 size-3.5 scale-25 opacity-0 blur-[4px] motion-safe:transition-[transform,opacity,filter] motion-safe:duration-150 motion-safe:ease-out"
+                          }
+                        />
+                      </span>
                     </InputGroupButton>
                   </InputGroupAddon>
                 </InputGroup>
@@ -244,9 +283,7 @@ export function ItemEditor({
           <Button type="button" variant="outline" onClick={onCancel}>
             Cancel
           </Button>
-          <Button type="submit" disabled={title.trim().length === 0}>
-            {isEdit ? "Save changes" : "Add item"}
-          </Button>
+          <Button type="submit">{isEdit ? "Save changes" : "Add item"}</Button>
         </div>
       </div>
     </form>

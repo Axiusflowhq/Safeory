@@ -2,40 +2,40 @@
 
 :root {
   /* Surfaces */
-  --surface: oklch(1.000 0.000 0.0);
-  --surface-secondary: oklch(0.985 0.000 0.0);
+  --surface: oklch(1 0 0);
+  --surface-secondary: oklch(0.985 0 0);
 
   /* Borders */
-  --border: oklch(0.191 0.000 0.0 / 5.88%);
+  --border: oklch(0.191 0 0 / 5.88%);
   --border-secondary: var(--border);
   --border-width: 0.5px;
   --input-fill: var(--surface-secondary);
   --input-border: var(--border-secondary);
 
   /* Text */
-  --text-primary: oklch(0.321 0.000 0.0);
-  --text-secondary: oklch(0.583 0.000 0.0);
-  --text-muted: oklch(0.861 0.000 0.0);
+  --text-primary: oklch(0.321 0 0);
+  --text-secondary: oklch(0.583 0 0);
+  --text-muted: oklch(0.861 0 0);
 
   /* Interaction states */
-  --hover-bg: oklch(0.191 0.000 0.0 / 3.53%);
-  --active-bg: oklch(0.191 0.000 0.0 / 5.1%);
+  --hover-bg: oklch(0.191 0 0 / 3.53%);
+  --active-bg: oklch(0.191 0 0 / 5.1%);
 
   /* Icons */
-  --icon: oklch(0.191 0.000 0.0 / 50.2%);
-  --icon-active: oklch(0.191 0.000 0.0);
+  --icon: oklch(0.191 0 0 / 50.2%);
+  --icon-active: oklch(0.191 0 0);
 
   /* Actions */
   --primary: oklch(0.641 0.184 251.8);
-  --primary-foreground: oklch(1.000 0.000 0.0);
+  --primary-foreground: oklch(1 0 0);
   --danger: oklch(0.647 0.229 22.5);
-  --danger-foreground: oklch(1.000 0.000 0.0);
+  --danger-foreground: oklch(1 0 0);
 
   /* Buttons */
-  --button-fill: oklch(0.321 0.000 0.0);
+  --button-fill: oklch(0.321 0 0);
 
   /* Focus */
-  --ring: oklch(0.191 0.000 0.0 / 20%);
+  --ring: oklch(0.191 0 0 / 20%);
 
   /* Radius */
   --radius-default: 8px;
@@ -44,61 +44,70 @@
 
   /* Chart */
   --bullish: oklch(0.611 0.113 176.1);
-  --bearish: oklch(0.668 0.200 20.0);
+  --bearish: oklch(0.668 0.2 20);
 
   /* FancyButton shadows (additive) */
-  --fancy-shadow-neutral: 0 1px 2px 0 oklch(0.226 0.002 247.9 / 47.84%), 0 0 0 1px oklch(0.267 0.005 248.0);
-  --fancy-shadow-primary: 0 1px 2px 0 oklch(0.183 0.020 265.9 / 23.92%), 0 0 0 1px var(--primary);
-  --fancy-shadow-destructive: 0 1px 2px 0 oklch(0.183 0.020 265.9 / 23.92%), 0 0 0 1px var(--danger);
-  --fancy-shadow-basic: 0 1px 3px 0 oklch(0.183 0.020 265.9 / 12.16%), 0 0 0 1px oklch(0.940 0.000 0.0);
+  --fancy-shadow-neutral:
+    0 1px 2px 0 oklch(0.226 0.002 247.9 / 47.84%),
+    0 0 0 1px oklch(0.267 0.005 248);
+  --fancy-shadow-primary:
+    0 1px 2px 0 oklch(0.183 0.02 265.9 / 23.92%), 0 0 0 1px var(--primary);
+  --fancy-shadow-destructive:
+    0 1px 2px 0 oklch(0.183 0.02 265.9 / 23.92%), 0 0 0 1px var(--danger);
+  --fancy-shadow-basic:
+    0 1px 3px 0 oklch(0.183 0.02 265.9 / 12.16%), 0 0 0 1px oklch(0.94 0 0);
 }
 
 .dark {
   /* Surfaces */
-  --surface: oklch(0.191 0.000 0.0);
-  --surface-secondary: oklch(0.209 0.000 0.0);
+  --surface: oklch(0.191 0 0);
+  --surface-secondary: oklch(0.209 0 0);
 
   /* Borders */
-  --border: oklch(0.955 0.000 0.0 / 7.84%);
+  --border: oklch(0.955 0 0 / 7.84%);
   --border-secondary: var(--border);
   --border-width: 0.5px;
   --input-fill: var(--surface-secondary);
   --input-border: var(--border-secondary);
 
   /* Text */
-  --text-primary: oklch(0.955 0.000 0.0);
-  --text-secondary: oklch(0.955 0.000 0.0 / 74.12%);
-  --text-muted: oklch(0.955 0.000 0.0 / 36.08%);
+  --text-primary: oklch(0.955 0 0);
+  --text-secondary: oklch(0.955 0 0 / 74.12%);
+  --text-muted: oklch(0.955 0 0 / 36.08%);
 
   /* Interaction states */
-  --hover-bg: oklch(0.955 0.000 0.0 / 7.84%);
-  --active-bg: oklch(0.955 0.000 0.0 / 14.12%);
+  --hover-bg: oklch(0.955 0 0 / 7.84%);
+  --active-bg: oklch(0.955 0 0 / 14.12%);
 
   /* Icons */
-  --icon: oklch(0.955 0.000 0.0 / 65.88%);
-  --icon-active: oklch(0.955 0.000 0.0);
+  --icon: oklch(0.955 0 0 / 65.88%);
+  --icon-active: oklch(0.955 0 0);
 
   /* Actions */
   --primary: oklch(0.641 0.184 251.8);
-  --primary-foreground: oklch(1.000 0.000 0.0);
+  --primary-foreground: oklch(1 0 0);
   --danger: oklch(0.647 0.229 22.5);
-  --danger-foreground: oklch(1.000 0.000 0.0);
+  --danger-foreground: oklch(1 0 0);
 
   /* Buttons */
-  --button-fill: oklch(0.940 0.000 0.0);
+  --button-fill: oklch(0.94 0 0);
 
   /* Focus */
-  --ring: oklch(0.955 0.000 0.0 / 14.9%);
+  --ring: oklch(0.955 0 0 / 14.9%);
 
   /* Chart */
   --bullish: oklch(0.643 0.056 264.6);
   --bearish: oklch(0.551 0.073 25.4);
 
   /* FancyButton shadows (additive) */
-  --fancy-shadow-neutral: 0 1px 2px 0 oklch(0.000 0.000 0.0 / 40%), 0 0 0 1px oklch(0.267 0.005 248.0);
-  --fancy-shadow-primary: 0 1px 2px 0 oklch(0.000 0.000 0.0 / 40%), 0 0 0 1px var(--primary);
-  --fancy-shadow-destructive: 0 1px 2px 0 oklch(0.000 0.000 0.0 / 40%), 0 0 0 1px var(--danger);
-  --fancy-shadow-basic: 0 1px 3px 0 oklch(0.000 0.000 0.0 / 33.33%), 0 0 0 1px oklch(0.269 0.000 0.0);
+  --fancy-shadow-neutral:
+    0 1px 2px 0 oklch(0 0 0 / 40%), 0 0 0 1px oklch(0.267 0.005 248);
+  --fancy-shadow-primary:
+    0 1px 2px 0 oklch(0 0 0 / 40%), 0 0 0 1px var(--primary);
+  --fancy-shadow-destructive:
+    0 1px 2px 0 oklch(0 0 0 / 40%), 0 0 0 1px var(--danger);
+  --fancy-shadow-basic:
+    0 1px 3px 0 oklch(0 0 0 / 33.33%), 0 0 0 1px oklch(0.269 0 0);
 }
 
 body {
@@ -106,4 +115,6 @@ body {
   min-height: 400px;
   background: var(--surface);
   color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }

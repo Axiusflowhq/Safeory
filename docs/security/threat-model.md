@@ -1,4 +1,4 @@
-﻿# Threat Model
+# Threat Model
 
 Status: browser/WASM + extension + self-hosted API baseline. Update this document before each security-sensitive feature ships.
 
@@ -34,6 +34,7 @@ Status: browser/WASM + extension + self-hosted API baseline. Update this documen
 | Compromised user passphrase | Root key can be unwrapped with the stored wrap | Argon2id, strong UX, rewrap on change | Known passphrase plus wrap material is catastrophic |
 | Stolen or compromised device | Plaintext/key theft while unlocked | Encrypted local persistence, explicit lock, minimal redacted projections | Malware can inspect process memory/screens while unlocked |
 | Web-app script/XSS compromise | Reads unlocked plaintext or WASM memory | Strict CSP, pinned dependencies, redacted projections, explicit detail fetches | WASM is not a sandbox from same-origin JavaScript |
+| Stolen browser reload-resume capability | Same-tab vault can be resumed without re-entering the master passphrase | Fresh 256-bit session secret; dedicated HKDF/AAD domain; sessionStorage only; rotate after resume; clear on explicit lock; accept only on reload navigation | Same-origin script compromise can read the capability while the tab session is unlocked |
 | Malicious login page | Attempts cross-site credential release | Sender-derived top-frame origin; exact HTTP(S) match; trusted-click lookup; per-tab/origin throttle; one-shot fill authorization | Once explicitly filled, page JavaScript can read its own fields |
 | Forged extension message | Confused-deputy access to privileged commands | Separate sender checks for content scripts and extension pages; ignore caller-supplied origin | Future message types can widen the surface if classified incorrectly |
 | Stale browser tab | Overwrites newer local state | IndexedDB compare-and-swap; serialized mutation/snapshot/persist queue; fail-closed poison on durability failure | Losing tab must reload rather than merge |
@@ -51,6 +52,7 @@ Status: browser/WASM + extension + self-hosted API baseline. Update this documen
 ## Browser/WASM assumptions
 
 - The web app persists only ciphertext `KVSnapshot` data in IndexedDB. Browser-local compare-and-swap versions fence stale-tab writes. A post-mutation snapshot/save failure poisons and locks the session instead of continuing on divergent memory.
+- A normal same-tab document reload may resume an already unlocked web vault through a short-lived `sessionStorage` capability. The capability is a fresh 256-bit random secret plus a separately domain-separated encrypted root-key envelope; it is not the master passphrase, recovery secret, or raw root key. It is accepted only for a navigation reported as `reload`, rotated after successful resume, and cleared on explicit lock or failed resume. Because `sessionStorage` is readable by same-origin JavaScript, the capability is bearer-equivalent while present and does not mitigate XSS.
 - Browser `MemStore` validates snapshot schema, object-count ceiling, duplicate IDs, encrypted item/wrap encoded-size bounds, and supported revision range before accepting a restored snapshot. Validation is ciphertext-only.
 - Normal web lists cross the WASM boundary only as redacted summaries. Today/deadline data crosses only as `{itemId, kind, title, label, date, daysUntil, revision}`. Full fields/notes cross only when the user explicitly opens one record.
 - The Emergency Card and recovery secret are explicit plaintext UI surfaces only while unlocked. They are never persisted as plaintext browser state.

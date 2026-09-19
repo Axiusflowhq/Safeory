@@ -4,7 +4,7 @@
 
 use wasm_bindgen::prelude::*;
 
-use vault_crypto::RecoverySecret;
+use vault_crypto::{RecoverySecret, SessionResumeSecret, SessionResumeWrapV1};
 
 use crate::{BrowserVault, DeadlineEntry, WasmVaultError, generate_strong_password};
 
@@ -60,6 +60,28 @@ impl WasmVault {
 
     pub fn lock(&mut self) {
         self.inner.lock();
+    }
+
+    /// Return a JSON object containing an opaque, session-scoped reload secret
+    /// and its encrypted root-key wrap. Neither value is the master passphrase,
+    /// recovery secret, or raw root key.
+    #[wasm_bindgen(js_name = createSessionResumeJson)]
+    pub fn create_session_resume_json(&self) -> Result<String, JsValue> {
+        let (secret, wrapped) = self.inner.create_session_resume().map_err(js_err)?;
+        serde_json::to_string(&SessionResumePayload { secret, wrapped }).map_err(|_| ser_err())
+    }
+
+    /// Resume this loaded ciphertext snapshot from an opaque tab-session
+    /// credential previously returned by `createSessionResumeJson`.
+    #[wasm_bindgen(js_name = unlockWithSessionResumeJson)]
+    pub fn unlock_with_session_resume_json(&mut self, payload_json: &str) -> Result<(), JsValue> {
+        let payload: SessionResumePayload =
+            serde_json::from_str(payload_json).map_err(|_| ser_err())?;
+        let secret = SessionResumeSecret::from_hex(&payload.secret)
+            .map_err(|error| js_err(WasmVaultError::Crypto(error)))?;
+        self.inner
+            .unlock_with_session_resume(&secret, &payload.wrapped)
+            .map_err(js_err)
     }
 
     /// Serialize the ciphertext store for IndexedDB persistence.
@@ -265,6 +287,12 @@ struct DeadlineListEntry {
 struct EmergencyCardEntry {
     card: vault_models::EmergencyCard,
     revision: u64,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SessionResumePayload {
+    secret: String,
+    wrapped: SessionResumeWrapV1,
 }
 
 fn deadline_entries_json(entries: Vec<DeadlineEntry>) -> Result<String, serde_json::Error> {

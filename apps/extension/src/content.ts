@@ -5,7 +5,12 @@
  * and filling requires a second explicit credential choice.
  */
 
-import type { ContentRequest, ContentResponse, CredentialSummary, FillPayload } from "./messages";
+import type {
+  ContentRequest,
+  ContentResponse,
+  CredentialSummary,
+  FillPayload,
+} from "./messages";
 
 function send<T extends ContentResponse>(req: ContentRequest): Promise<T> {
   return new Promise((resolve) => {
@@ -25,7 +30,8 @@ function findLoginForms(): LoginForm[] {
   ).filter((el) => el.offsetParent !== null); // visible only
   const forms: LoginForm[] = [];
   for (const password of passwords) {
-    const container = password.closest("form") ?? password.closest("div") ?? document.body;
+    const container =
+      password.closest("form") ?? password.closest("div") ?? document.body;
     const username =
       container.querySelector<HTMLInputElement>(
         'input[type="email"], input[autocomplete="username"], input[name*="user" i], input[name*="email" i], input[type="text"]',
@@ -46,7 +52,8 @@ function setNativeValue(input: HTMLInputElement, value: string): void {
 }
 
 function fill(form: LoginForm, payload: FillPayload): void {
-  if (form.username && payload.username !== "") setNativeValue(form.username, payload.username);
+  if (form.username && payload.username !== "")
+    setNativeValue(form.username, payload.username);
   setNativeValue(form.password, payload.password);
 }
 
@@ -64,19 +71,25 @@ function showChooser(
     "min-width:220px;overflow:hidden;";
   if (items.length === 0) {
     const status = document.createElement("div");
-    status.textContent = emptyMessage ?? "No Safeory credentials found for this site.";
+    status.setAttribute("role", "status");
+    status.textContent =
+      emptyMessage ?? "No Safeory credentials found for this site.";
     status.style.cssText = "padding:9px 10px;color:#555;max-width:280px;";
     box.appendChild(status);
   } else {
+    const canHover = window.matchMedia("(hover: hover)").matches;
     for (const item of items) {
       const btn = document.createElement("button");
       btn.type = "button";
       btn.textContent = `${item.title} — ${item.username}`;
+      btn.setAttribute("aria-label", `Fill ${item.title} for ${item.username}`);
       btn.style.cssText =
-        "display:block;width:100%;text-align:left;padding:8px 10px;border:0;" +
+        "display:block;width:100%;min-height:40px;text-align:left;padding:10px;border:0;" +
         "background:#fff;cursor:pointer;";
-      btn.onmouseenter = () => (btn.style.background = "#f0f0f0");
-      btn.onmouseleave = () => (btn.style.background = "#fff");
+      if (canHover) {
+        btn.onmouseenter = () => (btn.style.background = "#f0f0f0");
+        btn.onmouseleave = () => (btn.style.background = "#fff");
+      }
       btn.onclick = (e) => {
         if (!e.isTrusted) return;
         onPick(item.id);
@@ -105,10 +118,11 @@ async function enhanceForms(): Promise<void> {
   for (const form of forms) {
     const badge = document.createElement("button");
     badge.type = "button";
-    badge.textContent = "🔐 Safeory";
-    badge.title = "Fill from Safeory";
+    badge.textContent = "Safeory";
+    badge.title = "Fill with Safeory";
+    badge.setAttribute("aria-label", "Fill with Safeory");
     badge.style.cssText =
-      "margin-left:6px;font:12px sans-serif;padding:2px 6px;border:1px solid #999;" +
+      "margin-left:6px;min-height:28px;font:12px sans-serif;padding:5px 8px;border:1px solid #999;" +
       "border-radius:4px;background:#fff;cursor:pointer;";
     let lookupPending = false;
     badge.onclick = (e) => {
@@ -120,12 +134,22 @@ async function enhanceForms(): Promise<void> {
       void send<ContentResponse>({ type: "findCredentials" })
         .then((res) => {
           if (res.type === "error") {
-            showChooser(badge, [], () => undefined, "Safeory is temporarily unavailable.");
+            showChooser(
+              badge,
+              [],
+              () => undefined,
+              "Safeory is temporarily unavailable.",
+            );
             return;
           }
           if (res.type !== "credentials") return;
           if (res.locked) {
-            showChooser(badge, [], () => undefined, "Unlock Safeory from the extension first.");
+            showChooser(
+              badge,
+              [],
+              () => undefined,
+              "Unlock Safeory from the extension first.",
+            );
             return;
           }
           if (res.items.length === 0 || !res.authorization) {

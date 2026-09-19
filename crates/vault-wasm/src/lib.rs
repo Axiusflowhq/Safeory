@@ -16,9 +16,11 @@ pub use store::MemStore;
 use thiserror::Error;
 use uuid::Uuid;
 use vault_crypto::{
-    AccountRootKey, CryptoError, RecoverySecret, decrypt_item, decrypt_item_state, encrypt_item,
-    encrypt_item_state, recovery_secret_matches_root_key, unwrap_root_key,
-    unwrap_root_key_with_recovery_secret, wrap_root_key, wrap_root_key_with_recovery_secret,
+    AccountRootKey, CryptoError, RecoverySecret, SessionResumeSecret, SessionResumeWrapV1,
+    decrypt_item, decrypt_item_state, encrypt_item, encrypt_item_state,
+    recovery_secret_matches_root_key, unwrap_root_key, unwrap_root_key_with_recovery_secret,
+    unwrap_root_key_with_session_resume_secret, wrap_root_key, wrap_root_key_with_recovery_secret,
+    wrap_root_key_with_session_resume_secret,
 };
 use vault_models::{
     EMERGENCY_CARD_ID, EmergencyCard, VaultItem, VaultItemState, VaultItemValidationError,
@@ -135,6 +137,36 @@ impl BrowserVault {
 
     pub fn is_unlocked(&self) -> bool {
         self.root_key.is_some()
+    }
+
+    /// Create a fresh, short-lived browser reload credential for the current
+    /// unlocked root key. The returned secret is not the master passphrase or
+    /// recovery secret and must be cleared by the host on explicit lock.
+    pub fn create_session_resume(&self) -> Result<(String, SessionResumeWrapV1), WasmVaultError> {
+        let secret = SessionResumeSecret::generate()?;
+        let snapshot_binding = self.session_resume_snapshot_binding()?;
+        let wrapped =
+            wrap_root_key_with_session_resume_secret(&secret, self.root_key()?, &snapshot_binding)?;
+        Ok((secret.to_hex(), wrapped))
+    }
+
+    /// Resume an initialized browser vault from a session-scoped credential.
+    /// Authentication failure leaves the vault locked.
+    pub fn unlock_with_session_resume(
+        &mut self,
+        secret: &SessionResumeSecret,
+        wrapped: &SessionResumeWrapV1,
+    ) -> Result<(), WasmVaultError> {
+        let snapshot_binding = self.session_resume_snapshot_binding()?;
+        let root_key =
+            unwrap_root_key_with_session_resume_secret(secret, wrapped, &snapshot_binding)?;
+        self.root_key = Some(root_key);
+        Ok(())
+    }
+
+    fn session_resume_snapshot_binding(&self) -> Result<Vec<u8>, WasmVaultError> {
+        let root_wrap = self.store.load_root_wrap()?;
+        Ok(serde_json::to_vec(&root_wrap).map_err(StorageError::from)?)
     }
 
     fn root_key(&self) -> Result<&AccountRootKey, WasmVaultError> {
@@ -701,6 +733,67 @@ mod tests {
         let mut restored = BrowserVault::from_snapshot(snapshot).expect("from_snapshot");
         let wrong = RecoverySecret::generate().expect("wrong");
         assert!(restored.unlock_with_recovery_kit(&wrong).is_err());
+        assert!(!restored.is_unlocked());
+    }
+
+    #[test]
+    fn session_resume_round_trip_survives_snapshot_reload() {
+        let mut vault = BrowserVault::new_empty();
+        vault.create("correct horse battery").expect("create");
+        let item = sample_item("Reload me");
+        let id = item.id;
+        vault.put_item(&item).expect("put");
+        let (secret_hex, wrapped) = vault.create_session_resume().expect("resume material");
+        let snapshot = vault.to_snapshot();
+
+        let mut restored = BrowserVault::from_snapshot(snapshot).expect("restore");
+        assert!(!restored.is_unlocked());
+        let secret = SessionResumeSecret::from_hex(&secret_hex).expect("secret");
+        restored
+            .unlock_with_session_resume(&secret, &wrapped)
+            .expect("resume");
+        assert_eq!(restored.get_item(id).expect("get").title, "Reload me");
+    }
+
+    #[test]
+    fn session_resume_wrong_secret_fails_closed() {
+        let mut vault = BrowserVault::new_empty();
+        vault.create("correct horse battery").expect("create");
+        let (_, wrapped) = vault.create_session_resume().expect("resume material");
+        let snapshot = vault.to_snapshot();
+
+        let mut restored = BrowserVault::from_snapshot(snapshot).expect("restore");
+        let wrong = SessionResumeSecret::generate().expect("wrong secret");
+        assert!(
+            restored
+                .unlock_with_session_resume(&wrong, &wrapped)
+                .is_err()
+        );
+        assert!(!restored.is_unlocked());
+    }
+
+    #[test]
+    fn session_resume_from_replaced_vault_fails_closed() {
+        let mut old_vault = BrowserVault::new_empty();
+        old_vault
+            .create("correct horse battery")
+            .expect("create old");
+        let (secret_hex, wrapped) = old_vault.create_session_resume().expect("resume material");
+
+        let mut replacement = BrowserVault::new_empty();
+        replacement
+            .create("different horse battery")
+            .expect("create replacement");
+        let replacement_snapshot = replacement.to_snapshot();
+        let mut restored =
+            BrowserVault::from_snapshot(replacement_snapshot).expect("restore replacement");
+        let secret = SessionResumeSecret::from_hex(&secret_hex).expect("secret");
+
+        assert!(
+            restored
+                .unlock_with_session_resume(&secret, &wrapped)
+                .is_err()
+        );
         assert!(!restored.is_unlocked());
     }
 

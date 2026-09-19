@@ -19,6 +19,8 @@ export interface WasmVaultLike {
   create(passphrase: string): void;
   unlock(passphrase: string): void;
   lock(): void;
+  createSessionResumeJson(): string;
+  unlockWithSessionResumeJson(payloadJson: string): void;
   snapshotJson(): string;
   putItemJson(itemJson: string): void;
   getItemJson(id: string): string;
@@ -125,6 +127,18 @@ export class VaultSession {
   /** Lock (zeroize the in-memory key) without clearing persistence. */
   lock(): void {
     this.vault.lock();
+  }
+
+  /** Create an opaque, session-scoped browser reload credential. */
+  createSessionResume(): string {
+    this.assertHealthy();
+    return this.vault.createSessionResumeJson();
+  }
+
+  /** Resume a loaded ciphertext snapshot from an opaque reload credential. */
+  unlockWithSessionResume(payloadJson: string): void {
+    this.assertHealthy();
+    this.vault.unlockWithSessionResumeJson(payloadJson);
   }
 
   /** Add a new item; persists the updated ciphertext snapshot. */

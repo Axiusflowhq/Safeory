@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useRef, useState } from "react"
 import {
   AlertCircleIcon,
   ArrowLeft01Icon,
@@ -13,9 +13,11 @@ import { HugeiconsIcon } from "@hugeicons/react"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { FancyButton } from "@/components/ui/fancy-button"
 import {
   Field,
   FieldDescription,
+  FieldError,
   FieldGroup,
   FieldLabel,
 } from "@/components/ui/field"
@@ -67,6 +69,10 @@ export function PassphraseGate({
   const [passphrase, setPassphrase] = useState("")
   const [showRecovery, setShowRecovery] = useState(false)
   const [secret, setSecret] = useState("")
+  const [passphraseError, setPassphraseError] = useState<string | null>(null)
+  const [recoveryError, setRecoveryError] = useState<string | null>(null)
+  const passphraseInputRef = useRef<HTMLInputElement>(null)
+  const recoveryInputRef = useRef<HTMLInputElement>(null)
   const passphraseStrength = strength(passphrase)
   const isSetup = mode === "setup"
 
@@ -78,10 +84,10 @@ export function PassphraseGate({
             <HugeiconsIcon
               icon={showRecovery ? ShieldKeyIcon : LockKeyIcon}
               strokeWidth={1.8}
-              className="size-5 text-[var(--primary)]"
+              className="size-5 text-[var(--icon-active)]"
             />
           </div>
-          <h1 className="text-xl font-semibold tracking-tight">
+          <h1 className="text-xl font-semibold tracking-tight text-[var(--text-primary)]">
             {showRecovery
               ? "Unlock with recovery key"
               : isSetup
@@ -102,7 +108,9 @@ export function PassphraseGate({
             <Alert variant="destructive">
               <HugeiconsIcon icon={AlertCircleIcon} strokeWidth={2} />
               <AlertTitle>
-                {isSetup ? "Couldn’t create the vault" : "Couldn’t unlock the vault"}
+                {isSetup
+                  ? "Couldn’t create the vault"
+                  : "Couldn’t unlock the vault"}
               </AlertTitle>
               <AlertDescription>{error}</AlertDescription>
             </Alert>
@@ -112,6 +120,14 @@ export function PassphraseGate({
             <form
               onSubmit={(event) => {
                 event.preventDefault()
+                if (isSetup && passphrase.length < 12) {
+                  setPassphraseError(
+                    "Use at least 12 characters for your master passphrase."
+                  )
+                  passphraseInputRef.current?.focus()
+                  return
+                }
+                setPassphraseError(null)
                 onSubmit(passphrase)
               }}
             >
@@ -121,22 +137,34 @@ export function PassphraseGate({
                     Master passphrase
                   </FieldLabel>
                   <Input
+                    ref={passphraseInputRef}
                     id="safeory-master-passphrase"
                     type="password"
                     autoComplete={isSetup ? "new-password" : "current-password"}
                     autoFocus
                     value={passphrase}
-                    onChange={(event) => setPassphrase(event.target.value)}
+                    onChange={(event) => {
+                      setPassphrase(event.target.value)
+                      if (passphraseError) setPassphraseError(null)
+                    }}
                     placeholder={
                       isSetup
                         ? "Create a memorable passphrase"
                         : "Enter your passphrase"
                     }
                     className="h-10"
+                    aria-invalid={passphraseError ? true : undefined}
+                    aria-describedby={
+                      passphraseError
+                        ? "safeory-master-passphrase-error"
+                        : isSetup
+                          ? "safeory-master-passphrase-help"
+                          : undefined
+                    }
                   />
                   {isSetup && passphrase.length > 0 ? (
                     <div className="flex items-center justify-between gap-3">
-                      <FieldDescription>
+                      <FieldDescription id="safeory-master-passphrase-help">
                         Use at least 12 characters. Longer is better.
                       </FieldDescription>
                       <Badge variant={passphraseStrength.variant}>
@@ -144,29 +172,36 @@ export function PassphraseGate({
                       </Badge>
                     </div>
                   ) : null}
+                  {passphraseError ? (
+                    <FieldError id="safeory-master-passphrase-error">
+                      {passphraseError}
+                    </FieldError>
+                  ) : null}
                 </Field>
 
-                <Button
+                <FancyButton
                   type="submit"
-                  size="lg"
+                  variant="primary"
+                  size="medium"
                   className="w-full"
-                  disabled={isSetup && passphrase.length < 12}
+                  leadingIcon={
+                    <HugeiconsIcon
+                      icon={isSetup ? Key01Icon : LockKeyIcon}
+                      strokeWidth={2}
+                    />
+                  }
                 >
-                  <HugeiconsIcon
-                    icon={isSetup ? Key01Icon : LockKeyIcon}
-                    strokeWidth={2}
-                    data-icon="inline-start"
-                  />
                   {isSetup ? "Create encrypted vault" : "Unlock vault"}
-                </Button>
+                </FancyButton>
               </FieldGroup>
 
               {mode === "unlock" ? (
                 <div className="mt-4 border-t pt-4">
                   <Button
                     type="button"
-                    variant="ghost"
-                    className="w-full text-[var(--text-secondary)]"
+                    variant="secondary"
+                    size="lg"
+                    className="w-full"
                     onClick={() => setShowRecovery(true)}
                   >
                     <HugeiconsIcon
@@ -183,7 +218,16 @@ export function PassphraseGate({
             <form
               onSubmit={(event) => {
                 event.preventDefault()
-                onRecoveryUnlock(secret.trim())
+                const normalizedSecret = secret.trim()
+                if (normalizedSecret.length !== 64) {
+                  setRecoveryError(
+                    "Enter the complete 64-character recovery key."
+                  )
+                  recoveryInputRef.current?.focus()
+                  return
+                }
+                setRecoveryError(null)
+                onRecoveryUnlock(normalizedSecret)
               }}
             >
               <FieldGroup>
@@ -192,6 +236,7 @@ export function PassphraseGate({
                     Recovery key
                   </FieldLabel>
                   <Input
+                    ref={recoveryInputRef}
                     id="safeory-recovery-key"
                     type="text"
                     inputMode="text"
@@ -200,29 +245,41 @@ export function PassphraseGate({
                     spellCheck={false}
                     autoFocus
                     value={secret}
-                    onChange={(event) => setSecret(event.target.value)}
+                    onChange={(event) => {
+                      setSecret(event.target.value)
+                      if (recoveryError) setRecoveryError(null)
+                    }}
                     placeholder="64-character recovery key"
                     className="h-10 font-mono"
+                    aria-invalid={recoveryError ? true : undefined}
+                    aria-describedby={
+                      recoveryError
+                        ? "safeory-recovery-key-help safeory-recovery-key-error"
+                        : "safeory-recovery-key-help"
+                    }
                   />
-                  <FieldDescription>
+                  <FieldDescription id="safeory-recovery-key-help">
                     Enter the 64-character hexadecimal key from your saved
                     recovery kit.
                   </FieldDescription>
+                  {recoveryError ? (
+                    <FieldError id="safeory-recovery-key-error">
+                      {recoveryError}
+                    </FieldError>
+                  ) : null}
                 </Field>
 
-                <Button
+                <FancyButton
                   type="submit"
-                  size="lg"
+                  variant="primary"
+                  size="medium"
                   className="w-full"
-                  disabled={secret.trim().length !== 64}
+                  leadingIcon={
+                    <HugeiconsIcon icon={ShieldKeyIcon} strokeWidth={2} />
+                  }
                 >
-                  <HugeiconsIcon
-                    icon={ShieldKeyIcon}
-                    strokeWidth={2}
-                    data-icon="inline-start"
-                  />
                   Unlock with recovery kit
-                </Button>
+                </FancyButton>
 
                 <Button
                   type="button"

@@ -2,7 +2,7 @@
 
 import * as React from "react"
 import { Dialog as DialogPrimitive } from "@base-ui/react/dialog"
-import { cn } from "cn"
+import { cn } from "@/lib/utils"
 
 import { Button } from "@/components/ui/button"
 import { HugeiconsIcon } from "@hugeicons/react"
@@ -138,7 +138,7 @@ function DialogDescription({
     <DialogPrimitive.Description
       data-slot="dialog-description"
       className={cn(
-        "text-sm text-[var(--text-secondary)] *:[a]:underline *:[a]:underline-offset-3 *:[a]:hover:text-[var(--text-primary)]",
+        "text-sm text-pretty text-[var(--text-secondary)] *:[a]:underline *:[a]:underline-offset-3 [@media(hover:hover)]:*:[a]:hover:text-[var(--text-primary)]",
         className
       )}
       {...props}

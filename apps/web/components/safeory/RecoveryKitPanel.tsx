@@ -48,14 +48,14 @@ export function RecoveryKitPanel({
             <HugeiconsIcon
               icon={ShieldKeyIcon}
               strokeWidth={1.8}
-              className="size-5 text-[var(--primary)]"
+              className="size-5 text-[var(--icon-active)]"
             />
           </div>
           <div>
             <h2 className="text-lg font-semibold tracking-tight">
               Recovery kit
             </h2>
-            <p className="mt-1 max-w-2xl text-sm leading-relaxed text-[var(--text-secondary)]">
+            <p className="mt-1 max-w-[65ch] text-sm leading-relaxed text-pretty text-[var(--text-secondary)]">
               A recovery kit lets you regain access if you forget your master
               passphrase. Anyone with the key can unlock your vault, so keep it
               offline and somewhere only you can access.
@@ -87,11 +87,15 @@ export function RecoveryKitPanel({
           </div>
 
           {copyFailed ? (
-            <p className="mt-2 text-sm text-[var(--danger)]">
+            <p role="alert" className="mt-2 text-sm text-[var(--danger)]">
               Clipboard access was unavailable. Select the key and copy it
               manually.
             </p>
           ) : null}
+
+          <p role="status" aria-live="polite" className="sr-only">
+            {copied ? "Recovery key copied." : ""}
+          </p>
 
           <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:justify-end">
             <Button
@@ -99,11 +103,30 @@ export function RecoveryKitPanel({
               variant="outline"
               onClick={() => void copySecret(generatedSecret)}
             >
-              <HugeiconsIcon
-                icon={copied ? CheckmarkCircle02Icon : Copy01Icon}
-                strokeWidth={2}
+              <span
+                aria-hidden="true"
                 data-icon="inline-start"
-              />
+                className="relative size-4 shrink-0"
+              >
+                <HugeiconsIcon
+                  icon={Copy01Icon}
+                  strokeWidth={2}
+                  className={
+                    copied
+                      ? "absolute inset-0 size-4 scale-75 opacity-0 blur-[4px] motion-safe:transition-[transform,opacity,filter] motion-safe:duration-150 motion-safe:ease-out"
+                      : "blur-0 absolute inset-0 size-4 scale-100 opacity-100 motion-safe:transition-[transform,opacity,filter] motion-safe:duration-150 motion-safe:ease-out"
+                  }
+                />
+                <HugeiconsIcon
+                  icon={CheckmarkCircle02Icon}
+                  strokeWidth={2}
+                  className={
+                    copied
+                      ? "blur-0 absolute inset-0 size-4 scale-100 opacity-100 motion-safe:transition-[transform,opacity,filter] motion-safe:duration-150 motion-safe:ease-out"
+                      : "absolute inset-0 size-4 scale-25 opacity-0 blur-[4px] motion-safe:transition-[transform,opacity,filter] motion-safe:duration-150 motion-safe:ease-out"
+                  }
+                />
+              </span>
               {copied ? "Copied" : "Copy key"}
             </Button>
             <Button type="button" onClick={onClearSecret}>
@@ -112,7 +135,7 @@ export function RecoveryKitPanel({
                 strokeWidth={2}
                 data-icon="inline-start"
               />
-              I&apos;ve saved it
+              Confirm key is saved
             </Button>
           </div>
         </div>
@@ -124,7 +147,7 @@ export function RecoveryKitPanel({
                 ? "Your vault has a recovery kit"
                 : "Protect yourself from a forgotten passphrase"}
             </p>
-            <p className="mt-1 text-sm text-[var(--text-secondary)]">
+            <p className="mt-1 max-w-[65ch] text-sm text-pretty text-[var(--text-secondary)]">
               {hasRecoveryKit
                 ? "Replacing it invalidates the previous recovery key."
                 : "Create one recovery key and store it separately from this device."}

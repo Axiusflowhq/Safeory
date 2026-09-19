@@ -1,4 +1,4 @@
-﻿# Safeory Roadmap — Full 1Password + Trustworthy Alternative
+# Safeory Roadmap — Full 1Password + Trustworthy Alternative
 
 Status: strategy document. `PLAN.md` remains the source of truth for the V1
 local platform checklist; this document orders everything after it.
@@ -51,7 +51,7 @@ extension + contracts typecheck/lint/build green.**
   session and forces reload rather than allowing in-memory state to run ahead
   of the durable snapshot. Pre-commit validation/auth/revision errors remain
   recoverable.
-- ✅ DONE: `apps/web` scaffold — React + Vite + Tailwind consuming
+- ✅ DONE: `apps/web` scaffold — React + Next.js + Tailwind consuming
   `@safeory/contracts` + `vault-wasm`; typecheck/lint/build all green.
 - ✅ DONE: widened `vault-wasm` bindings — Emergency Card (singleton, hidden
   from lists, CAS revisions), recovery kit (generate/install/verify/

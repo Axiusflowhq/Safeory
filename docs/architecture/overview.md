@@ -53,6 +53,15 @@ durable save fails after the WASM mutation, the session fails closed, locks,
 poisons itself, clears plaintext-derived UI state, and requires reload from the
 durable IndexedDB snapshot rather than continuing on divergent memory.
 
+For ordinary same-tab browser reloads, the web client can preserve an already
+unlocked session without persisting the master passphrase or raw root key. WASM
+creates a fresh 256-bit session-resume secret and a root-key envelope under a
+dedicated HKDF/AAD domain; the host keeps that reload capability in
+`sessionStorage`, rotates it after a successful reload resume, and deletes it on
+explicit lock. Non-reload navigations do not consume the capability. The
+capability remains same-origin-JavaScript readable and is therefore treated as
+bearer-equivalent while the tab session is unlocked.
+
 The browser extension keeps the unlocked WASM vault in its background worker.
 Untrusted page content receives only exact-origin credential summaries after a
 trusted Safeory click. Discovery is throttled per tab+origin, and a short-lived

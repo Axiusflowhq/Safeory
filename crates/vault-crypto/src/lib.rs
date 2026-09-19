@@ -29,6 +29,8 @@ const ATTACHMENT_WRAP_INFO: &[u8] = b"safeory:v1:attachment-wrap";
 const ROOT_WRAP_AAD: &[u8] = b"lifevault:root-wrap:v1";
 const RECOVERY_WRAP_INFO: &[u8] = b"safeory:v1:recovery-wrap";
 const RECOVERY_WRAP_AAD: &[u8] = b"safeory:recovery-wrap:v1";
+const SESSION_RESUME_WRAP_INFO: &[u8] = b"safeory:v1:session-resume-wrap";
+const SESSION_RESUME_WRAP_AAD: &[u8] = b"safeory:session-resume-wrap:v1";
 
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -319,6 +321,56 @@ impl RecoverySecret {
     }
 }
 
+/// High-entropy, tab-session credential used only to resume an already
+/// unlocked browser vault after a document reload. It is deliberately
+/// domain-separated from printable recovery secrets.
+pub struct SessionResumeSecret(Zeroizing<[u8; 32]>);
+
+impl SessionResumeSecret {
+    pub fn generate() -> Result<Self, CryptoError> {
+        let mut bytes = Zeroizing::new([0u8; 32]);
+        getrandom::fill(bytes.as_mut()).map_err(|_| CryptoError::Random)?;
+        Ok(Self(bytes))
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    pub fn to_hex(&self) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut out = String::with_capacity(64);
+        for byte in self.as_bytes().iter() {
+            out.push(HEX[(byte >> 4) as usize] as char);
+            out.push(HEX[(byte & 0x0F) as usize] as char);
+        }
+        out
+    }
+
+    pub fn from_hex(s: &str) -> Result<Self, CryptoError> {
+        fn nibble(value: u8) -> Result<u8, CryptoError> {
+            match value {
+                b'0'..=b'9' => Ok(value - b'0'),
+                b'a'..=b'f' => Ok(value - b'a' + 10),
+                b'A'..=b'F' => Ok(value - b'A' + 10),
+                _ => Err(CryptoError::InvalidEncoding),
+            }
+        }
+
+        let bytes = s.as_bytes();
+        if bytes.len() != 64 {
+            return Err(CryptoError::InvalidEncoding);
+        }
+        let mut out = Zeroizing::new([0u8; 32]);
+        for (index, slot) in out.iter_mut().enumerate() {
+            let hi = nibble(bytes[index * 2])?;
+            let lo = nibble(bytes[index * 2 + 1])?;
+            *slot = (hi << 4) | lo;
+        }
+        Ok(Self(out))
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RootKeyWrapV1 {
     pub format_version: u16,
@@ -339,6 +391,18 @@ pub struct RootKeyWrapV1 {
 /// - The server must never see the secret; it only ever stores this opaque envelope.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RecoveryKitWrapV1 {
+    pub format_version: u16,
+    pub algorithm: String,
+    pub salt: [u8; 16],
+    pub nonce: [u8; 24],
+    pub ciphertext: Vec<u8>,
+}
+
+/// Ephemeral root-key envelope for browser reload continuity. This envelope is
+/// useful only with its matching [`SessionResumeSecret`] and is not a recovery
+/// mechanism or a server-side authentication credential.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct SessionResumeWrapV1 {
     pub format_version: u16,
     pub algorithm: String,
     pub salt: [u8; 16],
@@ -618,6 +682,70 @@ pub fn unwrap_root_key_with_recovery_secret(
                 Payload {
                     msg: &wrapped.ciphertext,
                     aad: RECOVERY_WRAP_AAD,
+                },
+            )
+            .map_err(|_| CryptoError::Authentication)?,
+    );
+    if plaintext.len() != 32 {
+        return Err(CryptoError::InconsistentRecord);
+    }
+    let mut bytes = Zeroizing::new([0u8; 32]);
+    bytes.copy_from_slice(&plaintext);
+    Ok(AccountRootKey(bytes))
+}
+
+pub fn wrap_root_key_with_session_resume_secret(
+    secret: &SessionResumeSecret,
+    root_key: &AccountRootKey,
+    snapshot_binding: &[u8],
+) -> Result<SessionResumeWrapV1, CryptoError> {
+    let mut salt = [0u8; 16];
+    let mut nonce = [0u8; 24];
+    getrandom::fill(&mut salt).map_err(|_| CryptoError::Random)?;
+    getrandom::fill(&mut nonce).map_err(|_| CryptoError::Random)?;
+
+    let kek = derive_session_resume_kek(secret, &salt)?;
+    let cipher = XChaCha20Poly1305::new((&*kek).into());
+    let mut aad = Vec::with_capacity(SESSION_RESUME_WRAP_AAD.len() + snapshot_binding.len());
+    aad.extend_from_slice(SESSION_RESUME_WRAP_AAD);
+    aad.extend_from_slice(snapshot_binding);
+    let ciphertext = cipher
+        .encrypt(
+            nonce_ref(&nonce)?,
+            Payload {
+                msg: root_key.as_bytes(),
+                aad: &aad,
+            },
+        )
+        .map_err(|_| CryptoError::Encryption)?;
+
+    Ok(SessionResumeWrapV1 {
+        format_version: FORMAT_VERSION,
+        algorithm: ALGORITHM.to_owned(),
+        salt,
+        nonce,
+        ciphertext,
+    })
+}
+
+pub fn unwrap_root_key_with_session_resume_secret(
+    secret: &SessionResumeSecret,
+    wrapped: &SessionResumeWrapV1,
+    snapshot_binding: &[u8],
+) -> Result<AccountRootKey, CryptoError> {
+    ensure_supported(wrapped.format_version, &wrapped.algorithm)?;
+    let kek = derive_session_resume_kek(secret, &wrapped.salt)?;
+    let cipher = XChaCha20Poly1305::new((&*kek).into());
+    let mut aad = Vec::with_capacity(SESSION_RESUME_WRAP_AAD.len() + snapshot_binding.len());
+    aad.extend_from_slice(SESSION_RESUME_WRAP_AAD);
+    aad.extend_from_slice(snapshot_binding);
+    let plaintext = Zeroizing::new(
+        cipher
+            .decrypt(
+                nonce_ref(&wrapped.nonce)?,
+                Payload {
+                    msg: &wrapped.ciphertext,
+                    aad: &aad,
                 },
             )
             .map_err(|_| CryptoError::Authentication)?,
@@ -1038,6 +1166,17 @@ fn derive_recovery_kek(
     let hk = Hkdf::<Sha256>::new(Some(salt.as_slice()), secret.as_bytes().as_slice());
     let mut output = Zeroizing::new([0u8; 32]);
     hk.expand(RECOVERY_WRAP_INFO, output.as_mut())
+        .map_err(|_| CryptoError::KeyDerivation)?;
+    Ok(output)
+}
+
+fn derive_session_resume_kek(
+    secret: &SessionResumeSecret,
+    salt: &[u8; 16],
+) -> Result<Zeroizing<[u8; 32]>, CryptoError> {
+    let hk = Hkdf::<Sha256>::new(Some(salt.as_slice()), secret.as_bytes().as_slice());
+    let mut output = Zeroizing::new([0u8; 32]);
+    hk.expand(SESSION_RESUME_WRAP_INFO, output.as_mut())
         .map_err(|_| CryptoError::KeyDerivation)?;
     Ok(output)
 }
@@ -2204,6 +2343,37 @@ mod tests {
         let wrong = RecoverySecret::generate().expect("wrong secret");
         let wrapped = wrap_root_key_with_recovery_secret(&secret, &root).expect("wrap");
         assert!(unwrap_root_key_with_recovery_secret(&wrong, &wrapped).is_err());
+    }
+
+    #[test]
+    fn session_resume_round_trip_is_domain_separated() {
+        let root = AccountRootKey::generate().expect("root key");
+        let session_secret = SessionResumeSecret::generate().expect("session secret");
+        let binding = b"current encrypted root wrap";
+        let wrapped = wrap_root_key_with_session_resume_secret(&session_secret, &root, binding)
+            .expect("wrap");
+        let restored =
+            unwrap_root_key_with_session_resume_secret(&session_secret, &wrapped, binding)
+                .expect("unwrap");
+        assert_eq!(restored.as_bytes(), root.as_bytes());
+        assert!(
+            unwrap_root_key_with_session_resume_secret(
+                &session_secret,
+                &wrapped,
+                b"different encrypted root wrap",
+            )
+            .is_err()
+        );
+
+        let recovery_secret = RecoverySecret::from_bytes(*session_secret.as_bytes());
+        let transplanted = RecoveryKitWrapV1 {
+            format_version: wrapped.format_version,
+            algorithm: wrapped.algorithm.clone(),
+            salt: wrapped.salt,
+            nonce: wrapped.nonce,
+            ciphertext: wrapped.ciphertext.clone(),
+        };
+        assert!(unwrap_root_key_with_recovery_secret(&recovery_secret, &transplanted).is_err());
     }
 
     #[test]

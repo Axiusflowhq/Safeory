@@ -30,7 +30,6 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Separator } from "@/components/ui/separator"
 import {
   Sidebar,
   SidebarContent,
@@ -49,7 +48,12 @@ import {
 } from "@/components/ui/sidebar"
 import { Skeleton } from "@/components/ui/skeleton"
 import type { DeadlineSummary } from "@safeory/contracts"
-import { ITEM_KINDS, kindLabel, type ItemKind, type VaultItemJson } from "@/lib/vault/items"
+import {
+  ITEM_KINDS,
+  kindLabel,
+  type ItemKind,
+  type VaultItemJson,
+} from "@/lib/vault/items"
 import { useVault, type EditableEntry } from "@/lib/vault/use-vault"
 
 type View = "today" | "items" | "emergency" | "settings"
@@ -79,10 +83,16 @@ export function VaultClient() {
       <main className="grid min-h-svh place-items-center bg-[var(--surface-secondary)] p-6">
         <div className="w-full max-w-lg space-y-5 rounded-[var(--radius-default)] border bg-[var(--surface)] p-7 shadow-[var(--fancy-shadow-basic)]">
           <div className="flex size-11 items-center justify-center rounded-[var(--radius-default)] bg-[var(--danger)]/10 text-[var(--danger)]">
-            <HugeiconsIcon icon={ShieldCheckIcon} strokeWidth={2} className="size-5" />
+            <HugeiconsIcon
+              icon={ShieldCheckIcon}
+              strokeWidth={2}
+              className="size-5"
+            />
           </div>
           <div>
-            <h1 className="text-xl font-semibold tracking-tight">Unable to load your vault</h1>
+            <h1 className="text-xl font-semibold tracking-tight">
+              Unable to load your vault
+            </h1>
             <p className="mt-1 text-sm text-[var(--text-secondary)]">
               Safeory left the stored encrypted data unchanged.
             </p>
@@ -137,7 +147,10 @@ function VaultWorkspace({ vault }: { vault: Vault }) {
     const normalizedQuery = query.trim().toLowerCase()
     return vault.items.filter((entry) => {
       if (activeKind !== "all" && entry.item.kind !== activeKind) return false
-      return normalizedQuery.length === 0 || entry.item.title.toLowerCase().includes(normalizedQuery)
+      return (
+        normalizedQuery.length === 0 ||
+        entry.item.title.toLowerCase().includes(normalizedQuery)
+      )
     })
   }, [activeKind, query, vault.items])
 
@@ -168,15 +181,29 @@ function VaultWorkspace({ vault }: { vault: Vault }) {
 
   return (
     <SidebarProvider>
+      <a
+        href="#main-content"
+        className="fixed top-3 left-3 z-[100] -translate-y-20 rounded-[var(--radius-default)] bg-[var(--surface)] px-3 py-2 text-sm font-medium text-[var(--text-primary)] shadow-[var(--fancy-shadow-neutral)] outline-none focus-visible:translate-y-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--ring)]"
+      >
+        Skip to content
+      </a>
       <Sidebar collapsible="icon" className="border-[var(--border)]">
         <SidebarHeader className="px-3 py-3">
           <div className="flex h-10 items-center gap-2 overflow-hidden rounded-[var(--radius-default)] px-1.5">
             <div className="flex size-8 shrink-0 items-center justify-center rounded-[var(--radius-default)] bg-[var(--primary)] text-[var(--primary-foreground)] shadow-[var(--fancy-shadow-basic)]">
-              <HugeiconsIcon icon={ShieldCheckIcon} strokeWidth={2} className="size-4" />
+              <HugeiconsIcon
+                icon={ShieldCheckIcon}
+                strokeWidth={2}
+                className="size-4"
+              />
             </div>
             <div className="min-w-0 group-data-[collapsible=icon]:hidden">
-              <p className="truncate text-sm font-semibold tracking-tight">Safeory</p>
-              <p className="truncate text-[11px] text-[var(--text-secondary)]">Private life vault</p>
+              <p className="truncate text-sm font-semibold tracking-tight">
+                Safeory
+              </p>
+              <p className="truncate text-[11px] text-[var(--text-secondary)]">
+                Private life vault
+              </p>
             </div>
           </div>
         </SidebarHeader>
@@ -204,7 +231,9 @@ function VaultWorkspace({ vault }: { vault: Vault }) {
                     <HugeiconsIcon icon={PackageIcon} strokeWidth={2} />
                     <span>All items</span>
                   </SidebarMenuButton>
-                  <SidebarMenuBadge>{vault.items.length}</SidebarMenuBadge>
+                  <SidebarMenuBadge className="tabular-nums">
+                    {vault.items.length}
+                  </SidebarMenuBadge>
                 </SidebarMenuItem>
                 {ITEM_KINDS.map(({ kind, label }) => (
                   <SidebarMenuItem key={kind}>
@@ -213,10 +242,15 @@ function VaultWorkspace({ vault }: { vault: Vault }) {
                       isActive={view === "items" && activeKind === kind}
                       onClick={() => selectItems(kind)}
                     >
-                      <HugeiconsIcon icon={categoryIcons[kind]} strokeWidth={2} />
+                      <HugeiconsIcon
+                        icon={categoryIcons[kind]}
+                        strokeWidth={2}
+                      />
                       <span>{label}</span>
                     </SidebarMenuButton>
-                    <SidebarMenuBadge>{counts.get(kind) ?? 0}</SidebarMenuBadge>
+                    <SidebarMenuBadge className="tabular-nums">
+                      {counts.get(kind) ?? 0}
+                    </SidebarMenuBadge>
                   </SidebarMenuItem>
                 ))}
               </SidebarMenu>
@@ -272,21 +306,24 @@ function VaultWorkspace({ vault }: { vault: Vault }) {
         </SidebarFooter>
       </Sidebar>
 
-      <SidebarInset className="min-w-0 bg-[var(--surface)]">
-        <header className="flex h-14 shrink-0 items-center gap-3 border-b px-4 md:px-6">
+      <SidebarInset
+        id="main-content"
+        tabIndex={-1}
+        className="min-w-0 bg-[var(--surface)] outline-none"
+      >
+        <header className="flex h-[3.25rem] shrink-0 items-center gap-2 px-4 [border-bottom:var(--border-width)_solid_var(--border)] md:px-6">
           <SidebarTrigger />
-          <Separator orientation="vertical" className="h-4" />
           <div className="min-w-0">
-            <p className="truncate text-sm font-medium">
+            <p className="truncate text-sm font-medium text-[var(--text-primary)]">
               {view === "today"
                 ? "Today"
                 : view === "items"
-                ? activeKind === "all"
-                  ? "All items"
-                  : kindLabel(activeKind)
-                : view === "emergency"
-                  ? "Emergency card"
-                  : "Settings"}
+                  ? activeKind === "all"
+                    ? "All items"
+                    : kindLabel(activeKind)
+                  : view === "emergency"
+                    ? "Emergency card"
+                    : "Settings"}
             </p>
           </div>
           <div className="ml-auto flex items-center gap-2">
@@ -300,7 +337,11 @@ function VaultWorkspace({ vault }: { vault: Vault }) {
                   setEditing(null)
                 }}
               >
-                <HugeiconsIcon icon={Add01Icon} strokeWidth={2} data-icon="inline-start" />
+                <HugeiconsIcon
+                  icon={Add01Icon}
+                  strokeWidth={2}
+                  data-icon="inline-start"
+                />
                 New item
               </Button>
             ) : null}
@@ -319,6 +360,13 @@ function VaultWorkspace({ vault }: { vault: Vault }) {
         {view === "today" ? (
           <TodayView
             deadlines={deadlines}
+            onAddItem={() => {
+              setDeadlines([])
+              setView("items")
+              setActiveKind("all")
+              setEditing(null)
+              setCreating(true)
+            }}
             onOpen={(deadline) => {
               const detail = vault.getItem({
                 item: {
@@ -342,13 +390,20 @@ function VaultWorkspace({ vault }: { vault: Vault }) {
           <div className="grid min-h-0 flex-1 grid-cols-1 xl:grid-cols-[minmax(20rem,0.8fr)_minmax(28rem,1.2fr)]">
             <section className="min-w-0 border-r bg-[var(--surface-secondary)]">
               <div className="border-b p-4 md:p-5">
+                <label
+                  htmlFor="safeory-item-search"
+                  className="mb-2 block text-xs font-medium text-[var(--text-secondary)]"
+                >
+                  Search items
+                </label>
                 <div className="relative">
                   <HugeiconsIcon
                     icon={Search01Icon}
                     strokeWidth={2}
-                    className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-[var(--text-secondary)]"
+                    className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-[var(--icon)]"
                   />
                   <Input
+                    id="safeory-item-search"
                     value={query}
                     onChange={(event) => setQuery(event.target.value)}
                     placeholder="Search this view"
@@ -358,7 +413,10 @@ function VaultWorkspace({ vault }: { vault: Vault }) {
               </div>
               <div className="max-h-[calc(100svh-7.5rem)] overflow-y-auto p-2 md:p-3">
                 {filteredItems.length === 0 ? (
-                  <EmptyList activeKind={activeKind} onNew={() => setCreating(true)} />
+                  <EmptyList
+                    activeKind={activeKind}
+                    onNew={() => setCreating(true)}
+                  />
                 ) : (
                   <div className="space-y-1">
                     {filteredItems.map((entry) => {
@@ -374,18 +432,24 @@ function VaultWorkspace({ vault }: { vault: Vault }) {
                               setCreating(false)
                             }
                           }}
-                          className="flex w-full items-start gap-3 rounded-[var(--radius-default)] px-3 py-3 text-left transition-colors hover:bg-[var(--hover-bg)] data-[selected=true]:bg-[var(--active-bg)]"
+                          title={`${entry.item.title} — ${kindLabel(entry.item.kind)}`}
+                          className="flex w-full items-start gap-3 rounded-[var(--radius-default)] px-3 py-3 text-left outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--ring)] active:scale-[0.97] data-[selected=true]:bg-[var(--active-bg)] motion-safe:transition-[scale] motion-safe:duration-200 motion-safe:ease-out motion-safe:will-change-transform [@media(hover:hover)]:hover:bg-[var(--hover-bg)]"
                           data-selected={selected}
                         >
-                          <div className="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-[var(--radius-default)] border bg-[var(--surface)] text-[var(--text-secondary)]">
+                          <div className="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-[var(--radius-default)] border bg-[var(--surface)] text-[var(--icon)]">
                             <HugeiconsIcon
-                              icon={categoryIcons[entry.item.kind as ItemKind] ?? FileTextIcon}
+                              icon={
+                                categoryIcons[entry.item.kind as ItemKind] ??
+                                FileTextIcon
+                              }
                               strokeWidth={2}
                               className="size-4"
                             />
                           </div>
                           <div className="min-w-0 flex-1">
-                            <p className="truncate text-sm font-medium">{entry.item.title}</p>
+                            <p className="truncate text-sm font-medium">
+                              {entry.item.title}
+                            </p>
                             <p className="mt-0.5 truncate text-xs text-[var(--text-secondary)]">
                               {kindLabel(entry.item.kind)}
                             </p>
@@ -411,7 +475,9 @@ function VaultWorkspace({ vault }: { vault: Vault }) {
                   </div>
                   <ItemEditor
                     existing={editing}
-                    defaultKind={activeKind === "all" ? "secure_note" : activeKind}
+                    defaultKind={
+                      activeKind === "all" ? "secure_note" : activeKind
+                    }
                     onSave={saveItem}
                     onCancel={() => {
                       setCreating(false)
@@ -438,11 +504,15 @@ function VaultWorkspace({ vault }: { vault: Vault }) {
         {view === "emergency" ? (
           <section className="mx-auto w-full max-w-3xl p-5 md:p-8 lg:p-10">
             <div className="mb-7">
-              <p className="text-sm font-medium text-[var(--primary)]">Life continuity</p>
-              <h1 className="mt-1 text-2xl font-semibold tracking-tight">Emergency card</h1>
-              <p className="mt-2 max-w-2xl text-sm leading-6 text-[var(--text-secondary)]">
-                Keep the instructions and trusted contacts somebody would need during an emergency,
-                encrypted with the rest of your vault.
+              <p className="text-sm font-medium text-[var(--primary)]">
+                Life continuity
+              </p>
+              <h1 className="mt-1 text-2xl font-semibold tracking-tight">
+                Emergency card
+              </h1>
+              <p className="mt-2 max-w-[65ch] text-sm leading-6 text-pretty text-[var(--text-secondary)]">
+                Keep the instructions and trusted contacts somebody would need
+                during an emergency, encrypted with the rest of your vault.
               </p>
             </div>
             <EmergencyCardEditor
@@ -455,11 +525,15 @@ function VaultWorkspace({ vault }: { vault: Vault }) {
         {view === "settings" ? (
           <section className="mx-auto w-full max-w-3xl p-5 md:p-8 lg:p-10">
             <div className="mb-7">
-              <p className="text-sm font-medium text-[var(--primary)]">Vault security</p>
-              <h1 className="mt-1 text-2xl font-semibold tracking-tight">Recovery & access</h1>
-              <p className="mt-2 max-w-2xl text-sm leading-6 text-[var(--text-secondary)]">
-                Recovery material stays client-side. Safeory cannot retrieve your master passphrase
-                or recovery key for you.
+              <p className="text-sm font-medium text-[var(--primary)]">
+                Vault security
+              </p>
+              <h1 className="mt-1 text-2xl font-semibold tracking-tight">
+                Recovery & access
+              </h1>
+              <p className="mt-2 max-w-[65ch] text-sm leading-6 text-pretty text-[var(--text-secondary)]">
+                Recovery material stays client-side. Safeory cannot retrieve
+                your master passphrase or recovery key for you.
               </p>
             </div>
             <RecoveryKitPanel
@@ -475,18 +549,37 @@ function VaultWorkspace({ vault }: { vault: Vault }) {
   )
 }
 
-function EmptyList({ activeKind, onNew }: { activeKind: ItemKind | "all"; onNew: () => void }) {
+function EmptyList({
+  activeKind,
+  onNew,
+}: {
+  activeKind: ItemKind | "all"
+  onNew: () => void
+}) {
   return (
     <div className="flex min-h-72 flex-col items-center justify-center px-6 text-center">
       <div className="mb-4 flex size-11 items-center justify-center rounded-[var(--radius-default)] border bg-[var(--surface)] shadow-[var(--fancy-shadow-basic)]">
-        <HugeiconsIcon icon={PackageIcon} strokeWidth={2} className="size-5 text-[var(--text-secondary)]" />
+        <HugeiconsIcon
+          icon={PackageIcon}
+          strokeWidth={2}
+          className="size-5 text-[var(--icon)]"
+        />
       </div>
-      <p className="text-sm font-medium">No {activeKind === "all" ? "items" : kindLabel(activeKind).toLowerCase()} yet</p>
-      <p className="mt-1 max-w-56 text-xs leading-5 text-[var(--text-secondary)]">
-        Add your first record. It will be encrypted locally before it is persisted.
+      <p className="text-sm font-medium">
+        No{" "}
+        {activeKind === "all" ? "items" : kindLabel(activeKind).toLowerCase()}{" "}
+        yet
+      </p>
+      <p className="mt-1 max-w-[65ch] text-xs leading-5 text-pretty text-[var(--text-secondary)]">
+        Add your first record. It will be encrypted locally before it is
+        persisted.
       </p>
       <Button variant="outline" size="sm" className="mt-4" onClick={onNew}>
-        <HugeiconsIcon icon={Add01Icon} strokeWidth={2} data-icon="inline-start" />
+        <HugeiconsIcon
+          icon={Add01Icon}
+          strokeWidth={2}
+          data-icon="inline-start"
+        />
         Add item
       </Button>
     </div>
@@ -496,13 +589,17 @@ function EmptyList({ activeKind, onNew }: { activeKind: ItemKind | "all"; onNew:
 function DetailPlaceholder() {
   return (
     <div className="flex min-h-[60svh] flex-col items-center justify-center text-center">
-      <div className="mb-5 flex size-12 items-center justify-center rounded-[var(--radius-default)] bg-[var(--surface-secondary)] text-[var(--text-secondary)]">
-        <HugeiconsIcon icon={ShieldCheckIcon} strokeWidth={2} className="size-5" />
+      <div className="mb-5 flex size-12 items-center justify-center rounded-[var(--radius-default)] bg-[var(--surface-secondary)] text-[var(--icon)]">
+        <HugeiconsIcon
+          icon={ShieldCheckIcon}
+          strokeWidth={2}
+          className="size-5"
+        />
       </div>
       <h2 className="text-base font-medium">Select an item</h2>
-      <p className="mt-1 max-w-sm text-sm leading-6 text-[var(--text-secondary)]">
-        Safeory keeps the item list redacted. Protected fields are decrypted only when you open a
-        specific record.
+      <p className="mt-1 max-w-[65ch] text-sm leading-6 text-pretty text-[var(--text-secondary)]">
+        Safeory keeps the item list redacted. Protected fields are decrypted
+        only when you open a specific record.
       </p>
     </div>
   )
@@ -510,32 +607,79 @@ function DetailPlaceholder() {
 
 function LoadingVault() {
   return (
-    <main className="min-h-svh bg-[var(--surface)] p-5">
-      <div className="mx-auto flex min-h-[calc(100svh-2.5rem)] max-w-6xl overflow-hidden rounded-[var(--radius-default)] border bg-[var(--surface)] shadow-[var(--fancy-shadow-basic)]">
-        <aside className="hidden w-64 border-r bg-[var(--surface-secondary)] p-4 md:block">
-          <div className="mb-6 flex items-center gap-3">
-            <Skeleton className="size-9 rounded-[var(--radius-default)]" />
-            <div className="space-y-2">
-              <Skeleton className="h-3 w-24" />
-              <Skeleton className="h-2.5 w-16" />
+    <SidebarProvider>
+      <Sidebar collapsible="icon" className="border-[var(--border)]">
+        <SidebarHeader className="px-3 py-3">
+          <div className="flex h-10 items-center gap-2 overflow-hidden rounded-[var(--radius-default)] px-1.5">
+            <div className="flex size-8 shrink-0 items-center justify-center rounded-[var(--radius-default)] bg-[var(--primary)] text-[var(--primary-foreground)] shadow-[var(--fancy-shadow-basic)]">
+              <HugeiconsIcon
+                icon={ShieldCheckIcon}
+                strokeWidth={2}
+                className="size-4"
+              />
+            </div>
+            <div className="min-w-0 group-data-[collapsible=icon]:hidden">
+              <p className="truncate text-sm font-semibold tracking-tight">Safeory</p>
+              <p className="truncate text-[11px] text-[var(--text-secondary)]">
+                Private life vault
+              </p>
             </div>
           </div>
-          <div className="space-y-2">
-            {Array.from({ length: 8 }).map((_, index) => (
-              <Skeleton key={index} className="h-8 w-full rounded-[var(--radius-default)]" />
-            ))}
+        </SidebarHeader>
+        <SidebarContent>
+          <SidebarGroup>
+            <SidebarGroupLabel>Vault</SidebarGroupLabel>
+            <SidebarGroupContent>
+              <div className="space-y-1 px-2">
+                {Array.from({ length: 6 }).map((_, index) => (
+                  <Skeleton
+                    key={index}
+                    className="h-8 w-full rounded-[var(--radius-default)]"
+                  />
+                ))}
+              </div>
+            </SidebarGroupContent>
+          </SidebarGroup>
+          <SidebarGroup>
+            <SidebarGroupLabel>Continuity</SidebarGroupLabel>
+            <SidebarGroupContent>
+              <div className="space-y-1 px-2">
+                {Array.from({ length: 2 }).map((_, index) => (
+                  <Skeleton
+                    key={index}
+                    className="h-8 w-full rounded-[var(--radius-default)]"
+                  />
+                ))}
+              </div>
+            </SidebarGroupContent>
+          </SidebarGroup>
+        </SidebarContent>
+        <SidebarFooter className="p-3">
+          <Skeleton className="h-8 w-full rounded-[var(--radius-default)]" />
+        </SidebarFooter>
+      </Sidebar>
+
+      <SidebarInset className="min-w-0 bg-[var(--surface)] outline-none">
+        <header className="flex h-[3.25rem] shrink-0 items-center gap-2 px-4 [border-bottom:var(--border-width)_solid_var(--border)] md:px-6">
+          <SidebarTrigger disabled />
+          <Skeleton className="h-4 w-20" />
+          <div className="ml-auto">
+            <Skeleton className="h-7 w-32 rounded-[var(--radius-default)]" />
           </div>
-        </aside>
-        <section className="flex flex-1 items-center justify-center p-8">
+        </header>
+        <div
+          className="flex min-h-0 flex-1 items-center justify-center"
+          role="status"
+          aria-live="polite"
+        >
           <div className="text-center">
-            <div className="mx-auto mb-4 flex size-10 items-center justify-center rounded-[var(--radius-default)] bg-[var(--primary)] text-[var(--primary-foreground)]">
-              <HugeiconsIcon icon={ShieldCheckIcon} strokeWidth={2} className="size-4" />
-            </div>
-            <p className="text-sm font-medium">Opening Safeory</p>
-            <p className="mt-1 text-xs text-[var(--text-secondary)]">Loading your encrypted local vault…</p>
+            <p className="text-sm font-medium text-[var(--text-primary)]">Opening Safeory</p>
+            <p className="mt-1 text-xs text-[var(--text-secondary)]">
+              Loading your encrypted local vault…
+            </p>
           </div>
-        </section>
-      </div>
-    </main>
+        </div>
+      </SidebarInset>
+    </SidebarProvider>
   )
 }

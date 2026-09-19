@@ -9,6 +9,11 @@ import {
   type VaultSession,
 } from "@safeory/contracts"
 import { newId, type VaultItemJson } from "./items"
+import {
+  clearSessionResume,
+  loadSessionResumeForReload,
+  saveSessionResume,
+} from "./session-resume"
 import { loadVaultSession, wasmStatics } from "./vault"
 
 export type VaultPhase = "loading" | "load_error" | "setup" | "unlock" | "open"
@@ -35,6 +40,14 @@ function localTodayYmd(): string {
   const month = String(today.getMonth() + 1).padStart(2, "0")
   const day = String(today.getDate()).padStart(2, "0")
   return `${year}-${month}-${day}`
+}
+
+function refreshSessionResume(session: VaultSession): void {
+  try {
+    saveSessionResume(session.createSessionResume())
+  } catch {
+    clearSessionResume()
+  }
 }
 
 export function useVault() {
@@ -71,7 +84,36 @@ export function useVault() {
       .then((session) => {
         if (!active) return
         sessionRef.current = session
-        setPhase(session.isInitialized() ? "unlock" : "setup")
+        if (!session.isInitialized()) {
+          clearSessionResume()
+          setPhase("setup")
+          return
+        }
+
+        const resumePayload = loadSessionResumeForReload()
+        if (resumePayload !== null) {
+          try {
+            session.unlockWithSessionResume(resumePayload)
+          } catch {
+            session.lock()
+            clearSessionResume()
+            setPhase("unlock")
+            return
+          }
+
+          refreshSessionResume(session)
+          try {
+            refresh()
+          } catch (resumeRefreshError) {
+            session.lock()
+            clearSessionResume()
+            throw resumeRefreshError
+          }
+          setPhase("open")
+          return
+        }
+
+        setPhase("unlock")
       })
       .catch((loadError: unknown) => {
         if (!active) return
@@ -83,7 +125,7 @@ export function useVault() {
     return () => {
       active = false
     }
-  }, [])
+  }, [refresh])
 
   const run = useCallback(
     (operation: (session: VaultSession) => void | Promise<void>) => {
@@ -96,6 +138,7 @@ export function useVault() {
         .then(() => refresh())
         .catch((operationError: unknown) => {
           if (operationError instanceof VaultDurabilityError) {
+            clearSessionResume()
             sessionRef.current = null
             setItems([])
             setEmergencyCardSnapshot(null)
@@ -115,6 +158,7 @@ export function useVault() {
     (passphrase: string) =>
       run(async (session) => {
         await session.create(passphrase)
+        refreshSessionResume(session)
         setPhase("open")
       }),
     [run]
@@ -124,6 +168,7 @@ export function useVault() {
     (passphrase: string) =>
       run((session) => {
         session.unlock(passphrase)
+        refreshSessionResume(session)
         setPhase("open")
       }),
     [run]
@@ -133,6 +178,7 @@ export function useVault() {
     (secretHex: string) =>
       run((session) => {
         session.unlockWithRecoveryKit(secretHex)
+        refreshSessionResume(session)
         setPhase("open")
       }),
     [run]
@@ -140,6 +186,10 @@ export function useVault() {
 
   const lock = useCallback(() => {
     try {
+      if (!clearSessionResume()) {
+        setError("Unable to securely clear this tab's reload credential. The vault remains unlocked.")
+        return
+      }
       sessionRef.current?.lock()
       setItems([])
       setEmergencyCardSnapshot(null)

@@ -18,6 +18,7 @@ import { kindLabel } from "@/lib/vault/items"
 interface Props {
   deadlines: DeadlineSummary[]
   onOpen: (deadline: DeadlineSummary) => void
+  onAddItem: () => void
 }
 
 interface DeadlineGroup {
@@ -60,21 +61,24 @@ function groupDeadlines(deadlines: DeadlineSummary[]): DeadlineGroup[] {
   ]
 }
 
-export function TodayView({ deadlines, onOpen }: Props) {
+export function TodayView({ deadlines, onOpen, onAddItem }: Props) {
   const groups = groupDeadlines(deadlines)
 
   return (
     <section className="mx-auto w-full max-w-4xl p-5 md:p-8 lg:p-10">
       <div className="mb-7 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <p className="text-sm font-medium text-[var(--primary)]">Local reminders</p>
+          <p className="text-sm font-medium text-[var(--primary)]">
+            Local reminders
+          </p>
           <h1 className="mt-1 text-2xl font-semibold tracking-tight">Today</h1>
-          <p className="mt-2 max-w-2xl text-sm leading-6 text-[var(--text-secondary)]">
-            Review important dates derived locally from your encrypted vault. Protected fields stay
-            inside Safeory until you open a specific record.
+          <p className="mt-2 max-w-[65ch] text-sm leading-6 text-pretty text-[var(--text-secondary)]">
+            Review important dates derived locally from your encrypted vault.
+            Protected fields stay inside Safeory until you open a specific
+            record.
           </p>
         </div>
-        <Badge variant="outline" className="self-start">
+        <Badge variant="outline" className="self-start tabular-nums">
           <HugeiconsIcon icon={Calendar03Icon} strokeWidth={2} />
           {deadlines.length} {deadlines.length === 1 ? "deadline" : "deadlines"}
         </Badge>
@@ -90,10 +94,18 @@ export function TodayView({ deadlines, onOpen }: Props) {
             />
           </div>
           <h2 className="text-base font-medium">Nothing due yet</h2>
-          <p className="mx-auto mt-1 max-w-md text-sm leading-6 text-[var(--text-secondary)]">
-            Add expiry, renewal, warranty, return, refund, or subscription dates to supported vault
-            items and they will appear here.
+          <p className="mx-auto mt-1 max-w-[65ch] text-sm leading-6 text-pretty text-[var(--text-secondary)]">
+            Add expiry, renewal, warranty, return, refund, or subscription dates
+            to supported vault items and they will appear here.
           </p>
+          <Button
+            type="button"
+            variant="secondary"
+            className="mt-4"
+            onClick={onAddItem}
+          >
+            Add an item
+          </Button>
         </div>
       ) : (
         <div className="space-y-8">
@@ -102,21 +114,32 @@ export function TodayView({ deadlines, onOpen }: Props) {
               <section key={group.key} className="space-y-3">
                 <div className="flex items-start justify-between gap-4">
                   <div>
-                    <div className="flex items-center gap-2">
+                    <div
+                      className={
+                        group.key === "overdue"
+                          ? "flex items-center gap-2 text-[var(--danger)]"
+                          : "flex items-center gap-2 text-[var(--text-primary)]"
+                      }
+                    >
                       <HugeiconsIcon
-                        icon={group.key === "overdue" ? Alert02Icon : Clock01Icon}
-                        strokeWidth={2}
-                        className={
-                          group.key === "overdue"
-                            ? "size-4 text-[var(--danger)]"
-                            : "size-4 text-[var(--text-secondary)]"
+                        icon={
+                          group.key === "overdue" ? Alert02Icon : Clock01Icon
                         }
+                        strokeWidth={2}
+                        className="size-4 text-current"
                       />
                       <h2 className="text-sm font-semibold">{group.title}</h2>
                     </div>
-                    <p className="mt-1 text-xs text-[var(--text-secondary)]">{group.description}</p>
+                    <p className="mt-1 text-xs text-[var(--text-secondary)]">
+                      {group.description}
+                    </p>
                   </div>
-                  <Badge variant={group.key === "overdue" ? "destructive" : "secondary"}>
+                  <Badge
+                    variant={
+                      group.key === "overdue" ? "destructive" : "secondary"
+                    }
+                    className="tabular-nums"
+                  >
                     {group.items.length}
                   </Badge>
                 </div>
@@ -129,15 +152,22 @@ export function TodayView({ deadlines, onOpen }: Props) {
                         type="button"
                         variant="ghost"
                         onClick={() => onOpen(deadline)}
-                        className="h-auto w-full justify-start rounded-none px-4 py-4 text-left hover:bg-[var(--hover-bg)]"
+                        title={`${deadline.title} — ${deadline.label}, ${deadline.date}`}
+                        className="h-auto w-full justify-start rounded-none px-4 py-4 text-left"
                       >
                         <div className="flex min-w-0 flex-1 items-center gap-3">
-                          <div className="flex size-9 shrink-0 items-center justify-center rounded-[var(--radius-default)] border bg-[var(--surface)] text-[var(--text-secondary)]">
-                            <HugeiconsIcon icon={Calendar03Icon} strokeWidth={2} className="size-4" />
+                          <div className="flex size-9 shrink-0 items-center justify-center rounded-[var(--radius-default)] border bg-[var(--surface)] text-[var(--text-primary)]">
+                            <HugeiconsIcon
+                              icon={Calendar03Icon}
+                              strokeWidth={2}
+                              className="size-4"
+                            />
                           </div>
                           <div className="min-w-0 flex-1">
                             <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                              <span className="truncate text-sm font-medium">{deadline.title}</span>
+                              <span className="truncate text-sm font-medium">
+                                {deadline.title}
+                              </span>
                               <span className="text-xs text-[var(--text-secondary)]">
                                 {kindLabel(deadline.kind)}
                               </span>
@@ -145,11 +175,15 @@ export function TodayView({ deadlines, onOpen }: Props) {
                             <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-[var(--text-secondary)]">
                               <span>{deadline.label}</span>
                               <span aria-hidden="true">•</span>
-                              <span>{deadline.date}</span>
+                              <span className="tabular-nums">
+                                {deadline.date}
+                              </span>
                               <span aria-hidden="true">•</span>
                               <span
                                 className={
-                                  deadline.daysUntil < 0 ? "font-medium text-[var(--danger)]" : undefined
+                                  deadline.daysUntil < 0
+                                    ? "font-medium text-[var(--danger)] tabular-nums"
+                                    : "tabular-nums"
                                 }
                               >
                                 {relativeLabel(deadline.daysUntil)}
@@ -159,7 +193,7 @@ export function TodayView({ deadlines, onOpen }: Props) {
                           <HugeiconsIcon
                             icon={ArrowRight01Icon}
                             strokeWidth={2}
-                            className="size-4 shrink-0 text-[var(--text-secondary)]"
+                            className="size-4 shrink-0 text-[var(--icon)]"
                           />
                         </div>
                       </Button>
@@ -167,7 +201,7 @@ export function TodayView({ deadlines, onOpen }: Props) {
                   ))}
                 </div>
               </section>
-            ) : null,
+            ) : null
           )}
         </div>
       )}

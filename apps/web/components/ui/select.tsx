@@ -2,9 +2,14 @@
 
 import * as React from "react"
 import { Select as SelectPrimitive } from "@base-ui/react/select"
-import { cn } from "cn"
+import { cn } from "@/lib/utils"
 import { HugeiconsIcon } from "@hugeicons/react"
-import { UnfoldMoreIcon, Tick02Icon, ArrowUp01Icon, ArrowDown01Icon } from "@hugeicons/core-free-icons"
+import {
+  UnfoldMoreIcon,
+  Tick02Icon,
+  ArrowUp01Icon,
+  ArrowDown01Icon,
+} from "@hugeicons/core-free-icons"
 
 const Select = SelectPrimitive.Root
 
@@ -41,7 +46,7 @@ function SelectTrigger({
       data-slot="select-trigger"
       data-size={size}
       className={cn(
-        "flex w-fit items-center justify-between gap-1.5 rounded-[var(--radius-default)] border border-[var(--input-border)] bg-[var(--input-fill)] py-2 pr-2 pl-2.5 text-sm text-[var(--text-primary)] whitespace-nowrap transition-colors outline-none select-none hover:bg-[var(--hover-bg)] focus-visible:border-[var(--ring)] focus-visible:ring-3 focus-visible:ring-[var(--ring)] disabled:cursor-not-allowed disabled:opacity-50 aria-invalid:border-[var(--danger)] aria-invalid:ring-3 aria-invalid:ring-[var(--danger)] data-placeholder:text-[var(--text-muted)] data-[size=default]:h-8 data-[size=sm]:h-7 data-[size=sm]:rounded-[var(--radius-small)] *:data-[slot=select-value]:line-clamp-1 *:data-[slot=select-value]:flex *:data-[slot=select-value]:items-center *:data-[slot=select-value]:gap-1.5 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
+        "flex w-fit items-center justify-between gap-1.5 rounded-[var(--radius-default)] border border-[var(--input-border)] bg-[var(--input-fill)] py-2 pr-2 pl-2.5 text-sm whitespace-nowrap text-[var(--text-primary)] outline-none select-none focus-visible:border-[var(--ring)] focus-visible:ring-3 focus-visible:ring-[var(--ring)] disabled:cursor-not-allowed disabled:opacity-50 aria-invalid:border-[var(--danger)] aria-invalid:ring-3 aria-invalid:ring-[var(--danger)] data-placeholder:text-[var(--text-muted)] data-[size=default]:h-8 data-[size=sm]:h-7 data-[size=sm]:rounded-[var(--radius-small)] *:data-[slot=select-value]:line-clamp-1 *:data-[slot=select-value]:flex *:data-[slot=select-value]:items-center *:data-[slot=select-value]:gap-1.5 motion-safe:transition-[background-color,border-color,box-shadow,color] motion-safe:duration-150 motion-safe:ease-out [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg]:text-current [&_svg:not([class*='size-'])]:size-4 [@media(hover:hover)]:hover:bg-[var(--hover-bg)]",
         className
       )}
       {...props}
@@ -49,7 +54,11 @@ function SelectTrigger({
       {children}
       <SelectPrimitive.Icon
         render={
-          <HugeiconsIcon icon={UnfoldMoreIcon} strokeWidth={2} className="pointer-events-none size-4 text-[var(--text-secondary)]" />
+          <HugeiconsIcon
+            icon={UnfoldMoreIcon}
+            strokeWidth={2}
+            className="pointer-events-none size-4 text-[var(--icon)]"
+          />
         }
       />
     </SelectPrimitive.Trigger>
@@ -83,7 +92,10 @@ function SelectContent({
         <SelectPrimitive.Popup
           data-slot="select-content"
           data-align-trigger={alignItemWithTrigger}
-          className={cn("relative isolate z-50 max-h-96 w-max min-w-36 overflow-x-hidden overflow-y-auto rounded-[var(--radius-default)] bg-[var(--surface)] text-[var(--text-primary)] shadow-[var(--fancy-shadow-neutral)] ring-1 ring-[var(--border)]", className )}
+          className={cn(
+            "relative isolate z-50 max-h-96 w-max min-w-36 overflow-x-hidden overflow-y-auto rounded-[var(--radius-default)] bg-[var(--surface)] text-[var(--text-primary)] shadow-[var(--fancy-shadow-neutral)] ring-1 ring-[var(--border)]",
+            className
+          )}
           {...props}
         >
           <SelectScrollUpButton />
@@ -102,7 +114,10 @@ function SelectLabel({
   return (
     <SelectPrimitive.GroupLabel
       data-slot="select-label"
-      className={cn("px-1.5 py-1 text-xs text-[var(--text-secondary)]", className)}
+      className={cn(
+        "px-1.5 py-1 text-xs text-[var(--text-secondary)]",
+        className
+      )}
       {...props}
     />
   )
@@ -130,7 +145,11 @@ function SelectItem({
           <span className="pointer-events-none absolute right-2 flex size-4 items-center justify-center" />
         }
       >
-        <HugeiconsIcon icon={Tick02Icon} strokeWidth={2} className="pointer-events-none" />
+        <HugeiconsIcon
+          icon={Tick02Icon}
+          strokeWidth={2}
+          className="pointer-events-none"
+        />
       </SelectPrimitive.ItemIndicator>
     </SelectPrimitive.Item>
   )
@@ -143,7 +162,10 @@ function SelectSeparator({
   return (
     <SelectPrimitive.Separator
       data-slot="select-separator"
-      className={cn("pointer-events-none -mx-1 my-1 h-px bg-[var(--border)]", className)}
+      className={cn(
+        "pointer-events-none -mx-1 my-1 h-px bg-[var(--border)]",
+        className
+      )}
       {...props}
     />
   )

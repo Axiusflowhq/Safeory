@@ -41,6 +41,14 @@ class FakeVault implements WasmVaultLike {
     this.unlocked = false;
   }
 
+  createSessionResumeJson(): string {
+    return JSON.stringify({ secret: "resume", wrapped: {} });
+  }
+
+  unlockWithSessionResumeJson(): void {
+    this.unlocked = true;
+  }
+
   snapshotJson(): string {
     this.snapshotCount += 1;
     return JSON.stringify({ recoveryInstalled: this.recoveryInstalled });

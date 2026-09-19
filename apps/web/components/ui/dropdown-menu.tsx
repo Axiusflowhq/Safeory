@@ -2,7 +2,7 @@
 
 import * as React from "react"
 import { Menu as MenuPrimitive } from "@base-ui/react/menu"
-import { cn } from "cn"
+import { cn } from "@/lib/utils"
 import { HugeiconsIcon } from "@hugeicons/react"
 import { ArrowRight01Icon, Tick02Icon } from "@hugeicons/core-free-icons"
 
@@ -41,7 +41,10 @@ function DropdownMenuContent({
       >
         <MenuPrimitive.Popup
           data-slot="dropdown-menu-content"
-          className={cn("z-50 max-h-96 w-max min-w-32 overflow-x-hidden overflow-y-auto rounded-[var(--radius-default)] bg-[var(--surface)] p-1 text-[var(--text-primary)] shadow-[var(--fancy-shadow-neutral)] ring-1 ring-[var(--border)] outline-none data-[closed]:overflow-hidden", className )}
+          className={cn(
+            "z-50 max-h-96 w-max min-w-32 overflow-x-hidden overflow-y-auto rounded-[var(--radius-default)] bg-[var(--surface)] p-1 text-[var(--text-primary)] shadow-[var(--fancy-shadow-neutral)] ring-1 ring-[var(--border)] outline-none data-ending-style:opacity-0 data-ending-style:blur-[4px] data-[closed]:overflow-hidden data-[side=bottom]:origin-top data-[side=bottom]:data-ending-style:-translate-y-1 data-[side=left]:origin-right data-[side=left]:data-ending-style:translate-x-1 data-[side=right]:origin-left data-[side=right]:data-ending-style:-translate-x-1 data-[side=top]:origin-bottom data-[side=top]:data-ending-style:translate-y-1 motion-safe:transition-[opacity,filter,transform] motion-safe:duration-100 motion-safe:ease-out motion-safe:will-change-transform",
+            className
+          )}
           {...props}
         />
       </MenuPrimitive.Positioner>
@@ -88,7 +91,7 @@ function DropdownMenuItem({
       data-inset={inset}
       data-variant={variant}
       className={cn(
-        "group/dropdown-menu-item relative flex cursor-default items-center gap-1.5 rounded-[var(--radius-small)] px-1.5 py-1 text-sm outline-hidden select-none focus:bg-[var(--active-bg)] focus:text-[var(--text-primary)] not-data-[variant=destructive]:focus:**:text-[var(--text-primary)] data-inset:pl-7 data-[variant=destructive]:text-[var(--danger)] data-[variant=destructive]:focus:bg-[var(--danger)]/10 data-[variant=destructive]:focus:text-[var(--danger)] data-[variant=destructive]:focus:bg-[var(--danger)]/20 data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4 data-[variant=destructive]:*:[svg]:text-[var(--danger)]",
+        "group/dropdown-menu-item relative flex cursor-default items-center gap-1.5 rounded-[var(--radius-small)] px-1.5 py-1 text-sm outline-hidden select-none focus:bg-[var(--active-bg)] focus:text-[var(--text-primary)] not-data-[variant=destructive]:focus:**:text-[var(--text-primary)] data-inset:pl-7 data-[disabled]:pointer-events-none data-[disabled]:opacity-50 data-[variant=destructive]:text-[var(--danger)] data-[variant=destructive]:focus:bg-[var(--danger)]/10 data-[variant=destructive]:focus:bg-[var(--danger)]/20 data-[variant=destructive]:focus:text-[var(--danger)] [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4 data-[variant=destructive]:*:[svg]:text-[var(--danger)]",
         className
       )}
       {...props}
@@ -119,7 +122,11 @@ function DropdownMenuSubTrigger({
       {...props}
     >
       {children}
-      <HugeiconsIcon icon={ArrowRight01Icon} strokeWidth={2} className="ml-auto" />
+      <HugeiconsIcon
+        icon={ArrowRight01Icon}
+        strokeWidth={2}
+        className="ml-auto"
+      />
     </MenuPrimitive.SubmenuTrigger>
   )
 }
@@ -135,7 +142,10 @@ function DropdownMenuSubContent({
   return (
     <DropdownMenuContent
       data-slot="dropdown-menu-sub-content"
-      className={cn("w-auto min-w-[96px] rounded-[var(--radius-default)] bg-[var(--surface)] p-1 text-[var(--text-primary)] shadow-[var(--fancy-shadow-neutral)] ring-1 ring-[var(--border)]", className )}
+      className={cn(
+        "w-auto min-w-[96px] rounded-[var(--radius-default)] bg-[var(--surface)] p-1 text-[var(--text-primary)] shadow-[var(--fancy-shadow-neutral)] ring-1 ring-[var(--border)]",
+        className
+      )}
       align={align}
       alignOffset={alignOffset}
       side={side}

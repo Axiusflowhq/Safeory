@@ -70,14 +70,14 @@ export function EmergencyCardEditor({ initial, onSave }: Props) {
               <HugeiconsIcon
                 icon={ShieldKeyIcon}
                 strokeWidth={1.8}
-                className="size-4 text-[var(--primary)]"
+                className="size-4 text-[var(--icon-active)]"
               />
             </div>
             <div>
               <h2 className="text-lg font-semibold tracking-tight">
-                Emergency Card
+                Emergency card
               </h2>
-              <p className="text-sm text-[var(--text-secondary)]">
+              <p className="max-w-[65ch] text-sm text-pretty text-[var(--text-secondary)]">
                 Private instructions and people to contact in an emergency.
               </p>
             </div>
@@ -110,26 +110,28 @@ export function EmergencyCardEditor({ initial, onSave }: Props) {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h3 className="text-sm font-medium">Emergency contacts</h3>
-            <p className="mt-0.5 text-sm text-[var(--text-secondary)]">
+            <p className="mt-0.5 max-w-[65ch] text-sm text-pretty text-[var(--text-secondary)]">
               Add people who should be contacted or can help carry out your
               plan.
             </p>
           </div>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() =>
-              setContacts((previous) => [...previous, { ...emptyContact }])
-            }
-          >
-            <HugeiconsIcon
-              icon={UserAdd01Icon}
-              strokeWidth={2}
-              data-icon="inline-start"
-            />
-            Add contact
-          </Button>
+          {contacts.length > 0 ? (
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              onClick={() =>
+                setContacts((previous) => [...previous, { ...emptyContact }])
+              }
+            >
+              <HugeiconsIcon
+                icon={UserAdd01Icon}
+                strokeWidth={2}
+                data-icon="inline-start"
+              />
+              Add contact
+            </Button>
+          ) : null}
         </div>
 
         {contacts.length === 0 ? (
@@ -142,9 +144,25 @@ export function EmergencyCardEditor({ initial, onSave }: Props) {
               />
             </div>
             <p className="text-sm font-medium">No contacts yet</p>
-            <p className="mx-auto mt-1 max-w-sm text-sm text-[var(--text-secondary)]">
+            <p className="mx-auto mt-1 max-w-[65ch] text-sm text-pretty text-[var(--text-secondary)]">
               You can save the card without contacts, or add someone now.
             </p>
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              className="mt-4"
+              onClick={() =>
+                setContacts((previous) => [...previous, { ...emptyContact }])
+              }
+            >
+              <HugeiconsIcon
+                icon={UserAdd01Icon}
+                strokeWidth={2}
+                data-icon="inline-start"
+              />
+              Add contact
+            </Button>
           </div>
         ) : (
           <div className="space-y-3">
@@ -155,7 +173,10 @@ export function EmergencyCardEditor({ initial, onSave }: Props) {
               >
                 <div className="mb-4 flex items-center justify-between gap-3">
                   <div className="min-w-0">
-                    <p className="truncate text-sm font-medium">
+                    <p
+                      className="truncate text-sm font-medium"
+                      title={contact.name.trim() || `Contact ${index + 1}`}
+                    >
                       {contact.name.trim() || `Contact ${index + 1}`}
                     </p>
                     <p className="text-xs text-[var(--text-secondary)]">
@@ -165,7 +186,7 @@ export function EmergencyCardEditor({ initial, onSave }: Props) {
                   <Button
                     type="button"
                     variant="ghost"
-                    size="icon-sm"
+                    size="icon"
                     aria-label={`Remove contact ${index + 1}`}
                     onClick={() =>
                       setContacts((previous) =>
@@ -217,6 +238,7 @@ export function EmergencyCardEditor({ initial, onSave }: Props) {
                     <Input
                       id={`safeory-contact-${index}-phone`}
                       type="tel"
+                      inputMode="tel"
                       value={contact.phone}
                       onChange={(event) =>
                         updateContact(index, { phone: event.target.value })
@@ -231,6 +253,7 @@ export function EmergencyCardEditor({ initial, onSave }: Props) {
                     <Input
                       id={`safeory-contact-${index}-email`}
                       type="email"
+                      inputMode="email"
                       value={contact.email}
                       onChange={(event) =>
                         updateContact(index, { email: event.target.value })
