@@ -61,7 +61,27 @@ export {
   parseOpaqueObjectHeader,
   parseSyncObjectMetadata,
   parseSyncObjectPage,
+  verifyOpaqueCiphertext,
 } from "./sync-client";
+export {
+  DurableSyncOutbox,
+  IndexedDbSyncOutboxStore,
+} from "./sync-queue";
+export type {
+  QueuedOpaqueMutation,
+  SyncFlushResult,
+  SyncOutboxStore,
+} from "./sync-queue";
+export {
+  DurableSyncPuller,
+  IndexedDbSyncCursorStore,
+} from "./sync-pull";
+export type {
+  AcceptPulledObject,
+  PulledOpaqueObject,
+  SyncCursorStore,
+  SyncPullResult,
+} from "./sync-pull";
 export type {
   OpaqueMutationV1,
   OpaqueObjectClassV1,

@@ -31,10 +31,14 @@ try {
     "src/session.ts",
     "src/sync-compatibility.ts",
     "src/sync-client.ts",
+    "src/sync-queue.ts",
+    "src/sync-pull.ts",
     "tests/device-keys.test.ts",
     "tests/session-durability.test.ts",
     "tests/sync-compatibility.test.ts",
     "tests/sync-client.test.ts",
+    "tests/sync-queue.test.ts",
+    "tests/sync-pull.test.ts",
     "--outDir",
     output,
     "--module",
@@ -57,6 +61,8 @@ try {
       join(output, "tests", "session-durability.test.js"),
       join(output, "tests", "sync-compatibility.test.js"),
       join(output, "tests", "sync-client.test.js"),
+      join(output, "tests", "sync-queue.test.js"),
+      join(output, "tests", "sync-pull.test.js"),
     ])
   }
 } finally {

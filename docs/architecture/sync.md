@@ -12,8 +12,13 @@ atomically persists exact-input operation-ID outcomes with opaque headers. The
 browser contracts package validates that bounded advertisement and negotiates
 protocol, object-header, and envelope versions before sync. It also implements
 strict opaque contract parsing plus authenticated, ciphertext-verifying
-list/download/upload transport. Durable browser queue/application wiring and
-household/space authorization remain incomplete.
+list/download/upload transport. A bounded credential-free IndexedDB push outbox
+retains canonical mutation/ciphertext pairs until a matching upload response is
+durably acknowledged, so interrupted acknowledgements replay by operation ID.
+A pull coordinator verifies each downloaded body, waits for an idempotent
+durable-acceptance callback, and only then compare-and-swap checkpoints that
+change sequence. Web/extension application wiring and household/space
+authorization remain incomplete.
 
 ## Goals
 

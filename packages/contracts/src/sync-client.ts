@@ -154,6 +154,25 @@ export class SyncClient {
     const page = parseSyncObjectPage(
       await boundedJson(response, MAX_METADATA_RESPONSE_CHARS),
     )
+    if (page.next_change_seq < after) {
+      throw new SyncClientError(
+        "invalid_response",
+        "The sync response cursor moved backwards.",
+      )
+    }
+    if (page.objects.some((object) => object.change_seq <= after)) {
+      throw new SyncClientError(
+        "invalid_response",
+        "The sync response repeated an acknowledged change.",
+      )
+    }
+    const expectedNext = page.objects.at(-1)?.change_seq ?? after
+    if (page.next_change_seq !== expectedNext) {
+      throw new SyncClientError(
+        "invalid_response",
+        "The sync response cursor does not match the returned changes.",
+      )
+    }
     for (const object of page.objects) this.requireAccount(object.object)
     return page
   }
@@ -183,7 +202,7 @@ export class SyncClient {
       )
     }
     const bytes = await readExactBody(response, header.ciphertext_size_bytes)
-    await verifyCiphertext(header, bytes)
+    await verifyOpaqueCiphertext(header, bytes)
     return bytes
   }
 
@@ -194,7 +213,7 @@ export class SyncClient {
   ): Promise<SyncObjectMetadataV1> {
     const mutation = parseOpaqueMutation(mutationValue)
     this.requireAccount(mutation.object)
-    await verifyCiphertext(mutation.object, ciphertext)
+    await verifyOpaqueCiphertext(mutation.object, ciphertext)
     const encodedMutation = JSON.stringify(mutation)
     if (encodedMutation.length > MAX_MUTATION_HEADER_CHARS) {
       throw new SyncClientError(
@@ -219,9 +238,17 @@ export class SyncClient {
         ...(options.signal === undefined ? {} : { signal: options.signal }),
       },
     )
-    return parseSyncObjectMetadata(
+    const metadata = parseSyncObjectMetadata(
       await boundedJson(response, MAX_MUTATION_HEADER_CHARS),
     )
+    this.requireAccount(metadata.object)
+    if (!sameOpaqueObjectHeader(metadata.object, mutation.object)) {
+      throw new SyncClientError(
+        "invalid_response",
+        "The sync upload response does not match the submitted opaque object.",
+      )
+    }
+    return metadata
   }
 
   private endpoint(path: string): URL {
@@ -428,7 +455,7 @@ function parsePrecondition(value: unknown): WritePreconditionV1 {
   return invalid("The write precondition is unsupported.")
 }
 
-async function verifyCiphertext(
+export async function verifyOpaqueCiphertext(
   header: OpaqueObjectHeaderV1,
   ciphertext: Uint8Array,
 ): Promise<void> {
@@ -451,6 +478,13 @@ async function verifyCiphertext(
       "The ciphertext digest does not match its opaque header.",
     )
   }
+}
+
+function sameOpaqueObjectHeader(
+  left: OpaqueObjectHeaderV1,
+  right: OpaqueObjectHeaderV1,
+): boolean {
+  return JSON.stringify(left) === JSON.stringify(right)
 }
 
 async function boundedJson(response: Response, maximum: number): Promise<unknown> {
@@ -569,7 +603,7 @@ function uuid(value: unknown, label: string): string {
   if (typeof value !== "string" || !UUID.test(value) || value.toLowerCase() === NIL_UUID) {
     return invalid(`${label} must be a non-nil UUID.`)
   }
-  return value
+  return value.toLowerCase()
 }
 
 function sha256(value: unknown): number[] {

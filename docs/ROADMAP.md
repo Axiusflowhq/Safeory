@@ -172,10 +172,14 @@ gates are green, including the generated-WASM Node smoke test.**
   shares wire bounds. `@safeory/contracts` now validates and negotiates that
   advertisement and provides a bounded authenticated browser transport for
   canonical list/download/upload operations with ciphertext hash verification.
+  `@safeory/contracts` also provides a bounded credential-free IndexedDB push
+  outbox with idempotent replay and acknowledge-after-response semantics, plus
+  verified pull-page processing with per-object durable acceptance and
+  compare-and-swap cursor checkpoints.
   The opaque-object endpoint validates and durably persists canonical
   mutation/header metadata with atomic operation-ID idempotency. Binding this
-  transport to durable web/extension queues plus household/space authorization
-  remains.
+  transport and its durable coordinators to web and extension application flows,
+  plus household/space authorization, remains.
 - Decide the high-entropy Account Secret/device-enrollment construction in an
   ADR, implement recovery/new-device enrollment, and test server-dump offline
   attack resistance. Cognito authentication alone is insufficient.

@@ -9,7 +9,9 @@
     "./persistence": "./src/persistence.ts",
     "./session": "./src/session.ts",
     "./sync-compatibility": "./src/sync-compatibility.ts",
-    "./sync-client": "./src/sync-client.ts"
+    "./sync-client": "./src/sync-client.ts",
+    "./sync-queue": "./src/sync-queue.ts",
+    "./sync-pull": "./src/sync-pull.ts"
   },
   "scripts": {
     "test": "node scripts/test-durability.mjs",
