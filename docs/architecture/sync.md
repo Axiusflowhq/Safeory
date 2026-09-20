@@ -193,8 +193,10 @@ coordinator remain.
 The request/grant cryptographic core, browser secure-key-store adapter, and
 durable server state machine are implemented. Pending bearers are isolated from
 ordinary authentication, reserve bounded slots, expire, can be cancelled, and
-activate atomically with a minimal event. Durable client approval coordination,
-post-activation inventory confirmation, and reviewed UX remain.
+activate atomically with a minimal event. The shared browser coordinator wraps
+approval bearers under a non-extractable key before server mutation, resumes
+exact requests, and saves joining credentials only after matching the signed
+approver against active inventory. Application wiring and reviewed UX remain.
 
 Email or Cognito access alone cannot deliver usable vault keys.
 

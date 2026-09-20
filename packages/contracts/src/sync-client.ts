@@ -144,6 +144,10 @@ export class SyncClient {
     readonly compatibility: NegotiatedCompatibility,
   ) {}
 
+  get apiBaseUrl(): string {
+    return this.baseUrl.href
+  }
+
   static async connect(
     apiBaseUrl: string,
     accountIdValue: string,

@@ -157,6 +157,17 @@ export type {
   SyncCredentialStorageBackend,
 } from "./sync-credentials";
 export {
+  BrowserDeviceEnrollmentCoordinator,
+  IndexedDbDeviceEnrollmentApprovalStorage,
+} from "./sync-device-enrollment";
+export type {
+  AcceptedDeviceEnrollment,
+  DeviceEnrollmentApprovalDraft,
+  DeviceEnrollmentApprovalStorageBackend,
+  PreparedDeviceEnrollmentApproval,
+  StoredDeviceEnrollmentApprovalV1,
+} from "./sync-device-enrollment";
+export {
   DurableSyncPuller,
   IndexedDbSyncCursorStore,
 } from "./sync-pull";

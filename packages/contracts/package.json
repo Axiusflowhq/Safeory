@@ -12,6 +12,7 @@
     "./sync-client": "./src/sync-client.ts",
     "./sync-coordinator": "./src/sync-coordinator.ts",
     "./sync-credentials": "./src/sync-credentials.ts",
+    "./sync-device-enrollment": "./src/sync-device-enrollment.ts",
     "./sync-queue": "./src/sync-queue.ts",
     "./sync-pull": "./src/sync-pull.ts",
     "./sync-domain": "./src/sync-domain.ts",

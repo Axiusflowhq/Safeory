@@ -117,7 +117,8 @@ Secret.
   hash-and-revision CAS before storing a replacement body.
 - Web and extension development enrollment implement first-device generation,
   confirmation, re-authentication, and durable publication. The API implements
-  ADR 0007's pending-device state machine; production identity integration and
-  durable client approval coordination are still required before launch.
+  ADR 0007's pending-device state machine, and the shared browser layer provides
+  durable approval/acceptance coordination. Production identity integration and
+  application enrollment UX are still required before launch.
 - A reviewed printable-kit experience, secure existing-device transfer, server
   recovery workflow, and external cryptographic review remain required.

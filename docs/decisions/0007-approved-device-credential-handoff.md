@@ -4,9 +4,9 @@ Date: 2026-09-20
 
 ## Status
 
-Accepted and partially implemented. The cryptographic request/grant format and
-durable pending-device API state machine are implemented; durable client-side
-approval coordination, inventory confirmation, and product UX remain.
+Accepted and partially implemented. The cryptographic request/grant format,
+durable pending-device API state machine, and shared browser approval/acceptance
+coordinator are implemented; application wiring and reviewed product UX remain.
 
 ## Context
 
@@ -102,10 +102,13 @@ Revocation and cancellation invalidate pending bearers. The existing immediate
 - `vault-sharing` owns the immutable request/grant wire format and cryptography.
 - `vault-wasm` exposes only JSON packages and bounded transient credential bytes;
   browser key storage unwraps device private keys only for one operation.
-- Web and extension coordinators must persist approval drafts before network
-  mutation, consume joining requests/grants once, and verify server inventory
-  before saving credentials.
+- The shared browser coordinator persists locally wrapped approval drafts before
+  network mutation, retries exact server input, and verifies the approver against
+  active server inventory before saving joining credentials. Web and extension
+  surfaces still need to drive that coordinator and consume transported grants.
 - The API and database implement bounded pending-device creation, activation,
   cancellation, expiry, exact-input idempotency, approver-revocation
-  invalidation, and minimal security-event state. Client approval drafts and UX
-  still need to consume that state machine before the flow is production-ready.
+  invalidation, and minimal security-event state. The browser contracts layer
+  consumes that state machine with encrypted durable drafts and fail-closed
+  inventory confirmation; application UX still needs to wire the flow before it
+  is production-ready.

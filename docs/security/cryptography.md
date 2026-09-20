@@ -69,10 +69,12 @@ joining public keys. The credential grant combines ephemeral and approver-static
 X25519 exchanges, encrypts only to the joining device, and carries an Ed25519
 signature over its complete context and ciphertext digest. Browser adapters
 unwrap stored device private keys only for the operation and immediately clear
-transient copies. The server now provides bounded pending activation,
-expiry/cancellation, and atomic activation with minimal events. Durable client
-approval drafts, inventory confirmation, and UX are still required before this
-primitive becomes a production enrollment path.
+transient copies. The server provides bounded pending activation,
+expiry/cancellation, and atomic activation with minimal events. The browser
+coordinator durably wraps approval bearers before mutation and confirms the
+signed approver against active inventory before credential persistence.
+Application wiring and reviewed UX are still required before this becomes a
+production enrollment path.
 
 The combined product also requires independently rotatable space keys:
 

@@ -51,7 +51,7 @@ Rule: cloud integration starts only after the local platform below is stable.
 | # | Item | Status |
 |---|------|--------|
 | 17 | Client-side encryption | ✅ Done — XChaCha20-Poly1305, per-item keys, Argon2id KEK |
-| 18 | Zero-knowledge server | 🟡 Partial — `apps/api` implements account/device coordination, isolated pending-device activation, opaque revision-fenced ciphertext transport, topology-backed household/space authorization, and direct metadata discovery for the bounded account-bootstrap singleton; web and extension development enrollment now confirm an Account Secret and durably publish the Rust/WASM-produced remote-root envelope, while approved-device client coordination, hosted recovery, cross-account shared-object routing, production AWS identity, and end-to-end multi-device sync remain |
+| 18 | Zero-knowledge server | 🟡 Partial — `apps/api` implements account/device coordination, isolated pending-device activation, opaque revision-fenced ciphertext transport, topology-backed household/space authorization, and direct metadata discovery for the bounded account-bootstrap singleton; shared browser contracts durably coordinate approved-device grants and inventory confirmation, while application enrollment UX, hosted recovery, cross-account shared-object routing, production AWS identity, and end-to-end multi-device sync remain |
 | 19 | Local encrypted vault | ✅ Done — SQLite ciphertext-only, rollback-journal tested |
 | 20 | E2EE sharing | 🟡 Partial — `vault-sharing` v2 provides recipient-confidential X25519 envelopes plus a separate Ed25519 trusted-device pairing/signing foundation; share-v2's `sender_public` itself remains unauthenticated and there is no transport/release protocol |
 | 21 | Recovery kit | ✅ Done — save/print, install/confirm, live-key replacement, unlock-with-kit, recovery-authenticated backup restore with new passphrase, 2-of-3 social recovery crypto + e2e test |
@@ -84,8 +84,10 @@ Rule: cloud integration starts only after the local platform below is stable.
    durably queue the account bootstrap envelope before publishing topology.
    ADR 0007 now defines and implements the signed, recipient-encrypted
    device-credential handoff core plus a bounded pending-device API state
-   machine. Production identity, durable client approval coordination and UX,
-   hosted recovery, and external cryptographic review remain.
+   machine. Shared browser contracts now persist encrypted approval drafts,
+   retry exact preparation, activate, and verify approver inventory before
+   credential storage. Production identity, application UX, hosted recovery,
+   and external cryptographic review remain.
    Cognito identity must not become the sole protection for remotely stored root
    wraps.
 3. Integrate the implemented browser compatibility/opaque transport client and

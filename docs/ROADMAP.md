@@ -204,9 +204,10 @@ gates are green, including the generated-WASM Node smoke test.**
   production identity and recovery/new-device approval. ADR 0007 now defines
   and implements the signed, recipient-encrypted device-credential handoff core.
   The API now isolates bounded pending bearers, expires/cancels them, activates
-  atomically, and records minimal enrollment events. Durable client approval
-  coordination, application UX, external review, and server-dump resistance
-  validation remain. Cognito
+  atomically, and records minimal enrollment events. The shared browser
+  coordinator durably wraps approval drafts, retries exact preparation, and
+  verifies active approver inventory before persisting a joining credential.
+  Application UX, external review, and server-dump resistance validation remain. Cognito
   authentication alone remains insufficient.
 - Add minimal security-event and encrypted activity-event formats.
 
