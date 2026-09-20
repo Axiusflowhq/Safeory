@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-//! Browser/WASM vault session (ADR 0002/0003).
+//! Legacy browser/WASM vault session retained for migration and regression tests.
 //!
 //! The full crypto core (`vault-crypto`) runs here in WebAssembly. Keys live in
 //! WASM linear memory and are zeroized on lock; only ciphertext envelopes and

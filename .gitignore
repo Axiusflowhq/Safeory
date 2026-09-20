@@ -1,5 +1,6 @@
 /target/
 /node_modules/
+/.proof/
 .pnpm-store/
 apps/web/dist/
 apps/web/node_modules/

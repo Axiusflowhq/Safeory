@@ -18,6 +18,8 @@
     "typecheck": "bun run --filter @safeory/contracts typecheck && bun run --filter @safeory/web typecheck && bun run --filter @safeory/extension typecheck",
     "lint": "bun run --filter @safeory/contracts lint && bun run --filter @safeory/web lint && bun run --filter @safeory/extension lint",
     "audit:js": "bun audit",
+    "check:foundation": "node scripts/check-foundation-boundary.mjs",
+    "test:product-domain": "node --test product/domain/*.test.mjs",
     "check:icons": "node scripts/check-icon-policy.mjs",
     "test:rust": "cargo test --workspace",
     "test:contracts": "bun run --filter @safeory/contracts test",

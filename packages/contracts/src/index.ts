@@ -164,8 +164,10 @@ export type {
   AcceptedDeviceEnrollment,
   DeviceEnrollmentApprovalDraft,
   DeviceEnrollmentApprovalStorageBackend,
+  DeviceEnrollmentJoinRequest,
   PreparedDeviceEnrollmentApproval,
   StoredDeviceEnrollmentApprovalV1,
+  StoredDeviceEnrollmentJoinRequestV1,
 } from "./sync-device-enrollment";
 export {
   DurableSyncPuller,

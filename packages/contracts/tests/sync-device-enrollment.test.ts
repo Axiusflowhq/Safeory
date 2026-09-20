@@ -6,6 +6,7 @@ import {
   BrowserDeviceEnrollmentCoordinator,
   type DeviceEnrollmentApprovalStorageBackend,
   type StoredDeviceEnrollmentApprovalV1,
+  type StoredDeviceEnrollmentJoinRequestV1,
 } from "../src/sync-device-enrollment"
 import { CURRENT_SYNC_COMPATIBILITY } from "../src/sync-compatibility"
 import { SyncClient, SyncClientError } from "../src/sync-client"
@@ -56,6 +57,7 @@ function grantJson(): string {
 
 class MemoryApprovalStorage implements DeviceEnrollmentApprovalStorageBackend {
   readonly records = new Map<string, StoredDeviceEnrollmentApprovalV1>()
+  readonly joinRequests = new Map<string, StoredDeviceEnrollmentJoinRequestV1>()
   readonly wrappingKey = crypto.subtle.generateKey(
     { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"],
   ) as Promise<CryptoKey>
@@ -72,10 +74,24 @@ class MemoryApprovalStorage implements DeviceEnrollmentApprovalStorageBackend {
     return [...this.records.values()]
   }
   async deleteDraft(key: string): Promise<void> { this.records.delete(key) }
+  async addJoinRequest(record: StoredDeviceEnrollmentJoinRequestV1): Promise<void> {
+    if (this.joinRequests.has(record.key)) throw new Error("join request already exists")
+    this.joinRequests.set(record.key, record)
+  }
+  async getJoinRequest(key: string): Promise<StoredDeviceEnrollmentJoinRequestV1 | null> {
+    return this.joinRequests.get(key) ?? null
+  }
+  async listJoinRequests(): Promise<StoredDeviceEnrollmentJoinRequestV1[]> {
+    return [...this.joinRequests.values()]
+  }
+  async deleteJoinRequest(key: string): Promise<void> { this.joinRequests.delete(key) }
 }
 
 function fakeDeviceKeys(openedPackage?: Uint8Array): BrowserDeviceKeyStore {
   return {
+    async createDeviceEnrollmentRequest(): Promise<string> {
+      return requestJson()
+    },
     async sealDeviceEnrollmentGrant(
       _approverDeviceId: string,
       _requestJson: string,
@@ -90,6 +106,90 @@ function fakeDeviceKeys(openedPackage?: Uint8Array): BrowserDeviceKeyStore {
     },
   } as unknown as BrowserDeviceKeyStore
 }
+
+test("joining-device request is retained durably until a grant is accepted", async () => {
+  const storage = new MemoryApprovalStorage()
+  const saved: unknown[] = []
+  const credentialPackage = new TextEncoder().encode(JSON.stringify({
+    format_version: 1,
+    account_id: ACCOUNT_ID,
+    device_id: JOINING_ID,
+    device_token: TOKEN,
+  }))
+  const coordinator = new BrowserDeviceEnrollmentCoordinator(
+    fakeDeviceKeys(credentialPackage), fakeCredentialStore(saved), storage, crypto,
+  )
+
+  const request = await coordinator.createJoinRequest(API, ACCOUNT_ID, JOINING_ID)
+  assert.deepEqual(request, {
+    account_id: ACCOUNT_ID,
+    request_id: REQUEST_ID,
+    joining_device_id: JOINING_ID,
+    request_json: requestJson(),
+  })
+  assert.deepEqual(await coordinator.listJoinRequests(API, ACCOUNT_ID), [request])
+
+  await assert.rejects(
+    coordinator.acceptStoredGrant(API, ACCOUNT_ID, REQUEST_ID, grantJson(), {
+      fetcher: async () => { throw new Error("offline") },
+    }),
+    /compatibility request failed/,
+  )
+  assert.deepEqual(await coordinator.listJoinRequests(API, ACCOUNT_ID), [request])
+  assert.deepEqual(saved, [])
+
+  const fetcher: typeof fetch = async (input) => {
+    const path = new URL(String(input)).pathname
+    if (path === "/v1/compatibility") return Response.json(CURRENT_SYNC_COMPATIBILITY)
+    if (path.endsWith("/activate")) {
+      return Response.json({
+        account_id: ACCOUNT_ID,
+        request_id: REQUEST_ID,
+        device_id: JOINING_ID,
+        expires_at_unix_seconds: 2_000_000_000,
+        status: "active",
+      })
+    }
+    if (path === "/v1/devices") {
+      return Response.json({
+        current_device_id: JOINING_ID,
+        devices: [
+          {
+            device_id: APPROVER_ID,
+            encryption_public_key: "33".repeat(32),
+            signing_public_key: "44".repeat(32),
+          },
+          {
+            device_id: JOINING_ID,
+            encryption_public_key: "11".repeat(32),
+            signing_public_key: "22".repeat(32),
+          },
+        ],
+      })
+    }
+    throw new Error(`unexpected endpoint ${path}`)
+  }
+  const accepted = await coordinator.acceptStoredGrant(
+    API, ACCOUNT_ID, REQUEST_ID, grantJson(), { fetcher },
+  )
+  assert.equal(accepted.client.deviceId, JOINING_ID)
+  assert.deepEqual(await coordinator.listJoinRequests(API, ACCOUNT_ID), [])
+  assert.equal(saved.length, 1)
+})
+
+test("joining-device request can be discarded without affecting approval drafts", async () => {
+  const storage = new MemoryApprovalStorage()
+  const coordinator = new BrowserDeviceEnrollmentCoordinator(
+    fakeDeviceKeys(), fakeCredentialStore([]), storage, crypto,
+  )
+  const request = await coordinator.createJoinRequest(API, ACCOUNT_ID, JOINING_ID)
+  await coordinator.discardJoinRequest(API, ACCOUNT_ID, request.request_id)
+  assert.deepEqual(await coordinator.listJoinRequests(API, ACCOUNT_ID), [])
+  await assert.rejects(
+    coordinator.acceptStoredGrant(API, ACCOUNT_ID, request.request_id, grantJson()),
+    (error: unknown) => error instanceof SyncClientError && error.code === "not_found",
+  )
+})
 
 function fakeCredentialStore(saved: Array<unknown>): BrowserSyncCredentialStore {
   return {

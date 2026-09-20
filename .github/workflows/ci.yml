@@ -40,6 +40,11 @@ jobs:
       - name: Install locked JavaScript dependencies
         run: bun install --frozen-lockfile
 
+      - name: Enforce foundation provenance and OSS-only boundary
+        run: bun run check:foundation
+      - name: Test transport-independent Safeory product domain
+        run: bun run test:product-domain
+
       - name: Validate self-hosted Compose configuration
         run: |
           cp .env.example .env

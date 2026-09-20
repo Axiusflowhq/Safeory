@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "decision": "bitwarden-oss",
+  "decision_document": "PLAN.md",
+  "snapshot_date": "2026-09-20",
+  "status": "selected-pending-import-gates",
+  "sources": {
+    "clients": {
+      "repository": "https://github.com/bitwarden/clients.git",
+      "browser_tag": "browser-v2026.9.0",
+      "browser_commit": "07ac2aa903459ea8e1c18e3295b765be0bc3585f",
+      "web_tag": "web-v2026.9.0",
+      "web_commit": "7ecf0d710cf39db40aa4db1c611417af2a0f44e0",
+      "canonical_import_commit": "07ac2aa903459ea8e1c18e3295b765be0bc3585f"
+    },
+    "server": {
+      "repository": "https://github.com/bitwarden/server.git",
+      "tag": "v2026.9.0",
+      "commit": "6fcd3b71f5f2eb0881dd4a3b587fa8afe5957da1"
+    },
+    "sdk": {
+      "repository": "https://github.com/bitwarden/sdk-internal.git",
+      "tag": "rust-v3.0.0",
+      "commit": "7fd530e4852639d7391d062760891631ee9c15c1"
+    }
+  },
+  "forbidden_foundation_paths": [
+    "bitwarden_license"
+  ],
+  "forbidden_foundation_dependencies": [
+    "@bitwarden/commercial-sdk-internal"
+  ],
+  "required_surfaces": [
+    "web",
+    "chromium-extension",
+    "firefox-extension",
+    "server",
+    "rust-sdk"
+  ]
+}

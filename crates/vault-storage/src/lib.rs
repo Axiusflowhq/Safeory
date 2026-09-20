@@ -41,7 +41,7 @@ pub const ITEM_HISTORY_MAX_STORAGE_BYTES: u64 = 1024 * 1024 * 1024;
 pub const ROOT_WRAP_MAX_ENCODED_BYTES: usize = 16 * 1024;
 pub const RECOVERY_WRAP_MAX_ENCODED_BYTES: usize = 16 * 1024;
 
-/// Storage-agnostic vault persistence boundary (ADR 0002/0003). The portable
+/// Legacy storage-agnostic vault persistence boundary. The portable
 /// data path used by `vault-core` and the browser session is expressed against
 /// this trait; SQLite (`VaultStorage`) and the browser in-memory store
 /// (`vault-wasm`) are two implementations. Attachment file paths and SQLite

@@ -10,9 +10,10 @@ import {
 import { BrowserSyncCredentialStore } from "./sync-credentials"
 
 const DB_NAME = "safeory-device-enrollment-approvals"
-const DB_VERSION = 1
+const DB_VERSION = 2
 const WRAPPING_STORE = "wrapping"
 const DRAFT_STORE = "drafts"
+const JOIN_REQUEST_STORE = "join-requests"
 const WRAPPING_KEY_ID = "device-enrollment-approval-wrap-v1"
 const RECORD_FORMAT = 1
 const CREDENTIAL_FORMAT = 1
@@ -58,12 +59,26 @@ export interface StoredDeviceEnrollmentApprovalV1 {
   ciphertext: ArrayBuffer
 }
 
+export interface StoredDeviceEnrollmentJoinRequestV1 {
+  key: string
+  format: number
+  apiBaseUrl: string
+  accountId: string
+  requestId: string
+  joiningDeviceId: string
+  requestJson: string
+}
+
 export interface DeviceEnrollmentApprovalStorageBackend {
   getOrCreateWrappingKey(): Promise<CryptoKey>
   addDraft(record: StoredDeviceEnrollmentApprovalV1): Promise<void>
   getDraft(key: string): Promise<StoredDeviceEnrollmentApprovalV1 | null>
   listDrafts(): Promise<StoredDeviceEnrollmentApprovalV1[]>
   deleteDraft(key: string): Promise<void>
+  addJoinRequest(record: StoredDeviceEnrollmentJoinRequestV1): Promise<void>
+  getJoinRequest(key: string): Promise<StoredDeviceEnrollmentJoinRequestV1 | null>
+  listJoinRequests(): Promise<StoredDeviceEnrollmentJoinRequestV1[]>
+  deleteJoinRequest(key: string): Promise<void>
 }
 
 export interface PreparedDeviceEnrollmentApproval {
@@ -81,6 +96,13 @@ export interface DeviceEnrollmentApprovalDraft {
   grant_json: string
 }
 
+export interface DeviceEnrollmentJoinRequest {
+  account_id: string
+  request_id: string
+  joining_device_id: string
+  request_json: string
+}
+
 export interface AcceptedDeviceEnrollment {
   credentials: DeviceCredentialsV1
   client: SyncClient
@@ -94,6 +116,87 @@ export class BrowserDeviceEnrollmentCoordinator {
       new IndexedDbDeviceEnrollmentApprovalStorage(),
     private readonly cryptography: Crypto = crypto,
   ) {}
+
+  async createJoinRequest(
+    apiBaseUrlValue: string,
+    accountIdValue: string,
+    joiningDeviceIdValue: string,
+  ): Promise<DeviceEnrollmentJoinRequest> {
+    const apiBaseUrl = normalizeSyncApiBaseUrl(apiBaseUrlValue)
+    const accountId = requireUuid(accountIdValue, "account ID")
+    const joiningDeviceId = requireUuid(joiningDeviceIdValue, "joining device ID")
+    const requestJson = await this.deviceKeys.createDeviceEnrollmentRequest(
+      joiningDeviceId,
+      accountId,
+    )
+    const request = parseRequest(requestJson)
+    if (request.accountId !== accountId || request.deviceId !== joiningDeviceId) {
+      throw new SyncClientError(
+        "invalid_response",
+        "The generated enrollment request changed its local identity context.",
+      )
+    }
+    await this.storage.addJoinRequest({
+      key: joinRequestKey(apiBaseUrl, accountId, request.requestId),
+      format: RECORD_FORMAT,
+      apiBaseUrl,
+      accountId,
+      requestId: request.requestId,
+      joiningDeviceId,
+      requestJson,
+    })
+    return joinRequestResponse(request, requestJson)
+  }
+
+  async listJoinRequests(
+    apiBaseUrlValue: string,
+    accountIdValue: string,
+  ): Promise<DeviceEnrollmentJoinRequest[]> {
+    const apiBaseUrl = normalizeSyncApiBaseUrl(apiBaseUrlValue)
+    const accountId = requireUuid(accountIdValue, "account ID")
+    return (await this.storage.listJoinRequests())
+      .map(validateStoredJoinRequest)
+      .filter((record) => record.apiBaseUrl === apiBaseUrl && record.accountId === accountId)
+      .map((record) => joinRequestResponse(parseRequest(record.requestJson), record.requestJson))
+  }
+
+  async acceptStoredGrant(
+    apiBaseUrlValue: string,
+    accountIdValue: string,
+    requestIdValue: string,
+    grantJson: string,
+    options: { fetcher?: typeof fetch; signal?: AbortSignal } = {},
+  ): Promise<AcceptedDeviceEnrollment> {
+    const apiBaseUrl = normalizeSyncApiBaseUrl(apiBaseUrlValue)
+    const accountId = requireUuid(accountIdValue, "account ID")
+    const requestId = requireUuid(requestIdValue, "enrollment request ID")
+    const key = joinRequestKey(apiBaseUrl, accountId, requestId)
+    const stored = await this.storage.getJoinRequest(key)
+    if (stored === null) {
+      throw new SyncClientError("not_found", "The joining-device request was not found.")
+    }
+    const request = validateStoredJoinRequest(stored)
+    const accepted = await this.acceptGrant(
+      apiBaseUrl,
+      request.joiningDeviceId,
+      request.requestJson,
+      grantJson,
+      options,
+    )
+    await this.storage.deleteJoinRequest(key)
+    return accepted
+  }
+
+  async discardJoinRequest(
+    apiBaseUrlValue: string,
+    accountIdValue: string,
+    requestIdValue: string,
+  ): Promise<void> {
+    const apiBaseUrl = normalizeSyncApiBaseUrl(apiBaseUrlValue)
+    const accountId = requireUuid(accountIdValue, "account ID")
+    const requestId = requireUuid(requestIdValue, "enrollment request ID")
+    await this.storage.deleteJoinRequest(joinRequestKey(apiBaseUrl, accountId, requestId))
+  }
 
   async prepareApproval(
     client: SyncClient,
@@ -355,6 +458,34 @@ implements DeviceEnrollmentApprovalStorageBackend {
   deleteDraft(key: string): Promise<void> {
     return deleteDraft(key)
   }
+
+  addJoinRequest(record: StoredDeviceEnrollmentJoinRequestV1): Promise<void> {
+    return addJoinRequest(validateStoredJoinRequest(record))
+  }
+
+  getJoinRequest(key: string): Promise<StoredDeviceEnrollmentJoinRequestV1 | null> {
+    return readJoinRequest(key)
+  }
+
+  listJoinRequests(): Promise<StoredDeviceEnrollmentJoinRequestV1[]> {
+    return listJoinRequests()
+  }
+
+  deleteJoinRequest(key: string): Promise<void> {
+    return deleteJoinRequest(key)
+  }
+}
+
+function joinRequestResponse(
+  request: EnrollmentRequestContext,
+  requestJson: string,
+): DeviceEnrollmentJoinRequest {
+  return {
+    account_id: request.accountId,
+    request_id: request.requestId,
+    joining_device_id: request.deviceId,
+    request_json: requestJson,
+  }
 }
 
 function requestRegistration(request: EnrollmentRequestContext): DeviceRegistrationV1 {
@@ -552,6 +683,46 @@ function validateStoredDraft(value: unknown): StoredDeviceEnrollmentApprovalV1 {
   }
 }
 
+function validateStoredJoinRequest(value: unknown): StoredDeviceEnrollmentJoinRequestV1 {
+  if (typeof value !== "object" || value === null) return invalidStoredJoinRequest()
+  const record = value as Partial<StoredDeviceEnrollmentJoinRequestV1>
+  if (
+    record.format !== RECORD_FORMAT ||
+    typeof record.key !== "string" ||
+    typeof record.apiBaseUrl !== "string" ||
+    typeof record.requestJson !== "string"
+  ) return invalidStoredJoinRequest()
+  let apiBaseUrl: string
+  let accountId: string
+  let requestId: string
+  let joiningDeviceId: string
+  let request: EnrollmentRequestContext
+  try {
+    apiBaseUrl = normalizeSyncApiBaseUrl(record.apiBaseUrl)
+    accountId = requireUuid(record.accountId, "stored account ID")
+    requestId = requireUuid(record.requestId, "stored enrollment request ID")
+    joiningDeviceId = requireUuid(record.joiningDeviceId, "stored joining device ID")
+    request = parseRequest(record.requestJson)
+  } catch {
+    return invalidStoredJoinRequest()
+  }
+  if (
+    record.key !== joinRequestKey(apiBaseUrl, accountId, requestId) ||
+    request.accountId !== accountId ||
+    request.requestId !== requestId ||
+    request.deviceId !== joiningDeviceId
+  ) return invalidStoredJoinRequest()
+  return {
+    key: record.key,
+    format: RECORD_FORMAT,
+    apiBaseUrl,
+    accountId,
+    requestId,
+    joiningDeviceId,
+    requestJson: record.requestJson,
+  }
+}
+
 function draftAad(record: Omit<StoredDeviceEnrollmentApprovalV1, "iv" | "ciphertext">): ArrayBuffer {
   return new TextEncoder().encode([
     AAD_DOMAIN, record.apiBaseUrl, record.accountId, record.requestId,
@@ -560,6 +731,10 @@ function draftAad(record: Omit<StoredDeviceEnrollmentApprovalV1, "iv" | "ciphert
 }
 
 function draftKey(apiBaseUrl: string, accountId: string, requestId: string): string {
+  return `${apiBaseUrl}\0${accountId}\0${requestId}`
+}
+
+function joinRequestKey(apiBaseUrl: string, accountId: string, requestId: string): string {
   return `${apiBaseUrl}\0${accountId}\0${requestId}`
 }
 
@@ -623,6 +798,10 @@ function invalidStoredDraft(): never {
   throw new SyncClientError("invalid_response", "The persisted enrollment approval is invalid.")
 }
 
+function invalidStoredJoinRequest(): never {
+  throw new SyncClientError("invalid_response", "The persisted joining-device request is invalid.")
+}
+
 function validateWrappingKey(value: unknown): CryptoKey {
   if (typeof value !== "object" || value === null) return invalidStoredDraft()
   const key = value as CryptoKey
@@ -641,6 +820,9 @@ function openDb(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(WRAPPING_STORE)) db.createObjectStore(WRAPPING_STORE)
       if (!db.objectStoreNames.contains(DRAFT_STORE)) {
         db.createObjectStore(DRAFT_STORE, { keyPath: "key" })
+      }
+      if (!db.objectStoreNames.contains(JOIN_REQUEST_STORE)) {
+        db.createObjectStore(JOIN_REQUEST_STORE, { keyPath: "key" })
       }
     }
     request.onsuccess = () => resolve(request.result)
@@ -679,32 +861,55 @@ async function getOrCreateWrappingKey(): Promise<CryptoKey> {
 }
 
 async function addDraft(record: StoredDeviceEnrollmentApprovalV1): Promise<void> {
-  await draftRequest("readwrite", (store) => store.add(record))
+  await storeRequest(DRAFT_STORE, "readwrite", (store) => store.add(record))
 }
 
 async function readDraft(key: string): Promise<StoredDeviceEnrollmentApprovalV1 | null> {
-  const result = await draftRequest<unknown>("readonly", (store) => store.get(key))
+  const result = await storeRequest<unknown>(DRAFT_STORE, "readonly", (store) => store.get(key))
   return result === undefined ? null : validateStoredDraft(result)
 }
 
 async function listDrafts(): Promise<StoredDeviceEnrollmentApprovalV1[]> {
-  const result = await draftRequest<unknown[]>("readonly", (store) => store.getAll())
+  const result = await storeRequest<unknown[]>(DRAFT_STORE, "readonly", (store) => store.getAll())
   return result.map(validateStoredDraft)
 }
 
 async function deleteDraft(key: string): Promise<void> {
-  await draftRequest("readwrite", (store) => store.delete(key))
+  await storeRequest(DRAFT_STORE, "readwrite", (store) => store.delete(key))
 }
 
-function draftRequest<T>(
+async function addJoinRequest(record: StoredDeviceEnrollmentJoinRequestV1): Promise<void> {
+  await storeRequest(JOIN_REQUEST_STORE, "readwrite", (store) => store.add(record))
+}
+
+async function readJoinRequest(key: string): Promise<StoredDeviceEnrollmentJoinRequestV1 | null> {
+  const result = await storeRequest<unknown>(
+    JOIN_REQUEST_STORE, "readonly", (store) => store.get(key),
+  )
+  return result === undefined ? null : validateStoredJoinRequest(result)
+}
+
+async function listJoinRequests(): Promise<StoredDeviceEnrollmentJoinRequestV1[]> {
+  const result = await storeRequest<unknown[]>(
+    JOIN_REQUEST_STORE, "readonly", (store) => store.getAll(),
+  )
+  return result.map(validateStoredJoinRequest)
+}
+
+async function deleteJoinRequest(key: string): Promise<void> {
+  await storeRequest(JOIN_REQUEST_STORE, "readwrite", (store) => store.delete(key))
+}
+
+function storeRequest<T>(
+  storeName: string,
   mode: IDBTransactionMode,
   run: (store: IDBObjectStore) => IDBRequest<T>,
 ): Promise<T> {
   return openDb().then((db) => new Promise<T>((resolve, reject) => {
     let result: T | undefined
     let succeeded = false
-    const tx = db.transaction(DRAFT_STORE, mode)
-    const request = run(tx.objectStore(DRAFT_STORE))
+    const tx = db.transaction(storeName, mode)
+    const request = run(tx.objectStore(storeName))
     const fail = (error: unknown) => { db.close(); reject(error) }
     request.onerror = () => fail(request.error)
     request.onsuccess = () => { succeeded = true; result = request.result }
