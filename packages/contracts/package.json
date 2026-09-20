@@ -14,7 +14,8 @@
     "./sync-credentials": "./src/sync-credentials.ts",
     "./sync-queue": "./src/sync-queue.ts",
     "./sync-pull": "./src/sync-pull.ts",
-    "./sync-domain": "./src/sync-domain.ts"
+    "./sync-domain": "./src/sync-domain.ts",
+    "./sync-vault-item": "./src/sync-vault-item.ts"
   },
   "scripts": {
     "test": "node scripts/test-durability.mjs",

@@ -37,6 +37,7 @@ try {
     "src/sync-queue.ts",
     "src/sync-pull.ts",
     "src/sync-domain.ts",
+    "src/sync-vault-item.ts",
     "tests/device-keys.test.ts",
     "tests/session-durability.test.ts",
     "tests/sync-compatibility.test.ts",
@@ -46,6 +47,7 @@ try {
     "tests/sync-queue.test.ts",
     "tests/sync-pull.test.ts",
     "tests/sync-domain.test.ts",
+    "tests/sync-vault-item.test.ts",
     "--outDir",
     output,
     "--module",
@@ -73,6 +75,7 @@ try {
       join(output, "tests", "sync-queue.test.js"),
       join(output, "tests", "sync-pull.test.js"),
       join(output, "tests", "sync-domain.test.js"),
+      join(output, "tests", "sync-vault-item.test.js"),
     ])
   }
 } finally {

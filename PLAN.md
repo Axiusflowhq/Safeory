@@ -78,8 +78,11 @@ Rule: cloud integration starts only after the local platform below is stable.
    become the sole protection for remotely stored root wraps.
 3. Integrate the implemented browser compatibility/opaque transport client and
    credential-free durable push outbox/pull cursor coordinator into web/extension
-   application mutation and acceptance flows, then complete bootstrap, household
-   membership, attachment transport, offline queues, exact-revision conflicts,
+   application mutation and acceptance flows. A strict encrypted-item adapter now
+   binds local encrypted records to revision/hash-fenced opaque mutations and
+   verifies pulled record/header identity before acceptance; atomic local enqueue,
+   durable conflict state, and acceptance wiring remain. Then complete bootstrap,
+   household membership, attachment transport, offline queues, exact-revision conflicts,
    tombstones, revocation, key rotation, pagination, and web/extension
    convergence.
 4. Finish trusted-device and collaborator invitation transport. Contacts remain

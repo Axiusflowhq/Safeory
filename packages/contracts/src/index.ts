@@ -65,6 +65,16 @@ export {
   verifyOpaqueCiphertext,
 } from "./sync-client";
 export {
+  decodePulledVaultItem,
+  parseEncryptedVaultItem,
+  prepareVaultItemMutation,
+} from "./sync-vault-item";
+export type {
+  DecodedPulledVaultItem,
+  EncryptedVaultItemV1,
+  PreparedVaultItemMutation,
+} from "./sync-vault-item";
+export {
   DurableSyncOutbox,
   IndexedDbSyncOutboxStore,
 } from "./sync-queue";

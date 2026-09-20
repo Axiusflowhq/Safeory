@@ -12,7 +12,12 @@ atomically persists exact-input operation-ID outcomes with opaque headers. The
 browser contracts package validates that bounded advertisement and negotiates
 protocol, object-header, and envelope versions before sync. It also implements
 strict opaque contract parsing plus authenticated, ciphertext-verifying
-list/download/upload transport. A bounded credential-free IndexedDB push outbox
+list/download/upload transport. Encrypted vault item records now have a strict
+browser transport adapter that creates create-only or exact-revision/hash-fenced
+opaque mutations and rejects pulled bodies whose encrypted item identity,
+revision, payload version, digest, or object class differs from the authenticated
+header. Durable conflict resolution and local acceptance remain intentionally
+outside that codec. A bounded credential-free IndexedDB push outbox
 retains canonical mutation/ciphertext pairs until a matching upload response is
 durably acknowledged, so interrupted acknowledgements replay by operation ID.
 A pull coordinator verifies each downloaded body, waits for an idempotent
