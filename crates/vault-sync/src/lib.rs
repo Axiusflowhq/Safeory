@@ -13,10 +13,18 @@ use thiserror::Error;
 use uuid::Uuid;
 
 mod space_keys;
+mod sync_protocol;
 
 pub use space_keys::{
     PreparedSpaceKeyGeneration, SpaceKey, SpaceKeyEnvelopeV1, SpaceKeyError, SpaceKeyRecipient,
     open_space_key, prepare_initial_space_key, prepare_rotated_space_key,
+};
+pub use sync_protocol::{
+    COMPATIBILITY_FORMAT_VERSION, CompatibilityAdvertisementV1, CompatibilityError,
+    MAX_SYNC_CIPHERTEXT_BYTES, NegotiatedCompatibility, OBJECT_HEADER_FORMAT_VERSION,
+    OPAQUE_MUTATION_FORMAT_VERSION, ObjectClassV1, ObjectScopeV1, OpaqueMutationV1,
+    OpaqueObjectHeaderV1, ProtocolError, SYNC_PROTOCOL_VERSION, VersionRangeV1,
+    WritePreconditionV1, negotiate_compatibility,
 };
 
 pub const DOMAIN_FORMAT_VERSION: u16 = 1;
@@ -59,6 +67,7 @@ opaque_id!(MembershipId);
 opaque_id!(DeviceId);
 opaque_id!(SpaceId);
 opaque_id!(ObjectId);
+opaque_id!(OperationId);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

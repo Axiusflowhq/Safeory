@@ -29,7 +29,8 @@ Implemented now:
 - `vault-sync` versioned account/household/membership/private-and-shared-space
   contracts, including fail-closed topology validation and a local single-owner
   ciphertext-preserving migration plan, plus independently rotatable
-  device-specific space-key envelopes;
+  device-specific space-key envelopes and independently versioned opaque-sync
+  compatibility/mutation contracts;
 - pinned Rust/JS lockfiles and dependency/security CI policy.
 
 Not implemented yet: browser/API integration and server enforcement for the

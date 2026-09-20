@@ -125,7 +125,10 @@ Email or Cognito access alone cannot deliver usable vault keys.
 For every mutation, the client supplies:
 
 - `OperationId`;
-- object ID/class/scope;
+- independently versioned protocol, mutation, object-header, envelope, and
+  encrypted-payload framing;
+- object ID/class and account/household/space routing scope, which the server
+  must match against the authenticated device rather than trust independently;
 - expected current revision or create-only precondition;
 - strictly newer candidate revision;
 - ciphertext size/hash and body or approved upload handle;
@@ -230,6 +233,28 @@ The client decrypts the synced reminder and advances recurring schedules.
 - Server rollout remains backward-compatible before new clients depend on it.
 - Database schemas migrate forward; rollback uses compatible application builds,
   not destructive down-migrations.
+
+### Initial compatibility matrix
+
+`vault-sync` is the canonical wire-contract owner. The API, web app, and
+extension must consume these contracts rather than create parallel enums or
+version rules.
+
+| Layer | Current write version | Reader behavior | Server behavior |
+| --- | ---: | --- | --- |
+| Compatibility advertisement | 1 | Reject unknown required fields and invalid/reversed ranges | Select the highest common version independently for each advertised layer |
+| Sync protocol | 1 | Reject unsupported protocol versions before object processing | Refuse requests with no common protocol version |
+| Opaque mutation framing | 1 | Require a non-nil operation ID and exact revision precondition | Persist idempotency outcome; same ID with different input fails |
+| Opaque object header | 1 | Validate scope IDs, safe-integer revision, versions, and ciphertext bounds | Match supplied scope to authenticated authorization; never infer plaintext class details |
+| Space-key envelope | 1 (`space-key:v1` over share envelope v2) | Require exact authenticated routing context and generation | Route ciphertext only; atomic rotation fencing remains to be implemented |
+| Encrypted object payload | Class-specific positive version | Decrypting client rejects unsupported mandatory schema versions | Opaque to server; writes must remain readable by the minimum supported household client |
+
+The initial advertisement negotiates protocol, object-header, and outer
+key-envelope versions as separate ranges. Payload versions stay on each opaque
+object header because item, attachment, activity, and capsule schemas evolve
+independently. Adding a new object class, required field, or incompatible
+transition requires a new version and mixed-client negative tests; an enum value
+unknown to an older client fails before mutation.
 
 ## Required negative tests
 

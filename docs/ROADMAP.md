@@ -165,8 +165,10 @@ gates are green, including the generated-WASM Node smoke test.**
   context and reject transplant, rollback, duplicate-recipient, and overflow
   cases. Server publication/rotation fencing and browser persistence remain.
   Random per-item and attachment keys remain unchanged.
-- Write the sync protocol specification and compatibility matrix before adding
-  a second implementation.
+- ✅ DONE (contract): the sync protocol specification and initial compatibility
+  matrix define independent protocol/mutation/header/envelope/payload versions.
+  `vault-sync` implements negotiation plus bounded opaque object and mutation
+  contracts; API and browser adoption remains.
 - Decide the high-entropy Account Secret/device-enrollment construction in an
   ADR, implement recovery/new-device enrollment, and test server-dump offline
   attack resistance. Cognito authentication alone is insufficient.
@@ -211,9 +213,10 @@ surface:
 - Keep `docker-compose.yml` as the local integration environment using
   PostgreSQL/Valkey/Garage/Mailpit; it is not the production hosting plan.
 - `vault-sync`: the versioned household/space domain and ciphertext-preserving
-  local migration contracts are implemented. Next add device keypairs (X25519),
-  space/item key envelopes, and a versioned opaque sync protocol. Exact
-  revision preconditions reject stale overwrites; conflict handling preserves
+  local migration, rotatable space-key envelope, compatibility negotiation, and
+  opaque mutation contracts are implemented. Next integrate those contracts
+  with the API and clients. Exact revision preconditions reject stale overwrites;
+  conflict handling preserves
   both candidates or requires explicit
   user resolution rather than silently applying last-writer-wins. Tombstones
   and history remain bounded.
