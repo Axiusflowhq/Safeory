@@ -74,6 +74,12 @@ class FakeVault implements WasmVaultLike {
     this.unlocked = true;
   }
 
+  verifyMasterPassphrase(passphrase: string): void {
+    if (this.expectedPassphrase !== null && passphrase !== this.expectedPassphrase) {
+      throw new Error("wrong passphrase");
+    }
+  }
+
   exportRemoteAccountRootWrapJson(
     passphrase: string,
     accountSecretCode: string,
@@ -885,6 +891,23 @@ test("deadline reads are parsed without persistence or mutation", () => {
   ]);
   assert.equal(liveVault.snapshotCount, 0);
   assert.equal(liveVault.putCount, 0);
+});
+
+test("master passphrase verification is read-only", () => {
+  const liveVault = new FakeVault(
+    true,
+    false,
+    undefined,
+    null,
+    true,
+    "correct horse battery",
+  );
+  const session = newSession(() => new FakeVault(false, false), liveVault);
+
+  session.verifyMasterPassphrase("correct horse battery");
+  assert.throws(() => session.verifyMasterPassphrase("wrong passphrase!!"), /wrong passphrase/);
+  assert.equal(liveVault.snapshotCount, 0);
+  assert.equal(session.isUnlocked(), true);
 });
 
 test("encrypted sync acceptance compare-and-swaps through the session durability fence", async () => {

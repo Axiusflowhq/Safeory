@@ -22,6 +22,7 @@ import {
   enrollBrowserVaultSync,
   loadBrowserSyncConfiguration,
   resumeBrowserVaultSync,
+  type BrowserSyncEnrollment,
 } from "./sync"
 import { startBrowserSyncSchedule } from "./sync-scheduler"
 import {
@@ -406,7 +407,7 @@ export function useVault() {
   }, [stopSync])
 
   const enrollSync = useCallback(
-    async (registrationToken: string): Promise<boolean> => {
+    async (enrollment: BrowserSyncEnrollment): Promise<boolean> => {
       const session = sessionRef.current
       if (!session || !session.isUnlocked()) return false
       const generation = syncGenerationRef.current + 1
@@ -418,7 +419,7 @@ export function useVault() {
         error: null,
       }))
       try {
-        const connected = await enrollBrowserVaultSync(session, registrationToken)
+        const connected = await enrollBrowserVaultSync(session, enrollment)
         if (generation !== syncGenerationRef.current || sessionRef.current !== session) {
           return false
         }
@@ -441,7 +442,7 @@ export function useVault() {
           })()
           setSyncStatus((current) => ({
             ...current,
-            phase: "error",
+            phase: configuration === null ? "not_configured" : "error",
             accountId: configuration?.accountId ?? null,
             error: errorMessage(syncError),
           }))
@@ -450,6 +451,11 @@ export function useVault() {
       }
     },
     [performSync]
+  )
+
+  const generateAccountSecret = useCallback(
+    () => wasmStatics.generateAccountSecret(),
+    []
   )
 
   const retrySync = useCallback(async (): Promise<boolean> => {
@@ -852,6 +858,7 @@ export function useVault() {
     answerBrowserPairingChallenge,
     installRecoveryKit,
     clearGeneratedSecret,
+    generateAccountSecret,
     enrollSync,
     retrySync,
     resetInvalidSyncConfiguration,

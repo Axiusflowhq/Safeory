@@ -4,6 +4,7 @@ import { useState } from "react"
 import {
   CloudOffIcon,
   CloudSyncIcon,
+  Copy01Icon,
   Refresh01Icon,
 } from "@hugeicons/core-free-icons"
 import { HugeiconsIcon } from "@hugeicons/react"
@@ -13,10 +14,12 @@ import { Button } from "@/components/ui/button"
 import { Field, FieldDescription, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
 import type { VaultSyncStatus } from "@/lib/vault/use-vault"
+import type { BrowserSyncEnrollment } from "@/lib/vault/sync"
 
 interface SyncPanelProps {
   status: VaultSyncStatus
-  onEnroll: (registrationToken: string) => Promise<boolean>
+  onGenerateAccountSecret: () => string
+  onEnroll: (enrollment: BrowserSyncEnrollment) => Promise<boolean>
   onRetry: () => Promise<boolean>
   onResetInvalidConfiguration: () => boolean
   onSyncNow: () => Promise<boolean>
@@ -39,16 +42,30 @@ function statusLabel(status: VaultSyncStatus): string {
 
 export function SyncPanel({
   status,
+  onGenerateAccountSecret,
   onEnroll,
   onRetry,
   onResetInvalidConfiguration,
   onSyncNow,
 }: SyncPanelProps) {
   const [registrationToken, setRegistrationToken] = useState("")
+  const [masterPassphrase, setMasterPassphrase] = useState("")
+  const [accountSecret, setAccountSecret] = useState("")
+  const [accountSecretConfirmation, setAccountSecretConfirmation] = useState("")
+  const [recoveryCopyConfirmed, setRecoveryCopyConfirmed] = useState(false)
+  const [secretCopied, setSecretCopied] = useState(false)
   const [busy, setBusy] = useState(false)
   const [localError, setLocalError] = useState<string | null>(null)
   const connected = status.accountId !== null
   const working = status.phase === "connecting" || status.phase === "syncing" || busy
+  const accountSecretConfirmed =
+    accountSecret.length > 0 && accountSecretConfirmation === accountSecret
+  const enrollmentReady =
+    registrationToken.length >= 32 &&
+    !/\s/.test(registrationToken) &&
+    masterPassphrase.length >= 12 &&
+    accountSecretConfirmed &&
+    recoveryCopyConfirmed
 
   async function run(operation: () => Promise<boolean>): Promise<void> {
     setBusy(true)
@@ -59,6 +76,29 @@ export function SyncPanel({
       setLocalError(error instanceof Error ? error.message : String(error))
     } finally {
       setBusy(false)
+    }
+  }
+
+  function generateAccountSecret(): void {
+    try {
+      setAccountSecret(onGenerateAccountSecret())
+      setAccountSecretConfirmation("")
+      setRecoveryCopyConfirmed(false)
+      setSecretCopied(false)
+      setLocalError(null)
+    } catch (error) {
+      setLocalError(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  async function copyAccountSecret(): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(accountSecret)
+      setSecretCopied(true)
+      setLocalError(null)
+    } catch {
+      setSecretCopied(false)
+      setLocalError("Clipboard access was unavailable. Select and copy the Account Secret manually.")
     }
   }
 
@@ -83,7 +123,8 @@ export function SyncPanel({
             <p className="mt-1 max-w-[65ch] text-sm leading-6 text-pretty text-[var(--text-secondary)]">
               Sync sends opaque ciphertext through this deployment&apos;s same-origin API.
               Your device bearer is wrapped locally in IndexedDB; vault plaintext,
-              passphrases, and recovery secrets never enter browser storage or the API.
+              passphrases, Account Secrets, and recovery secrets never enter browser
+              storage or the API.
             </p>
           </div>
         </div>
@@ -123,14 +164,137 @@ export function SyncPanel({
               Used once to create this account and browser device. It is never persisted.
             </FieldDescription>
           </Field>
+          <Field>
+            <FieldLabel htmlFor="safeory-sync-master-passphrase">
+              Master passphrase
+            </FieldLabel>
+            <Input
+              id="safeory-sync-master-passphrase"
+              type="password"
+              value={masterPassphrase}
+              onChange={(event) => {
+                setMasterPassphrase(event.target.value)
+                setLocalError(null)
+              }}
+              autoComplete="current-password"
+              placeholder="Re-enter your master passphrase"
+            />
+            <FieldDescription>
+              Re-authenticates the local root before any hosted account is created. It is
+              never sent to the API or persisted.
+            </FieldDescription>
+          </Field>
+          {accountSecret === "" ? (
+            <div className="rounded-[var(--radius-default)] border bg-[var(--surface-secondary)] p-4">
+              <p className="text-sm font-medium">Create your Account Secret</p>
+              <p className="mt-1 text-sm leading-6 text-[var(--text-secondary)]">
+                This high-entropy code protects the remotely stored root envelope. Safeory
+                cannot recover it. Save it separately from your master passphrase.
+              </p>
+              <Button
+                type="button"
+                variant="outline"
+                className="mt-3"
+                disabled={working}
+                onClick={generateAccountSecret}
+              >
+                Generate Account Secret
+              </Button>
+            </div>
+          ) : (
+            <div className="space-y-4 rounded-[var(--radius-default)] border bg-[var(--surface-secondary)] p-4">
+              <Field>
+                <FieldLabel htmlFor="safeory-account-secret">Account Secret</FieldLabel>
+                <div className="flex flex-col gap-2 sm:flex-row">
+                  <Input
+                    id="safeory-account-secret"
+                    readOnly
+                    value={accountSecret}
+                    className="font-mono text-xs"
+                    aria-describedby="safeory-account-secret-description"
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={working}
+                    onClick={() => void copyAccountSecret()}
+                  >
+                    <HugeiconsIcon icon={Copy01Icon} strokeWidth={2} data-icon="inline-start" />
+                    {secretCopied ? "Copied" : "Copy"}
+                  </Button>
+                </div>
+                <FieldDescription id="safeory-account-secret-description">
+                  Store this code now. It is shown only for this enrollment attempt and is
+                  never written to browser storage.
+                </FieldDescription>
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="safeory-account-secret-confirmation">
+                  Confirm Account Secret
+                </FieldLabel>
+                <Input
+                  id="safeory-account-secret-confirmation"
+                  type="password"
+                  value={accountSecretConfirmation}
+                  onChange={(event) => {
+                    setAccountSecretConfirmation(event.target.value.trim())
+                    setLocalError(null)
+                  }}
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder="Paste the saved Account Secret"
+                />
+                <FieldDescription>
+                  Paste the saved code to catch an incomplete or incorrect recovery copy.
+                </FieldDescription>
+              </Field>
+              <label className="flex items-start gap-3 text-sm leading-5">
+                <input
+                  type="checkbox"
+                  className="mt-0.5 size-4 accent-[var(--primary)]"
+                  checked={recoveryCopyConfirmed}
+                  onChange={(event) => setRecoveryCopyConfirmed(event.target.checked)}
+                />
+                <span>
+                  I saved the Account Secret separately. I understand that losing every
+                  authorized device, recovery kit, and this code can make the vault
+                  unrecoverable.
+                </span>
+              </label>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                disabled={working}
+                onClick={generateAccountSecret}
+              >
+                Replace with a new Account Secret
+              </Button>
+            </div>
+          )}
           <Button
             type="button"
             variant="secondary"
-            disabled={working || registrationToken.length < 32 || /\s/.test(registrationToken)}
+            disabled={working || !enrollmentReady}
             onClick={() => {
-              const token = registrationToken
-              setRegistrationToken("")
-              void run(() => onEnroll(token))
+              const enrollment = {
+                registrationToken,
+                masterPassphrase,
+                accountSecretCode: accountSecret,
+              }
+              void run(async () => {
+                try {
+                  const succeeded = await onEnroll(enrollment)
+                  if (succeeded) setRegistrationToken("")
+                  return succeeded
+                } finally {
+                  setMasterPassphrase("")
+                  setAccountSecret("")
+                  setAccountSecretConfirmation("")
+                  setRecoveryCopyConfirmed(false)
+                  setSecretCopied(false)
+                }
+              })
             }}
           >
             Enable encrypted sync

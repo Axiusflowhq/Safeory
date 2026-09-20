@@ -668,6 +668,7 @@ function VaultWorkspace({ vault }: { vault: Vault }) {
             <div className="mt-5">
               <SyncPanel
                 status={vault.syncStatus}
+                onGenerateAccountSecret={vault.generateAccountSecret}
                 onEnroll={vault.enrollSync}
                 onRetry={vault.retrySync}
                 onResetInvalidConfiguration={vault.resetInvalidSyncConfiguration}

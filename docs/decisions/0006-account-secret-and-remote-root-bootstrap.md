@@ -115,7 +115,8 @@ Secret.
   `account_bootstrap` singleton whose object UUID equals its account UUID. The
   API exposes authenticated direct metadata discovery and applies its existing
   hash-and-revision CAS before storing a replacement body.
-- Application setup/publication wiring and a pending-device approval state
-  machine are still required before production enrollment ships.
-- The printable-kit UX, confirmation flow, secure existing-device transfer,
-  server recovery workflow, and external cryptographic review remain required.
+- Web development enrollment implements first-device generation, confirmation,
+  re-authentication, and durable publication; production identity integration
+  and a pending-device approval state machine are still required before launch.
+- A reviewed printable-kit experience, secure existing-device transfer, server
+  recovery workflow, and external cryptographic review remain required.

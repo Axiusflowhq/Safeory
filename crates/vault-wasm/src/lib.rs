@@ -250,6 +250,11 @@ impl BrowserVault {
         Ok(())
     }
 
+    /// Re-authenticate the persisted vault without changing the active session.
+    pub fn verify_master_passphrase(&self, passphrase: &str) -> Result<(), WasmVaultError> {
+        self.reauthenticated_root(passphrase).map(drop)
+    }
+
     /// Re-authenticate the local vault and produce the Account-Secret-protected
     /// root envelope used only by remote account bootstrap.
     pub fn export_remote_account_root_wrap(
@@ -258,12 +263,7 @@ impl BrowserVault {
         account_secret: &AccountSecret,
         account_id: Uuid,
     ) -> Result<RemoteAccountRootWrapV1, WasmVaultError> {
-        self.root_key()?;
-        let local_wrap = self.store.load_root_wrap()?;
-        let reauthenticated_root = unwrap_root_key(passphrase, &local_wrap)?;
-        for id in self.store.list_item_ids()? {
-            decrypt_item_state(&reauthenticated_root, &self.store.load_item(id)?)?;
-        }
+        let reauthenticated_root = self.reauthenticated_root(passphrase)?;
         Ok(wrap_root_key_for_remote_account(
             passphrase,
             account_secret,
@@ -442,6 +442,16 @@ impl BrowserVault {
 
     fn root_key(&self) -> Result<&AccountRootKey, WasmVaultError> {
         self.root_key.as_ref().ok_or(WasmVaultError::Locked)
+    }
+
+    fn reauthenticated_root(&self, passphrase: &str) -> Result<AccountRootKey, WasmVaultError> {
+        self.root_key()?;
+        let local_wrap = self.store.load_root_wrap()?;
+        let reauthenticated_root = unwrap_root_key(passphrase, &local_wrap)?;
+        for id in self.store.list_item_ids()? {
+            decrypt_item_state(&reauthenticated_root, &self.store.load_item(id)?)?;
+        }
+        Ok(reauthenticated_root)
     }
 
     /// Insert a new item at revision 0.
@@ -1281,6 +1291,10 @@ impl BrowserVault {
         Ok(AccountSecret::generate()?.to_code())
     }
 
+    pub fn validate_account_secret(code: &str) -> bool {
+        AccountSecret::from_code(code).is_ok()
+    }
+
     /// Export the current ciphertext store as a snapshot for persistence.
     pub fn to_snapshot(&self) -> KVSnapshot {
         self.store.to_snapshot()
@@ -1553,6 +1567,29 @@ mod tests {
         let mut restored = BrowserVault::from_snapshot(snapshot).expect("from_snapshot");
         assert!(restored.unlock("wrong passphrase!!").is_err());
         assert!(!restored.is_unlocked());
+    }
+
+    #[test]
+    fn master_passphrase_verification_is_read_only_and_checks_persisted_ciphertext() {
+        let mut vault = BrowserVault::new_empty();
+        vault.create("correct horse battery").expect("create");
+        let item = sample_item("Verify me");
+        vault.put_item(&item).expect("put");
+        let snapshot = serde_json::to_string(&vault.to_snapshot()).expect("snapshot");
+
+        vault
+            .verify_master_passphrase("correct horse battery")
+            .expect("verify passphrase");
+        assert!(
+            vault
+                .verify_master_passphrase("wrong passphrase!!")
+                .is_err()
+        );
+        assert!(vault.is_unlocked());
+        assert_eq!(
+            serde_json::to_string(&vault.to_snapshot()).expect("snapshot after verify"),
+            snapshot
+        );
     }
 
     #[test]

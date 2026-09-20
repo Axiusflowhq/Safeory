@@ -198,7 +198,9 @@ gates are green, including the generated-WASM Node smoke test.**
   root envelope; the Rust/WASM core implements fresh-device root bootstrap and
   negative context/factor tests. The shared sync contract now carries the
   bounded account-bootstrap singleton through revision-fenced publication and
-  authenticated direct metadata discovery. Complete setup/publication wiring,
+  authenticated direct metadata discovery. Web development enrollment now
+  re-authenticates the local root, confirms the generated Account Secret, and
+  durably publishes that singleton before topology. Complete production identity,
   recovery/new-device approval, signed existing-device
   transfer, external review, and server-dump resistance validation. Cognito
   authentication alone remains insufficient.

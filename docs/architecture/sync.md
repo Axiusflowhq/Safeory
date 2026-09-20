@@ -45,18 +45,21 @@ durably acknowledged, so interrupted acknowledgements replay by operation ID.
 A web settings control now enrolls through the deployment's same-origin
 `/api/` proxy. The development registration bearer remains ephemeral, device
 credentials stay wrapped under a non-extractable IndexedDB key, and only API,
-account, and device routing identifiers enter local storage. Once unlocked, the
-web runtime resumes that credential and runs serialized sync after durable local
-mutations, browser reconnect/foreground events, manual requests, and a 30-second
-bounded interval. The MV3 extension now performs equivalent explicit development
+account, and device routing identifiers enter local storage. It re-authenticates
+the unlocked vault, generates and confirms the Account Secret, then durably
+queues and flushes the account-bound remote-root envelope before topology
+publication. Once unlocked, the web runtime resumes that credential and runs
+serialized sync after durable local mutations, browser reconnect/foreground
+events, manual requests, and a 30-second bounded interval. The MV3 extension now
+performs equivalent explicit development
 enrollment, stores only non-secret routing metadata in extension storage, resumes
 its wrapped credential after unlock, and coalesces mutation, manual, unlock, and
 one-minute alarm triggers. Its remote accepts share the local mutation durability
 queue, and locking aborts active network work. MV3 worker reclamation deliberately
 requires another unlock because usable vault keys are not persisted. Reviewed
-production account-secret/new-device enrollment remains to be integrated, so the
-development web and extension controls create independent accounts rather than
-claiming same-account convergence.
+production identity, new-device approval, and recovery enrollment remain to be
+integrated, so the development web and extension controls create independent
+accounts rather than claiming same-account convergence.
 A pull coordinator verifies each downloaded body, waits for an idempotent
 durable-acceptance callback, and only then compare-and-swap checkpoints that
 change sequence. The API now persists revision-fenced household topology,
@@ -167,8 +170,9 @@ root import. The opaque transport reserves one non-tombstonable, 4 KiB
 its account scope and V1 payload/envelope versions are validated in both Rust
 and TypeScript, and updates use the ordinary hash-and-revision CAS. An
 authenticated device can fetch its canonical metadata directly before the
-ciphertext body, avoiding a scan of unrelated items. Setup/publication UX and
-the server enrollment/recovery coordinator remain.
+ciphertext body, avoiding a scan of unrelated items. The web development setup
+now implements the first-device confirmation and publication path. Production
+identity plus the server enrollment/recovery coordinator remain.
 
 ### Additional device
 

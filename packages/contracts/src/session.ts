@@ -239,6 +239,7 @@ export interface WasmVaultLike {
   isUnlocked(): boolean;
   create(passphrase: string): void;
   unlock(passphrase: string): void;
+  verifyMasterPassphrase(passphrase: string): void;
   exportRemoteAccountRootWrapJson(
     passphrase: string,
     accountSecretCode: string,
@@ -320,6 +321,7 @@ export interface WasmVaultLike {
 /** Static (constructor-level) bindings on the WASM module. */
 export interface WasmStatics {
   generateAccountSecret(): string;
+  validateAccountSecret(code: string): boolean;
   generateRecoverySecret(): string;
   generatePassword(length: number): string;
 }
@@ -522,6 +524,13 @@ export class VaultSession {
   unlock(passphrase: string): void {
     this.assertHealthy();
     this.vault.unlock(passphrase);
+  }
+
+  /** Re-authenticate the persisted root without mutating or persisting state. */
+  verifyMasterPassphrase(passphrase: string): void {
+    this.assertHealthy();
+    this.assertUnlocked();
+    this.vault.verifyMasterPassphrase(passphrase);
   }
 
   /** Produce the opaque two-factor root envelope for server account bootstrap. */

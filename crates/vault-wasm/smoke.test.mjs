@@ -255,6 +255,23 @@ const accountSecret = WasmVault.generateAccountSecret();
 if (!/^SFO-A1-[0-9A-F]{64}-[0-9A-F]{8}$/.test(accountSecret)) {
   throw new Error("account secret code format mismatch");
 }
+if (!WasmVault.validateAccountSecret(accountSecret)) {
+  throw new Error("generated account secret must validate");
+}
+const mistypedAccountSecret = `${accountSecret.slice(0, -1)}${accountSecret.endsWith("0") ? "1" : "0"}`;
+if (WasmVault.validateAccountSecret(mistypedAccountSecret)) {
+  throw new Error("mistyped account secret must fail validation");
+}
+restored.verifyMasterPassphrase(pass);
+let wrongMasterPassphraseFailed = false;
+try {
+  restored.verifyMasterPassphrase("wrong passphrase!!");
+} catch {
+  wrongMasterPassphraseFailed = true;
+}
+if (!wrongMasterPassphraseFailed || !restored.isUnlocked()) {
+  throw new Error("master passphrase verification must fail read-only");
+}
 const remoteRootWrap = restored.exportRemoteAccountRootWrapJson(
   pass,
   accountSecret,

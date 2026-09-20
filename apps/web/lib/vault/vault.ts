@@ -28,6 +28,7 @@ export function wasmVaultFactory(snapshotJson: string | null): WasmVaultLike {
 
 export const wasmStatics: WasmStatics = {
   generateAccountSecret: () => WasmVault.generateAccountSecret(),
+  validateAccountSecret: (code: string) => WasmVault.validateAccountSecret(code),
   generateRecoverySecret: () => WasmVault.generateRecoverySecret(),
   generatePassword: (length: number) => WasmVault.generatePassword(length),
 }

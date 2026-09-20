@@ -179,6 +179,13 @@ impl WasmVault {
         self.inner.unlock(passphrase).map_err(js_err)
     }
 
+    #[wasm_bindgen(js_name = verifyMasterPassphrase)]
+    pub fn verify_master_passphrase(&self, passphrase: &str) -> Result<(), JsValue> {
+        self.inner
+            .verify_master_passphrase(passphrase)
+            .map_err(js_err)
+    }
+
     #[wasm_bindgen(js_name = exportRemoteAccountRootWrapJson)]
     pub fn export_remote_account_root_wrap_json(
         &self,
@@ -706,6 +713,11 @@ impl WasmVault {
     #[wasm_bindgen(js_name = generateAccountSecret)]
     pub fn generate_account_secret() -> Result<String, JsValue> {
         BrowserVault::generate_account_secret().map_err(js_err)
+    }
+
+    #[wasm_bindgen(js_name = validateAccountSecret)]
+    pub fn validate_account_secret(code: &str) -> bool {
+        BrowserVault::validate_account_secret(code)
     }
 
     /// Generate a strong password (12..=128 chars, all character classes).
