@@ -194,9 +194,12 @@ gates are green, including the generated-WASM Node smoke test.**
   mutation/header metadata with atomic operation-ID idempotency. Binding this
   transport and its durable coordinators to web and extension application flows,
   plus cross-account shared-object routing, remains.
-- Decide the high-entropy Account Secret/device-enrollment construction in an
-  ADR, implement recovery/new-device enrollment, and test server-dump offline
-  attack resistance. Cognito authentication alone is insufficient.
+- ADR 0006 now defines the high-entropy Account Secret and account-bound remote
+  root envelope; the Rust/WASM core implements fresh-device root bootstrap and
+  negative context/factor tests. Complete revision-fenced server publication,
+  setup confirmation, recovery/new-device approval, signed existing-device
+  transfer, external review, and server-dump resistance validation. Cognito
+  authentication alone remains insufficient.
 - Add minimal security-event and encrypted activity-event formats.
 
 ### Phase 3 — Credential core and all-in-one extension
@@ -353,6 +356,6 @@ Additional completion requirements from the combined-product architecture:
 | 7 | AWS production packaging | RESOLVED architecture in `docs/architecture/aws.md`; implement reviewable IaC under `infra/aws/`, OIDC CI/CD, migrations, health checks, observability, and tested backup/restore before Phase 4 is production-ready |
 | 8 | Product parity boundary | RESOLVED — target 1Password Individual/Families + Trustworthy household/continuity; exclude 1Password Business/Enterprise/Developer |
 | 9 | Household key boundary | RESOLVED — ADR 0005 defines device-specific space-key envelopes and monotonic rotation; server/client integration remains |
-| 10 | Cloud offline-attack factor | Add a high-entropy Account Secret or equivalent device-enrollment factor; exact construction and migration require review |
+| 10 | Cloud offline-attack factor | RESOLVED design — ADR 0006 defines the Account Secret and remote-root construction; core implementation landed, while production enrollment and external review remain |
 | 11 | Document automation | Local/private processing by default; any remote OCR/AI is explicit opt-in with a separate disclosure/threat ADR |
 | 12 | Reminder scheduling | Offer private-local and opt-in minimal-metadata cloud scheduling; never put reminder content in email/push metadata |

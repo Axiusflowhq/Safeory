@@ -42,20 +42,22 @@ random 256-bit per-item key
 
 The AccountRootKey is generated randomly and is never a passphrase hash.
 
-### Production cloud unlock and space hierarchy (target)
+### Production cloud unlock and space hierarchy
 
-The hierarchy above is the implemented local format. Before production cloud
-sync makes remotely stored root-wrap material a normal dependency, Safeory must
-add a reviewed high-entropy Account Secret or equivalent device-enrollment
-factor. Its purpose is to keep a stolen server database plus a guessed account
-password insufficient for offline root-key recovery. Cognito authentication,
-email verification, MFA, or a bearer session does not provide this cryptographic
-property.
+The hierarchy above remains the device-local format. ADR 0006 defines the
+separate server-storable root envelope now implemented in `vault-crypto` and
+`vault-wasm`: Argon2id derives a passphrase key, HKDF-SHA-256 combines it with a
+client-only random 256-bit Account Secret and account UUID, and
+XChaCha20-Poly1305 wraps the random AccountRootKey. Its authenticated context
+binds the version, account UUID, Argon2id parameters, and salt. The Account
+Secret has a checksummed `SFO-A1` printable code and is never an authentication
+bearer or server input.
 
-The construction, wire format, device transfer, loss/recovery behavior, and
-passphrase-only-v1 migration require a dedicated ADR and external review. Until
-that ADR lands, documentation must not claim two-secret protection equivalent to
-products that combine a password with a high-entropy account secret.
+This prevents a copied remote envelope from becoming a password-only offline
+verifier. Cognito authentication, email verification, MFA, or a bearer session
+does not provide this cryptographic property. Revision-fenced publication,
+confirmed enrollment/recovery UX, signed existing-device transfer, server-dump
+validation, and external review remain required before production claims.
 
 The combined product also requires independently rotatable space keys:
 

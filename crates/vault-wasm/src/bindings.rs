@@ -6,7 +6,8 @@ use vault_storage::ITEM_MAX_ENCRYPTED_RECORD_BYTES;
 use wasm_bindgen::prelude::*;
 
 use vault_crypto::{
-    EncryptedAttachmentV1, RecoverySecret, SessionResumeSecret, SessionResumeWrapV1,
+    AccountSecret, EncryptedAttachmentV1, RecoverySecret, RemoteAccountRootWrapV1,
+    SessionResumeSecret, SessionResumeWrapV1,
 };
 use vault_sharing::{
     DeviceKeyPair, DeviceSigningKeyPair, PairingChallengeV1, PairingProofV1,
@@ -17,6 +18,7 @@ use crate::{BrowserVault, DeadlineEntry, WasmVaultError, generate_strong_passwor
 
 const SESSION_RESUME_PAYLOAD_VERSION: u16 = 2;
 const READABLE_EXPORT_FORMAT_VERSION: u16 = 1;
+const REMOTE_ROOT_WRAP_MAX_JSON_BYTES: usize = 4 * 1024;
 
 fn js_err(e: WasmVaultError) -> JsValue {
     JsValue::from_str(&e.to_string())
@@ -175,6 +177,49 @@ impl WasmVault {
 
     pub fn unlock(&mut self, passphrase: &str) -> Result<(), JsValue> {
         self.inner.unlock(passphrase).map_err(js_err)
+    }
+
+    #[wasm_bindgen(js_name = exportRemoteAccountRootWrapJson)]
+    pub fn export_remote_account_root_wrap_json(
+        &self,
+        passphrase: &str,
+        account_secret_code: &str,
+        account_id: &str,
+    ) -> Result<String, JsValue> {
+        let secret = AccountSecret::from_code(account_secret_code)
+            .map_err(|error| js_err(WasmVaultError::Crypto(error)))?;
+        let wrapped = self
+            .inner
+            .export_remote_account_root_wrap(passphrase, &secret, parse_uuid(account_id)?)
+            .map_err(js_err)?;
+        serde_json::to_string(&wrapped).map_err(|_| ser_err())
+    }
+
+    #[wasm_bindgen(js_name = initializeFromRemoteAccountRootWrapJson)]
+    pub fn initialize_from_remote_account_root_wrap_json(
+        &mut self,
+        passphrase: &str,
+        account_secret_code: &str,
+        account_id: &str,
+        wrapped_json: &str,
+    ) -> Result<(), JsValue> {
+        if wrapped_json.len() > REMOTE_ROOT_WRAP_MAX_JSON_BYTES {
+            return Err(JsValue::from_str(
+                "remote account root wrap exceeds the supported size",
+            ));
+        }
+        let secret = AccountSecret::from_code(account_secret_code)
+            .map_err(|error| js_err(WasmVaultError::Crypto(error)))?;
+        let wrapped: RemoteAccountRootWrapV1 =
+            serde_json::from_str(wrapped_json).map_err(|_| ser_err())?;
+        self.inner
+            .initialize_from_remote_account_root_wrap(
+                passphrase,
+                &secret,
+                parse_uuid(account_id)?,
+                &wrapped,
+            )
+            .map_err(js_err)
     }
 
     #[wasm_bindgen(js_name = changePassphrase)]
@@ -655,6 +700,12 @@ impl WasmVault {
     #[wasm_bindgen(js_name = generateRecoverySecret)]
     pub fn generate_recovery_secret() -> Result<String, JsValue> {
         BrowserVault::generate_recovery_secret().map_err(js_err)
+    }
+
+    /// Generate a fresh checksummed Account Secret for cloud bootstrap.
+    #[wasm_bindgen(js_name = generateAccountSecret)]
+    pub fn generate_account_secret() -> Result<String, JsValue> {
+        BrowserVault::generate_account_secret().map_err(js_err)
     }
 
     /// Generate a strong password (12..=128 chars, all character classes).

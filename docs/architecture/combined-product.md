@@ -154,11 +154,12 @@ Master passphrase + production Account Secret/device enrollment secret
        `-- emergency/legacy capsule keys
 ```
 
-The implemented passphrase-only root wrap remains the current local format.
-Before cloud launch, an ADR and migration must define a high-entropy Account
-Secret or equivalent device-enrollment factor that protects remotely stored
-wrap material from password-only offline guessing. Cognito authentication is
-not a replacement for this cryptographic factor.
+The implemented passphrase-only root wrap remains the device-local format.
+ADR 0006 defines and the Rust/WASM core implements the separate high-entropy
+Account Secret envelope for remotely stored root bootstrap, protecting it from
+password-only offline guessing. Server publication, enrollment/recovery UX, and
+external review remain cloud-launch gates. Cognito authentication is not a
+replacement for this cryptographic factor.
 
 Spaces require independently rotatable keys. Removing a member rotates the
 affected space key for future writes and prevents future key delivery; it

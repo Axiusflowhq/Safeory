@@ -21,12 +21,13 @@ use thiserror::Error;
 use uuid::Uuid;
 use vault_crypto::{
     ATTACHMENT_CHUNK_SIZE, ATTACHMENT_MAX_FILENAME_CHARS, ATTACHMENT_MAX_PLAINTEXT_BYTES,
-    AccountRootKey, AttachmentCipherContext, AttachmentManifestV1, CryptoError,
-    EncryptedAttachmentV1, EncryptedItemV1, RecoverySecret, SessionResumeSecret,
-    SessionResumeWrapV1, decrypt_item, decrypt_item_state, encrypt_item, encrypt_item_state,
-    open_attachment_manifest, recovery_secret_matches_root_key, seal_attachment_manifest,
-    unwrap_root_key, unwrap_root_key_with_recovery_secret,
-    unwrap_root_key_with_session_resume_secret, wrap_root_key, wrap_root_key_with_recovery_secret,
+    AccountRootKey, AccountSecret, AttachmentCipherContext, AttachmentManifestV1, CryptoError,
+    EncryptedAttachmentV1, EncryptedItemV1, RecoverySecret, RemoteAccountRootWrapV1,
+    SessionResumeSecret, SessionResumeWrapV1, decrypt_item, decrypt_item_state, encrypt_item,
+    encrypt_item_state, open_attachment_manifest, recovery_secret_matches_root_key,
+    seal_attachment_manifest, unwrap_root_key, unwrap_root_key_for_remote_account,
+    unwrap_root_key_with_recovery_secret, unwrap_root_key_with_session_resume_secret,
+    wrap_root_key, wrap_root_key_for_remote_account, wrap_root_key_with_recovery_secret,
     wrap_root_key_with_session_resume_secret,
 };
 use vault_models::{
@@ -245,6 +246,48 @@ impl BrowserVault {
     pub fn unlock(&mut self, passphrase: &str) -> Result<(), WasmVaultError> {
         let wrapped = self.store.load_root_wrap()?;
         let root_key = unwrap_root_key(passphrase, &wrapped)?;
+        self.root_key = Some(root_key);
+        Ok(())
+    }
+
+    /// Re-authenticate the local vault and produce the Account-Secret-protected
+    /// root envelope used only by remote account bootstrap.
+    pub fn export_remote_account_root_wrap(
+        &self,
+        passphrase: &str,
+        account_secret: &AccountSecret,
+        account_id: Uuid,
+    ) -> Result<RemoteAccountRootWrapV1, WasmVaultError> {
+        self.root_key()?;
+        let local_wrap = self.store.load_root_wrap()?;
+        let reauthenticated_root = unwrap_root_key(passphrase, &local_wrap)?;
+        for id in self.store.list_item_ids()? {
+            decrypt_item_state(&reauthenticated_root, &self.store.load_item(id)?)?;
+        }
+        Ok(wrap_root_key_for_remote_account(
+            passphrase,
+            account_secret,
+            account_id,
+            &reauthenticated_root,
+        )?)
+    }
+
+    /// Initialize a fresh device from the remote root envelope, immediately
+    /// replacing it with the ordinary device-local passphrase wrap.
+    pub fn initialize_from_remote_account_root_wrap(
+        &mut self,
+        passphrase: &str,
+        account_secret: &AccountSecret,
+        account_id: Uuid,
+        wrapped: &RemoteAccountRootWrapV1,
+    ) -> Result<(), WasmVaultError> {
+        if passphrase.chars().count() < 12 {
+            return Err(WasmVaultError::PassphraseTooShort);
+        }
+        let root_key =
+            unwrap_root_key_for_remote_account(passphrase, account_secret, account_id, wrapped)?;
+        let local_wrap = wrap_root_key(passphrase, &root_key)?;
+        self.store.initialize_root_wrap(&local_wrap)?;
         self.root_key = Some(root_key);
         Ok(())
     }
@@ -1233,6 +1276,11 @@ impl BrowserVault {
         Ok(RecoverySecret::generate()?.to_hex())
     }
 
+    /// Generate a checksummed Account Secret without exposing raw root-key data.
+    pub fn generate_account_secret() -> Result<String, WasmVaultError> {
+        Ok(AccountSecret::generate()?.to_code())
+    }
+
     /// Export the current ciphertext store as a snapshot for persistence.
     pub fn to_snapshot(&self) -> KVSnapshot {
         self.store.to_snapshot()
@@ -1964,6 +2012,81 @@ mod tests {
                 .set_emergency_card(&vault_models::EmergencyCard::empty())
                 .is_err()
         );
+    }
+
+    #[test]
+    fn remote_account_root_wrap_bootstraps_the_same_vault_on_a_fresh_device() {
+        let passphrase = "correct horse battery";
+        let account_id = Uuid::new_v4();
+        let account_secret = AccountSecret::from_bytes([0x5A; 32]);
+        let mut source = BrowserVault::new_empty();
+        source.create(passphrase).expect("create source");
+        let item = sample_item("Synced credential");
+        let item_id = item.id;
+        source.put_item(&item).expect("put source item");
+        let encrypted = source
+            .get_encrypted_item(item_id)
+            .expect("read encrypted item")
+            .expect("encrypted item present");
+        let remote_wrap = source
+            .export_remote_account_root_wrap(passphrase, &account_secret, account_id)
+            .expect("export remote wrap");
+
+        let mut target = BrowserVault::new_empty();
+        target
+            .initialize_from_remote_account_root_wrap(
+                passphrase,
+                &account_secret,
+                account_id,
+                &remote_wrap,
+            )
+            .expect("initialize target");
+        target
+            .apply_encrypted_item(&encrypted, None)
+            .expect("accept source ciphertext");
+        assert!(target.get_item(item_id).expect("open synced item") == item);
+
+        target.lock();
+        target.unlock(passphrase).expect("unlock local target wrap");
+        assert!(target.get_item(item_id).expect("open after relock") == item);
+    }
+
+    #[test]
+    fn remote_account_bootstrap_fails_closed_without_exact_context() {
+        let passphrase = "correct horse battery";
+        let account_id = Uuid::new_v4();
+        let account_secret = AccountSecret::from_bytes([0x5A; 32]);
+        let mut source = BrowserVault::new_empty();
+        source.create(passphrase).expect("create source");
+        let remote_wrap = source
+            .export_remote_account_root_wrap(passphrase, &account_secret, account_id)
+            .expect("export remote wrap");
+
+        let mut wrong_account_target = BrowserVault::new_empty();
+        assert!(
+            wrong_account_target
+                .initialize_from_remote_account_root_wrap(
+                    passphrase,
+                    &account_secret,
+                    Uuid::new_v4(),
+                    &remote_wrap,
+                )
+                .is_err()
+        );
+        assert!(!wrong_account_target.is_initialized());
+
+        let mut wrong_secret_target = BrowserVault::new_empty();
+        assert!(
+            wrong_secret_target
+                .initialize_from_remote_account_root_wrap(
+                    passphrase,
+                    &AccountSecret::from_bytes([0xA5; 32]),
+                    account_id,
+                    &remote_wrap,
+                )
+                .is_err()
+        );
+        assert!(!wrong_secret_target.is_initialized());
     }
 
     #[test]

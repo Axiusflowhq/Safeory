@@ -7,7 +7,7 @@ use chacha20poly1305::{
 };
 use hkdf::Hkdf;
 use serde::{Deserialize, Deserializer, Serialize};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use thiserror::Error;
 use uuid::Uuid;
@@ -36,6 +36,11 @@ const RECOVERY_WRAP_INFO: &[u8] = b"safeory:v1:recovery-wrap";
 const RECOVERY_WRAP_AAD: &[u8] = b"safeory:recovery-wrap:v1";
 const SESSION_RESUME_WRAP_INFO: &[u8] = b"safeory:v1:session-resume-wrap";
 const SESSION_RESUME_WRAP_AAD: &[u8] = b"safeory:session-resume-wrap:v1";
+const REMOTE_ROOT_WRAP_ALGORITHM: &str = "argon2id-v19+hkdf-sha256+xchacha20poly1305";
+const REMOTE_ROOT_WRAP_INFO: &[u8] = b"safeory:v1:remote-account-root-wrap";
+const REMOTE_ROOT_WRAP_AAD: &[u8] = b"safeory:remote-account-root-wrap:v1";
+const ACCOUNT_SECRET_CODE_PREFIX: &str = "SFO-A1-";
+const ACCOUNT_SECRET_CHECKSUM_DOMAIN: &[u8] = b"safeory:account-secret-checksum:v1\0";
 
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -265,6 +270,63 @@ impl AccountRootKey {
     }
 }
 
+/// High-entropy factor for cloud root-wrap protection and fresh-device bootstrap.
+///
+/// This value is never an HTTP bearer or hosted-identity credential. It must
+/// remain client-side and is combined with the passphrase-derived Argon2id key
+/// before a remotely stored account-root envelope can be opened.
+pub struct AccountSecret(Zeroizing<[u8; 32]>);
+
+impl AccountSecret {
+    pub fn generate() -> Result<Self, CryptoError> {
+        let mut bytes = Zeroizing::new([0u8; 32]);
+        getrandom::fill(bytes.as_mut()).map_err(|_| CryptoError::Random)?;
+        Ok(Self(bytes))
+    }
+
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(Zeroizing::new(bytes))
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// Explicit printable representation. `Display` and `Debug` are omitted so
+    /// the secret cannot be logged accidentally through ordinary formatting.
+    pub fn to_code(&self) -> String {
+        let checksum = account_secret_checksum(self.as_bytes());
+        format!(
+            "{ACCOUNT_SECRET_CODE_PREFIX}{}-{}",
+            encode_upper_hex(self.as_bytes()),
+            encode_upper_hex(&checksum),
+        )
+    }
+
+    pub fn from_code(code: &str) -> Result<Self, CryptoError> {
+        let payload = code
+            .strip_prefix(ACCOUNT_SECRET_CODE_PREFIX)
+            .ok_or(CryptoError::InvalidEncoding)?;
+        let (encoded_secret, encoded_checksum) = payload
+            .split_once('-')
+            .ok_or(CryptoError::InvalidEncoding)?;
+        if encoded_secret.len() != 64
+            || encoded_checksum.len() != 8
+            || encoded_checksum.contains('-')
+        {
+            return Err(CryptoError::InvalidEncoding);
+        }
+        let mut bytes = Zeroizing::new([0u8; 32]);
+        decode_hex_into(encoded_secret, bytes.as_mut())?;
+        let mut supplied_checksum = [0u8; 4];
+        decode_hex_into(encoded_checksum, &mut supplied_checksum)?;
+        if supplied_checksum != account_secret_checksum(&bytes) {
+            return Err(CryptoError::InvalidEncoding);
+        }
+        Ok(Self(bytes))
+    }
+}
+
 /// High-entropy recovery secret used to wrap the [`AccountRootKey`] for the
 /// printable recovery kit.
 ///
@@ -386,6 +448,23 @@ pub struct RootKeyWrapV1 {
     pub argon2_iterations: u32,
     pub argon2_parallelism: u32,
     pub salt: [u8; 16],
+    pub nonce: [u8; 24],
+    pub ciphertext: Vec<u8>,
+}
+
+/// Server-storable root envelope protected by both the master passphrase and
+/// the client-only [`AccountSecret`], and cryptographically bound to one
+/// account UUID. This is distinct from the local passphrase-only root wrap.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteAccountRootWrapV1 {
+    pub format_version: u16,
+    pub algorithm: String,
+    pub account_id: Uuid,
+    pub argon2_memory_kib: u32,
+    pub argon2_iterations: u32,
+    pub argon2_parallelism: u32,
+    pub passphrase_salt: [u8; 16],
     pub nonce: [u8; 24],
     pub ciphertext: Vec<u8>,
 }
@@ -611,6 +690,114 @@ pub fn unwrap_root_key(
                 Payload {
                     msg: &wrapped.ciphertext,
                     aad: ROOT_WRAP_AAD,
+                },
+            )
+            .map_err(|_| CryptoError::Authentication)?,
+    );
+    if plaintext.len() != 32 {
+        return Err(CryptoError::InconsistentRecord);
+    }
+    let mut bytes = Zeroizing::new([0u8; 32]);
+    bytes.copy_from_slice(&plaintext);
+    Ok(AccountRootKey(bytes))
+}
+
+/// Create the root envelope that may be stored by the zero-knowledge service.
+///
+/// Argon2id retains the cost of each passphrase guess. HKDF-Extract then uses
+/// the 256-bit Account Secret as its secret salt, so possession of a stolen
+/// server envelope does not permit password-only offline guessing.
+pub fn wrap_root_key_for_remote_account(
+    passphrase: &str,
+    account_secret: &AccountSecret,
+    account_id: Uuid,
+    root_key: &AccountRootKey,
+) -> Result<RemoteAccountRootWrapV1, CryptoError> {
+    if account_id.is_nil() {
+        return Err(CryptoError::InconsistentRecord);
+    }
+    let mut passphrase_salt = [0u8; 16];
+    let mut nonce = [0u8; 24];
+    getrandom::fill(&mut passphrase_salt).map_err(|_| CryptoError::Random)?;
+    getrandom::fill(&mut nonce).map_err(|_| CryptoError::Random)?;
+    let kek = derive_remote_root_kek(
+        passphrase,
+        account_secret,
+        account_id,
+        &passphrase_salt,
+        ARGON2_MEMORY_KIB,
+        ARGON2_ITERATIONS,
+        ARGON2_PARALLELISM,
+    )?;
+    let aad = remote_root_wrap_aad(
+        account_id,
+        ARGON2_MEMORY_KIB,
+        ARGON2_ITERATIONS,
+        ARGON2_PARALLELISM,
+        &passphrase_salt,
+    );
+    let ciphertext = XChaCha20Poly1305::new((&*kek).into())
+        .encrypt(
+            nonce_ref(&nonce)?,
+            Payload {
+                msg: root_key.as_bytes(),
+                aad: &aad,
+            },
+        )
+        .map_err(|_| CryptoError::Encryption)?;
+    Ok(RemoteAccountRootWrapV1 {
+        format_version: FORMAT_VERSION,
+        algorithm: REMOTE_ROOT_WRAP_ALGORITHM.to_owned(),
+        account_id,
+        argon2_memory_kib: ARGON2_MEMORY_KIB,
+        argon2_iterations: ARGON2_ITERATIONS,
+        argon2_parallelism: ARGON2_PARALLELISM,
+        passphrase_salt,
+        nonce,
+        ciphertext,
+    })
+}
+
+/// Open a remotely stored root envelope only when both user factors and the
+/// expected account identity match its authenticated context.
+pub fn unwrap_root_key_for_remote_account(
+    passphrase: &str,
+    account_secret: &AccountSecret,
+    expected_account_id: Uuid,
+    wrapped: &RemoteAccountRootWrapV1,
+) -> Result<AccountRootKey, CryptoError> {
+    if wrapped.format_version != FORMAT_VERSION || wrapped.algorithm != REMOTE_ROOT_WRAP_ALGORITHM {
+        return Err(CryptoError::UnsupportedFormat);
+    }
+    if expected_account_id.is_nil() || wrapped.account_id != expected_account_id {
+        return Err(CryptoError::InconsistentRecord);
+    }
+    if wrapped.ciphertext.len() != 48 {
+        return Err(CryptoError::InconsistentRecord);
+    }
+    let kek = derive_remote_root_kek(
+        passphrase,
+        account_secret,
+        wrapped.account_id,
+        &wrapped.passphrase_salt,
+        wrapped.argon2_memory_kib,
+        wrapped.argon2_iterations,
+        wrapped.argon2_parallelism,
+    )?;
+    let aad = remote_root_wrap_aad(
+        wrapped.account_id,
+        wrapped.argon2_memory_kib,
+        wrapped.argon2_iterations,
+        wrapped.argon2_parallelism,
+        &wrapped.passphrase_salt,
+    );
+    let plaintext = Zeroizing::new(
+        XChaCha20Poly1305::new((&*kek).into())
+            .decrypt(
+                nonce_ref(&wrapped.nonce)?,
+                Payload {
+                    msg: &wrapped.ciphertext,
+                    aad: &aad,
                 },
             )
             .map_err(|_| CryptoError::Authentication)?,
@@ -1162,6 +1349,90 @@ fn derive_item_wrap_key(root_key: &AccountRootKey) -> Result<Zeroizing<[u8; 32]>
     Ok(output)
 }
 
+fn derive_remote_root_kek(
+    passphrase: &str,
+    account_secret: &AccountSecret,
+    account_id: Uuid,
+    passphrase_salt: &[u8; 16],
+    memory_kib: u32,
+    iterations: u32,
+    parallelism: u32,
+) -> Result<Zeroizing<[u8; 32]>, CryptoError> {
+    let passphrase_key = derive_kek(
+        passphrase,
+        passphrase_salt,
+        memory_kib,
+        iterations,
+        parallelism,
+    )?;
+    let hk = Hkdf::<Sha256>::new(Some(account_secret.as_bytes()), passphrase_key.as_slice());
+    let mut info = Vec::with_capacity(REMOTE_ROOT_WRAP_INFO.len() + 16 + 2);
+    info.extend_from_slice(REMOTE_ROOT_WRAP_INFO);
+    info.extend_from_slice(&FORMAT_VERSION.to_be_bytes());
+    info.extend_from_slice(account_id.as_bytes());
+    let mut output = Zeroizing::new([0u8; 32]);
+    hk.expand(&info, output.as_mut())
+        .map_err(|_| CryptoError::KeyDerivation)?;
+    Ok(output)
+}
+
+fn remote_root_wrap_aad(
+    account_id: Uuid,
+    memory_kib: u32,
+    iterations: u32,
+    parallelism: u32,
+    passphrase_salt: &[u8; 16],
+) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(REMOTE_ROOT_WRAP_AAD.len() + 2 + 16 + 4 * 3 + 16);
+    aad.extend_from_slice(REMOTE_ROOT_WRAP_AAD);
+    aad.extend_from_slice(&FORMAT_VERSION.to_be_bytes());
+    aad.extend_from_slice(account_id.as_bytes());
+    aad.extend_from_slice(&memory_kib.to_be_bytes());
+    aad.extend_from_slice(&iterations.to_be_bytes());
+    aad.extend_from_slice(&parallelism.to_be_bytes());
+    aad.extend_from_slice(passphrase_salt);
+    aad
+}
+
+fn account_secret_checksum(bytes: &[u8; 32]) -> [u8; 4] {
+    let mut hasher = Sha256::new();
+    hasher.update(ACCOUNT_SECRET_CHECKSUM_DOMAIN);
+    hasher.update(bytes);
+    let digest = hasher.finalize();
+    let mut checksum = [0u8; 4];
+    checksum.copy_from_slice(&digest[..4]);
+    checksum
+}
+
+fn encode_upper_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
+fn decode_hex_into(encoded: &str, output: &mut [u8]) -> Result<(), CryptoError> {
+    fn nibble(value: u8) -> Result<u8, CryptoError> {
+        match value {
+            b'0'..=b'9' => Ok(value - b'0'),
+            b'a'..=b'f' => Ok(value - b'a' + 10),
+            b'A'..=b'F' => Ok(value - b'A' + 10),
+            _ => Err(CryptoError::InvalidEncoding),
+        }
+    }
+    if encoded.len() != output.len() * 2 {
+        return Err(CryptoError::InvalidEncoding);
+    }
+    for (index, byte) in output.iter_mut().enumerate() {
+        *byte = (nibble(encoded.as_bytes()[index * 2])? << 4)
+            | nibble(encoded.as_bytes()[index * 2 + 1])?;
+    }
+    Ok(())
+}
+
 fn derive_attachment_wrap_key(
     root_key: &AccountRootKey,
 ) -> Result<Zeroizing<[u8; 32]>, CryptoError> {
@@ -1301,6 +1572,122 @@ mod tests {
         let root = AccountRootKey::generate().expect("root key");
         let wrapped = wrap_root_key("correct passphrase", &root).expect("wrap");
         assert!(unwrap_root_key("wrong", &wrapped).is_err());
+    }
+
+    #[test]
+    fn account_secret_code_round_trips_and_detects_typing_errors() {
+        let secret = AccountSecret::from_bytes([0xA5; 32]);
+        let code = secret.to_code();
+        assert!(code.starts_with("SFO-A1-"));
+        assert_eq!(
+            AccountSecret::from_code(&code)
+                .expect("decode account secret")
+                .as_bytes(),
+            secret.as_bytes()
+        );
+
+        let mut mistyped = code.into_bytes();
+        mistyped[10] = if mistyped[10] == b'A' { b'B' } else { b'A' };
+        let mistyped = String::from_utf8(mistyped).expect("ASCII code");
+        assert!(matches!(
+            AccountSecret::from_code(&mistyped),
+            Err(CryptoError::InvalidEncoding)
+        ));
+        assert!(AccountSecret::from_code("A5A5").is_err());
+    }
+
+    #[test]
+    fn remote_root_wrap_requires_both_factors_and_the_bound_account() {
+        let root = AccountRootKey::generate().expect("root key");
+        let account_secret = AccountSecret::from_bytes([0x11; 32]);
+        let wrong_secret = AccountSecret::from_bytes([0x22; 32]);
+        let account_id = Uuid::new_v4();
+        let wrapped = wrap_root_key_for_remote_account(
+            "correct passphrase",
+            &account_secret,
+            account_id,
+            &root,
+        )
+        .expect("remote wrap");
+
+        let restored = unwrap_root_key_for_remote_account(
+            "correct passphrase",
+            &account_secret,
+            account_id,
+            &wrapped,
+        )
+        .expect("remote unwrap");
+        assert_eq!(restored.as_bytes(), root.as_bytes());
+        assert!(matches!(
+            unwrap_root_key_for_remote_account(
+                "wrong passphrase",
+                &account_secret,
+                account_id,
+                &wrapped,
+            ),
+            Err(CryptoError::Authentication)
+        ));
+        assert!(matches!(
+            unwrap_root_key_for_remote_account(
+                "correct passphrase",
+                &wrong_secret,
+                account_id,
+                &wrapped,
+            ),
+            Err(CryptoError::Authentication)
+        ));
+        assert!(matches!(
+            unwrap_root_key_for_remote_account(
+                "correct passphrase",
+                &account_secret,
+                Uuid::new_v4(),
+                &wrapped,
+            ),
+            Err(CryptoError::InconsistentRecord)
+        ));
+    }
+
+    #[test]
+    fn remote_root_wrap_rejects_unbounded_or_extended_records() {
+        let root = AccountRootKey::generate().expect("root key");
+        let account_secret = AccountSecret::from_bytes([0x33; 32]);
+        let account_id = Uuid::new_v4();
+        let wrapped = wrap_root_key_for_remote_account(
+            "correct passphrase",
+            &account_secret,
+            account_id,
+            &root,
+        )
+        .expect("remote wrap");
+        let mut oversized = wrapped.clone();
+        oversized.ciphertext.push(0);
+        assert!(matches!(
+            unwrap_root_key_for_remote_account(
+                "correct passphrase",
+                &account_secret,
+                account_id,
+                &oversized,
+            ),
+            Err(CryptoError::InconsistentRecord)
+        ));
+        let mut expensive = wrapped.clone();
+        expensive.argon2_memory_kib = ARGON2_MAX_MEMORY_KIB + 1;
+        assert!(matches!(
+            unwrap_root_key_for_remote_account(
+                "correct passphrase",
+                &account_secret,
+                account_id,
+                &expensive,
+            ),
+            Err(CryptoError::InvalidKdfParameters)
+        ));
+
+        let mut value = serde_json::to_value(wrapped).expect("serialize remote wrap");
+        value
+            .as_object_mut()
+            .expect("remote wrap object")
+            .insert("future_field".to_owned(), serde_json::json!(true));
+        assert!(serde_json::from_value::<RemoteAccountRootWrapV1>(value).is_err());
     }
 
     #[test]

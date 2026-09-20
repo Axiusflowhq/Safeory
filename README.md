@@ -35,8 +35,8 @@ Implemented now:
   preflight, and independent protocol/header/envelope version negotiation;
 - pinned Rust/JS lockfiles and dependency/security CI policy.
 
-Not implemented yet: production Account Secret/device enrollment, cross-account
-shared-object routing, end-to-end same-account multi-device sync,
+Not implemented yet: production Account Secret publication and device-enrollment
+UX, cross-account shared-object routing, end-to-end same-account multi-device sync,
 remote collaboration and SecureLinks, TOTP/passkeys/security health/importers,
 the household Inbox and private document automation, recurring/cloud reminders,
 remote pairing/invitation transport, durable emergency release delivery, and

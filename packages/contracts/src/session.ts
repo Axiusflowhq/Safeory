@@ -239,6 +239,17 @@ export interface WasmVaultLike {
   isUnlocked(): boolean;
   create(passphrase: string): void;
   unlock(passphrase: string): void;
+  exportRemoteAccountRootWrapJson(
+    passphrase: string,
+    accountSecretCode: string,
+    accountId: string,
+  ): string;
+  initializeFromRemoteAccountRootWrapJson(
+    passphrase: string,
+    accountSecretCode: string,
+    accountId: string,
+    wrappedJson: string,
+  ): void;
   changePassphrase(currentPassphrase: string, newPassphrase: string): void;
   lock(): void;
   createSessionResumeJson(): string;
@@ -308,6 +319,7 @@ export interface WasmVaultLike {
 
 /** Static (constructor-level) bindings on the WASM module. */
 export interface WasmStatics {
+  generateAccountSecret(): string;
   generateRecoverySecret(): string;
   generatePassword(length: number): string;
 }
@@ -510,6 +522,38 @@ export class VaultSession {
   unlock(passphrase: string): void {
     this.assertHealthy();
     this.vault.unlock(passphrase);
+  }
+
+  /** Produce the opaque two-factor root envelope for server account bootstrap. */
+  exportRemoteAccountRootWrap(
+    passphrase: string,
+    accountSecretCode: string,
+    accountId: string,
+  ): string {
+    this.assertHealthy();
+    this.assertUnlocked();
+    return this.vault.exportRemoteAccountRootWrapJson(
+      passphrase,
+      accountSecretCode,
+      accountId,
+    );
+  }
+
+  /** Initialize and durably persist a fresh local vault from a remote root envelope. */
+  async initializeFromRemoteAccountRootWrap(
+    passphrase: string,
+    accountSecretCode: string,
+    accountId: string,
+    wrappedJson: string,
+  ): Promise<void> {
+    await this.mutateAndPersist(() =>
+      this.vault.initializeFromRemoteAccountRootWrapJson(
+        passphrase,
+        accountSecretCode,
+        accountId,
+        wrappedJson,
+      ),
+    );
   }
 
   /** Lock (zeroize the in-memory key) without clearing persistence. */

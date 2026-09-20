@@ -160,8 +160,10 @@ authenticated device.
 5. Return one-time device authorization material only once; persist only its
    verifier/hash server-side.
 
-The exact Account Secret construction and root-wrap migration require a crypto
-ADR before implementation.
+ADR 0006 defines the Account Secret construction and root-wrap migration. The
+Rust/WASM core implements the account-bound remote envelope and fresh-device
+root import; revision-fenced publication, confirmation UX, and the server
+enrollment/recovery coordinator remain.
 
 ### Additional device
 

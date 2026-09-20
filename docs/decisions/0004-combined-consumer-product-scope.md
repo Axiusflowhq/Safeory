@@ -41,8 +41,8 @@ made explicit opt-in under a separate ADR, or listed as a non-goal.
 - Roadmap phases are evaluated against a maintained consumer capability matrix.
 - Household/private/shared space architecture precedes production
   collaboration, sync, Travel Mode, and legacy release.
-- A high-entropy Account Secret or equivalent enrollment factor requires a
-  separate crypto ADR before cloud launch.
+- The high-entropy Account Secret and remote-root construction are resolved by
+  ADR 0006; production enrollment and external review remain cloud-launch gates.
 - Ordinary SMTP forwarding is not part of the zero-knowledge default.
 - Responsive web and the browser extension remain the committed clients.
   Native-only capabilities are not claimed without a later client ADR.

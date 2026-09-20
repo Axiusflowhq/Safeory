@@ -248,7 +248,47 @@ if (JSON.parse(restored.getItemJson(item.id)).attachments.length !== 0) {
   throw new Error("attachment delete did not remove parent reference");
 }
 
-// 11. Recovery kit: generate, install, verify, unlock fresh instance with it.
+// 11. Account Secret remote root bootstrap: both factors and account binding
+// are required, and accepted item ciphertext opens under the transferred root.
+const accountId = "44444444-4444-4444-8444-444444444444";
+const accountSecret = WasmVault.generateAccountSecret();
+if (!/^SFO-A1-[0-9A-F]{64}-[0-9A-F]{8}$/.test(accountSecret)) {
+  throw new Error("account secret code format mismatch");
+}
+const remoteRootWrap = restored.exportRemoteAccountRootWrapJson(
+  pass,
+  accountSecret,
+  accountId,
+);
+const freshDevice = new WasmVault();
+freshDevice.initializeFromRemoteAccountRootWrapJson(
+  pass,
+  accountSecret,
+  accountId,
+  remoteRootWrap,
+);
+const currentEncryptedItem = restored.getEncryptedItemJson(item.id);
+freshDevice.applyEncryptedItemJson(currentEncryptedItem);
+if (JSON.parse(freshDevice.getItemJson(item.id)).id !== item.id) {
+  throw new Error("fresh device could not open synchronized ciphertext");
+}
+const wrongAccountDevice = new WasmVault();
+let wrongAccountFailed = false;
+try {
+  wrongAccountDevice.initializeFromRemoteAccountRootWrapJson(
+    pass,
+    accountSecret,
+    "55555555-5555-4555-8555-555555555555",
+    remoteRootWrap,
+  );
+} catch {
+  wrongAccountFailed = true;
+}
+if (!wrongAccountFailed || wrongAccountDevice.isInitialized()) {
+  throw new Error("remote root wrap must reject account substitution");
+}
+
+// 12. Recovery kit: generate, install, verify, unlock fresh instance with it.
 const secretHex = WasmVault.generateRecoverySecret();
 if (!/^[0-9a-f]{64}$/.test(secretHex)) throw new Error("recovery secret should be 64 hex chars");
 restored.installRecoveryKit(secretHex);

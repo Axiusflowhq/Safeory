@@ -17,6 +17,9 @@ class FakeVault implements WasmVaultLike {
   sessionResumeCount = 0;
   passphraseChangeCount = 0;
   snapshotCount = 0;
+  remoteRootWrapJson = JSON.stringify({ format_version: 1, ciphertext: [1, 2, 3] });
+  remoteRootExportArguments: string[] | null = null;
+  remoteRootImportArguments: string[] | null = null;
   deadlineJson = "[]";
   encryptedSyncItemJson: string | null = null;
   failMutation = false;
@@ -68,6 +71,32 @@ class FakeVault implements WasmVaultLike {
     if (this.expectedPassphrase !== null && passphrase !== this.expectedPassphrase) {
       throw new Error("wrong passphrase");
     }
+    this.unlocked = true;
+  }
+
+  exportRemoteAccountRootWrapJson(
+    passphrase: string,
+    accountSecretCode: string,
+    accountId: string,
+  ): string {
+    this.remoteRootExportArguments = [passphrase, accountSecretCode, accountId];
+    return this.remoteRootWrapJson;
+  }
+
+  initializeFromRemoteAccountRootWrapJson(
+    passphrase: string,
+    accountSecretCode: string,
+    accountId: string,
+    wrappedJson: string,
+  ): void {
+    if (this.initialized) throw new Error("already initialized");
+    this.remoteRootImportArguments = [
+      passphrase,
+      accountSecretCode,
+      accountId,
+      wrappedJson,
+    ];
+    this.initialized = true;
     this.unlocked = true;
   }
 
@@ -896,4 +925,47 @@ test("encrypted sync acceptance compare-and-swaps through the session durability
   );
   assert.equal(session.isUnlocked(), true, "a stale sync precondition is recoverable");
   assert.equal(indexedDb.getVaultRecord().version, 1);
+});
+
+test("remote account root bootstrap stays inside WASM and crosses the durability fence", async () => {
+  const indexedDb = installWritableIndexedDb({
+    format: 1,
+    version: 0,
+    snapshotJson: null,
+  });
+  const liveVault = new FakeVault(false, false, undefined, null, false);
+  const session = newSession(() => new FakeVault(false, false), liveVault);
+  const accountId = "11111111-1111-4111-8111-111111111111";
+  const secretCode = `SFO-A1-${"A".repeat(64)}-${"B".repeat(8)}`;
+
+  await session.initializeFromRemoteAccountRootWrap(
+    "correct horse battery",
+    secretCode,
+    accountId,
+    liveVault.remoteRootWrapJson,
+  );
+  assert.equal(session.isInitialized(), true);
+  assert.equal(session.isUnlocked(), true);
+  assert.deepEqual(liveVault.remoteRootImportArguments, [
+    "correct horse battery",
+    secretCode,
+    accountId,
+    liveVault.remoteRootWrapJson,
+  ]);
+  assert.equal(indexedDb.getVaultRecord().version, 1);
+
+  assert.equal(
+    session.exportRemoteAccountRootWrap(
+      "correct horse battery",
+      secretCode,
+      accountId,
+    ),
+    liveVault.remoteRootWrapJson,
+  );
+  assert.deepEqual(liveVault.remoteRootExportArguments, [
+    "correct horse battery",
+    secretCode,
+    accountId,
+  ]);
+  assert.equal(indexedDb.getVaultRecord().version, 1, "export must remain read-only");
 });

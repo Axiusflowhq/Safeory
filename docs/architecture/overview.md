@@ -117,10 +117,11 @@ master passphrase
 Creation is the reverse path. The database receives only salts, nonces, ciphertexts, opaque IDs, revisions, and format metadata.
 
 This is the implemented local unlock path. Before remotely stored wraps become a
-production dependency, a reviewed ADR must add a high-entropy Account Secret or
-equivalent device-enrollment factor to resist password-only offline attacks after
-a server-data compromise. Cognito proves account identity; it does not replace
-client-side key protection.
+production dependency, ADR 0006's high-entropy Account Secret protects the
+account-bound remote root envelope from password-only offline attacks after a
+server-data compromise. Its Rust/WASM construction and fresh-device root import
+are implemented; publication and reviewed enrollment/recovery UX are not.
+Cognito proves account identity; it does not replace client-side key protection.
 
 ## Platform boundaries
 
