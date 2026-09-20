@@ -1,8 +1,11 @@
 # Opaque Sync and Household Key Distribution
 
 Status: target protocol architecture; not implemented end-to-end. The existing
-`apps/api` opaque object endpoints are an initial transport surface, and
-`crates/vault-sync` does not yet implement this complete contract.
+`apps/api` opaque object endpoints are an initial transport surface.
+`crates/vault-sync` now implements the bounded versioned account/household/
+membership/space domain contracts and a ciphertext-preserving single-owner
+migration plan; key envelopes, mutation/pull protocol, and client integration
+remain incomplete.
 
 ## Goals
 

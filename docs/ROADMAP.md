@@ -152,10 +152,14 @@ gates are green, including the generated-WASM Node smoke test.**
 
 ### Phase 2 — Household, space, and account-key foundation
 
-- Add versioned Account, Household, Membership, Role, Space, and SpaceMember
-  contracts without exposing human-readable household/space names to the server.
-- Migrate the current local vault to one account, one household, and one private
-  space without re-encrypting plaintext outside the client boundary.
+- ✅ DONE (contract foundation): `vault-sync` now defines bounded, versioned
+  Account, Household, Membership, Role, Space, and device-bound SpaceMember
+  contracts without human-readable household/space names. Cross-account
+  household membership, role/access rules, active ownership, private-space
+  isolation, and key-generation bindings fail closed under validation.
+- 🟡 Contract ready: a single-owner migration plan preserves existing opaque
+  object IDs while assigning them to one account, household, and private space;
+  wiring that plan into browser persistence is still outstanding.
 - Implement independently rotatable private/shared/purpose-space keys and
   membership envelopes. Keep random per-item and attachment keys.
 - Write the sync protocol specification and compatibility matrix before adding
@@ -203,9 +207,11 @@ surface:
   SES, IAM/secrets, CloudWatch, backup/restore, and GitHub Actions OIDC deploy.
 - Keep `docker-compose.yml` as the local integration environment using
   PostgreSQL/Valkey/Garage/Mailpit; it is not the production hosting plan.
-- `vault-sync`: device keypairs (X25519), space/item key envelopes, and a
-  versioned opaque sync protocol. Exact revision preconditions reject stale
-  overwrites; conflict handling preserves both candidates or requires explicit
+- `vault-sync`: the versioned household/space domain and ciphertext-preserving
+  local migration contracts are implemented. Next add device keypairs (X25519),
+  space/item key envelopes, and a versioned opaque sync protocol. Exact
+  revision preconditions reject stale overwrites; conflict handling preserves
+  both candidates or requires explicit
   user resolution rather than silently applying last-writer-wins. Tombstones
   and history remain bounded.
 - Cognito-backed account creation/sign-in/email verification plus Safeory
@@ -314,7 +320,7 @@ Additional completion requirements from the combined-product architecture:
 | 6 | Sync backend | RESOLVED — AWS production: Rust HTTP API + Cognito + RDS PostgreSQL + S3 ciphertext storage + Valkey/ElastiCache as ephemeral coordination + SES + CloudFront/Route 53/ACM; Docker Compose is local development only |
 | 7 | AWS production packaging | RESOLVED architecture in `docs/architecture/aws.md`; implement reviewable IaC under `infra/aws/`, OIDC CI/CD, migrations, health checks, observability, and tested backup/restore before Phase 4 is production-ready |
 | 8 | Product parity boundary | RESOLVED — target 1Password Individual/Families + Trustworthy household/continuity; exclude 1Password Business/Enterprise/Developer |
-| 9 | Household key boundary | Space/compartment keys with explicit private/shared membership; finalize envelope/rotation ADR before Phase 2 implementation |
+| 9 | Household key boundary | Domain contracts are implemented; finalize the space-key envelope/rotation ADR before cryptographic integration |
 | 10 | Cloud offline-attack factor | Add a high-entropy Account Secret or equivalent device-enrollment factor; exact construction and migration require review |
 | 11 | Document automation | Local/private processing by default; any remote OCR/AI is explicit opt-in with a separate disclosure/threat ADR |
 | 12 | Reminder scheduling | Offer private-local and opt-in minimal-metadata cloud scheduling; never put reminder content in email/push metadata |

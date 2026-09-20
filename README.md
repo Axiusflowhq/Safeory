@@ -26,10 +26,14 @@ Implemented now:
 - ciphertext-only browser snapshot validation, IndexedDB CAS persistence, and fail-closed durability poisoning when an in-memory mutation cannot be saved;
 - portable emergency/recovery primitives, encrypted legacy/account-closure planning metadata, bounded history and attachment formats in the native core, browser encrypted attachment persistence with authenticated chunked add/download/delete and backup/restore, browser readable export, plus Trust Engine policy/threshold foundations and local dual-key trusted-device pairing with durable wrapped recipient keys and a browser pairing responder;
 - `apps/api` plus a local Docker integration stack for account/device coordination and opaque encrypted-object sync using PostgreSQL, Valkey, S3-compatible object storage, and SMTP; the production target is AWS as documented in `docs/architecture/aws.md`;
+- `vault-sync` versioned account/household/membership/private-and-shared-space
+  contracts, including fail-closed topology validation and a local single-owner
+  ciphertext-preserving migration plan;
 - pinned Rust/JS lockfiles and dependency/security CI policy.
 
-Not implemented yet: the account/household/private-and-shared-space model,
-production Account Secret/device enrollment, end-to-end multi-device sync,
+Not implemented yet: browser/API integration and server enforcement for the
+account/household/private-and-shared-space contracts, production Account
+Secret/device enrollment, end-to-end multi-device sync,
 remote collaboration and SecureLinks, TOTP/passkeys/security health/importers,
 the household Inbox and private document automation, recurring/cloud reminders,
 remote pairing/invitation transport, durable emergency release delivery, and
