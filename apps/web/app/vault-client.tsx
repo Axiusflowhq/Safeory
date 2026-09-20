@@ -3,30 +3,41 @@
 import { useMemo, useState } from "react"
 import {
   Add01Icon,
-  BankIcon,
-  Building03Icon,
-  Calendar03Icon,
-  Car01Icon,
-  Contact01Icon,
-  DocumentValidationIcon,
-  FileTextIcon,
-  Key01Icon,
-  LockIcon,
-  PackageIcon,
-  ReceiptDollarIcon,
+  FileViewIcon,
+  FolderOpenIcon,
   Search01Icon,
-  Settings01Icon,
-  ShieldCheckIcon,
-  UserMultipleIcon,
-  Wallet02Icon,
+  SecurityWarningIcon,
 } from "@hugeicons/core-free-icons"
 import { HugeiconsIcon } from "@hugeicons/react"
+import {
+  BillListIcon,
+  BoxIcon,
+  CalendarDateIcon,
+  CarIcon,
+  DocumentsIcon,
+  FolderWithFilesIcon,
+  Home2Icon,
+  LockKeyholeIcon as SolarLockKeyholeIcon,
+  LockPasswordIcon,
+  NotesIcon,
+  RepeatIcon,
+  Safe2Icon,
+  SettingsIcon,
+  ShieldCheckIcon,
+  TrashBin2Icon,
+  UserIdIcon,
+  UsersGroupRoundedIcon,
+  WalletMoneyIcon,
+} from "@solar-icons/react/bold"
 
 import { EmergencyCardEditor } from "@/components/safeory/EmergencyCardEditor"
+import { ExportPanel } from "@/components/safeory/ExportPanel"
 import { ItemEditor } from "@/components/safeory/ItemEditor"
 import { PassphraseGate } from "@/components/safeory/PassphraseGate"
+import { PassphraseChangePanel } from "@/components/safeory/PassphraseChangePanel"
 import { RecoveryKitPanel } from "@/components/safeory/RecoveryKitPanel"
 import { TodayView } from "@/components/safeory/TodayView"
+import { TrashView } from "@/components/safeory/TrashView"
 import { TrustedPeopleEditor } from "@/components/safeory/TrustedPeopleEditor"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
@@ -50,6 +61,7 @@ import {
 } from "@/components/ui/sidebar"
 import { Skeleton } from "@/components/ui/skeleton"
 import type { DeadlineSummary } from "@safeory/contracts"
+import { itemKindIcon } from "@/lib/vault/record-visuals"
 import {
   ITEM_KINDS,
   kindLabel,
@@ -58,20 +70,21 @@ import {
 } from "@/lib/vault/items"
 import { useVault, type EditableEntry } from "@/lib/vault/use-vault"
 
-type View = "today" | "items" | "trusted-people" | "emergency" | "settings"
+type View =
+  "today" | "items" | "trash" | "trusted-people" | "emergency" | "settings"
 
-const categoryIcons = {
-  password: Key01Icon,
-  secure_note: FileTextIcon,
-  document: DocumentValidationIcon,
+const SIDEBAR_ITEM_ICONS = {
+  password: LockPasswordIcon,
+  secure_note: NotesIcon,
+  document: DocumentsIcon,
   insurance: ShieldCheckIcon,
-  financial: BankIcon,
-  property: Building03Icon,
-  vehicle: Car01Icon,
-  possession: PackageIcon,
-  receipt: ReceiptDollarIcon,
-  subscription: Wallet02Icon,
-} satisfies Record<ItemKind, Parameters<typeof HugeiconsIcon>[0]["icon"]>
+  financial: WalletMoneyIcon,
+  property: Home2Icon,
+  vehicle: CarIcon,
+  possession: BoxIcon,
+  receipt: BillListIcon,
+  subscription: RepeatIcon,
+} satisfies Record<ItemKind, typeof LockPasswordIcon>
 
 export function VaultClient() {
   const vault = useVault()
@@ -86,7 +99,7 @@ export function VaultClient() {
         <div className="w-full max-w-lg space-y-5 rounded-[var(--radius-default)] border bg-[var(--surface)] p-7 shadow-[var(--fancy-shadow-basic)]">
           <div className="flex size-11 items-center justify-center rounded-[var(--radius-default)] bg-[var(--danger)]/10 text-[var(--danger)]">
             <HugeiconsIcon
-              icon={ShieldCheckIcon}
+              icon={SecurityWarningIcon}
               strokeWidth={2}
               className="size-5"
             />
@@ -120,6 +133,9 @@ export function VaultClient() {
         error={vault.error}
         onSubmit={vault.phase === "setup" ? vault.create : vault.unlock}
         onRecoveryUnlock={vault.unlockWithRecoveryKit}
+        onImportBackup={
+          vault.phase === "setup" ? vault.importEncryptedBackup : undefined
+        }
       />
     )
   }
@@ -171,7 +187,10 @@ function VaultWorkspace({ vault }: { vault: Vault }) {
     setEditing(null)
   }
 
-  async function saveItem(item: VaultItemJson, expectedRevision: number | null) {
+  async function saveItem(
+    item: VaultItemJson,
+    expectedRevision: number | null
+  ) {
     const saved =
       expectedRevision === null
         ? await vault.putItem(item)
@@ -194,11 +213,7 @@ function VaultWorkspace({ vault }: { vault: Vault }) {
         <SidebarHeader className="px-3 py-3">
           <div className="flex h-10 items-center gap-2 overflow-hidden rounded-[var(--radius-default)] px-1.5">
             <div className="flex size-8 shrink-0 items-center justify-center rounded-[var(--radius-default)] bg-[var(--primary)] text-[var(--primary-foreground)] shadow-[var(--fancy-shadow-basic)]">
-              <HugeiconsIcon
-                icon={ShieldCheckIcon}
-                strokeWidth={2}
-                className="size-4"
-              />
+              <Safe2Icon className="size-[18px]" aria-hidden="true" />
             </div>
             <div className="min-w-0 group-data-[collapsible=icon]:hidden">
               <p className="truncate text-sm font-semibold tracking-tight">
@@ -221,7 +236,7 @@ function VaultWorkspace({ vault }: { vault: Vault }) {
                     isActive={view === "today"}
                     onClick={selectToday}
                   >
-                    <HugeiconsIcon icon={Calendar03Icon} strokeWidth={2} />
+                    <CalendarDateIcon className="size-[18px]" aria-hidden="true" />
                     <span>Today</span>
                   </SidebarMenuButton>
                 </SidebarMenuItem>
@@ -231,31 +246,49 @@ function VaultWorkspace({ vault }: { vault: Vault }) {
                     isActive={view === "items" && activeKind === "all"}
                     onClick={() => selectItems("all")}
                   >
-                    <HugeiconsIcon icon={PackageIcon} strokeWidth={2} />
+                    <FolderWithFilesIcon className="size-[18px]" aria-hidden="true" />
                     <span>All items</span>
                   </SidebarMenuButton>
                   <SidebarMenuBadge className="tabular-nums">
                     {vault.items.length}
                   </SidebarMenuBadge>
                 </SidebarMenuItem>
-                {ITEM_KINDS.map(({ kind, label }) => (
-                  <SidebarMenuItem key={kind}>
-                    <SidebarMenuButton
-                      tooltip={label}
-                      isActive={view === "items" && activeKind === kind}
-                      onClick={() => selectItems(kind)}
-                    >
-                      <HugeiconsIcon
-                        icon={categoryIcons[kind]}
-                        strokeWidth={2}
-                      />
-                      <span>{label}</span>
-                    </SidebarMenuButton>
-                    <SidebarMenuBadge className="tabular-nums">
-                      {counts.get(kind) ?? 0}
-                    </SidebarMenuBadge>
-                  </SidebarMenuItem>
-                ))}
+                {ITEM_KINDS.map(({ kind, label }) => {
+                  const ItemIcon = SIDEBAR_ITEM_ICONS[kind]
+                  return (
+                    <SidebarMenuItem key={kind}>
+                      <SidebarMenuButton
+                        tooltip={label}
+                        isActive={view === "items" && activeKind === kind}
+                        onClick={() => selectItems(kind)}
+                      >
+                        <ItemIcon className="size-[18px]" aria-hidden="true" />
+                        <span>{label}</span>
+                      </SidebarMenuButton>
+                      <SidebarMenuBadge className="tabular-nums">
+                        {counts.get(kind) ?? 0}
+                      </SidebarMenuBadge>
+                    </SidebarMenuItem>
+                  )
+                })}
+                <SidebarMenuItem>
+                  <SidebarMenuButton
+                    tooltip="Trash"
+                    isActive={view === "trash"}
+                    onClick={() => {
+                      setDeadlines([])
+                      setView("trash")
+                      setCreating(false)
+                      setEditing(null)
+                    }}
+                  >
+                    <TrashBin2Icon className="size-[18px]" aria-hidden="true" />
+                    <span>Trash</span>
+                  </SidebarMenuButton>
+                  <SidebarMenuBadge className="tabular-nums">
+                    {vault.trashedItems.length}
+                  </SidebarMenuBadge>
+                </SidebarMenuItem>
               </SidebarMenu>
             </SidebarGroupContent>
           </SidebarGroup>
@@ -274,7 +307,7 @@ function VaultWorkspace({ vault }: { vault: Vault }) {
                       setEditing(null)
                     }}
                   >
-                    <HugeiconsIcon icon={UserMultipleIcon} strokeWidth={2} />
+                    <UsersGroupRoundedIcon className="size-[18px]" aria-hidden="true" />
                     <span>Trusted people</span>
                   </SidebarMenuButton>
                   <SidebarMenuBadge className="tabular-nums">
@@ -292,7 +325,7 @@ function VaultWorkspace({ vault }: { vault: Vault }) {
                       setEditing(null)
                     }}
                   >
-                    <HugeiconsIcon icon={Contact01Icon} strokeWidth={2} />
+                    <UserIdIcon className="size-[18px]" aria-hidden="true" />
                     <span>Emergency card</span>
                   </SidebarMenuButton>
                 </SidebarMenuItem>
@@ -307,7 +340,7 @@ function VaultWorkspace({ vault }: { vault: Vault }) {
                       setEditing(null)
                     }}
                   >
-                    <HugeiconsIcon icon={Settings01Icon} strokeWidth={2} />
+                    <SettingsIcon className="size-[18px]" aria-hidden="true" />
                     <span>Settings</span>
                   </SidebarMenuButton>
                 </SidebarMenuItem>
@@ -319,7 +352,7 @@ function VaultWorkspace({ vault }: { vault: Vault }) {
           <SidebarMenu>
             <SidebarMenuItem>
               <SidebarMenuButton tooltip="Lock vault" onClick={vault.lock}>
-                <HugeiconsIcon icon={LockIcon} strokeWidth={2} />
+                <SolarLockKeyholeIcon className="size-[18px]" aria-hidden="true" />
                 <span>Lock vault</span>
               </SidebarMenuButton>
             </SidebarMenuItem>
@@ -342,11 +375,13 @@ function VaultWorkspace({ vault }: { vault: Vault }) {
                   ? activeKind === "all"
                     ? "All items"
                     : kindLabel(activeKind)
-                  : view === "trusted-people"
-                    ? "Trusted people"
-                    : view === "emergency"
-                      ? "Emergency card"
-                      : "Settings"}
+                  : view === "trash"
+                    ? "Trash"
+                    : view === "trusted-people"
+                      ? "Trusted people"
+                      : view === "emergency"
+                        ? "Emergency card"
+                        : "Settings"}
             </p>
           </div>
           <div className="ml-auto flex items-center gap-2">
@@ -455,16 +490,13 @@ function VaultWorkspace({ vault }: { vault: Vault }) {
                               setCreating(false)
                             }
                           }}
-                          title={`${entry.item.title} — ${kindLabel(entry.item.kind)}`}
+                          title={`${entry.item.title} â€” ${kindLabel(entry.item.kind)}`}
                           className="flex w-full items-start gap-3 rounded-[var(--radius-default)] px-3 py-3 text-left outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--ring)] active:scale-[0.97] data-[selected=true]:bg-[var(--active-bg)] motion-safe:transition-[scale] motion-safe:duration-200 motion-safe:ease-out motion-safe:will-change-transform [@media(hover:hover)]:hover:bg-[var(--hover-bg)]"
                           data-selected={selected}
                         >
                           <div className="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-[var(--radius-default)] border bg-[var(--surface)] text-[var(--icon)]">
                             <HugeiconsIcon
-                              icon={
-                                categoryIcons[entry.item.kind as ItemKind] ??
-                                FileTextIcon
-                              }
+                              icon={itemKindIcon(entry.item.kind)}
                               strokeWidth={2}
                               className="size-4"
                             />
@@ -521,6 +553,11 @@ function VaultWorkspace({ vault }: { vault: Vault }) {
                     trustedPrincipals={
                       vault.getEmergencyCard()?.card.principals ?? []
                     }
+                    onOwnerChange={setEditing}
+                    getAttachments={vault.getAttachments}
+                    addAttachment={vault.addAttachment}
+                    deleteAttachment={vault.deleteAttachment}
+                    downloadAttachment={vault.downloadAttachment}
                   />
                 </div>
               ) : (
@@ -528,6 +565,14 @@ function VaultWorkspace({ vault }: { vault: Vault }) {
               )}
             </section>
           </div>
+        ) : null}
+
+        {view === "trash" ? (
+          <TrashView
+            items={vault.trashedItems}
+            onRestore={vault.restoreItem}
+            onPurge={vault.purgeItem}
+          />
         ) : null}
 
         {view === "emergency" ? (
@@ -567,7 +612,9 @@ function VaultWorkspace({ vault }: { vault: Vault }) {
             </div>
             <TrustedPeopleEditor
               initialContacts={vault.getEmergencyCard()?.card.contacts ?? []}
-              initialPrincipals={vault.getEmergencyCard()?.card.principals ?? []}
+              initialPrincipals={
+                vault.getEmergencyCard()?.card.principals ?? []
+              }
               onSaveContacts={vault.setEmergencyContacts}
               onSavePrincipals={vault.setTrustedPrincipals}
             />
@@ -594,6 +641,13 @@ function VaultWorkspace({ vault }: { vault: Vault }) {
               onInstall={vault.installRecoveryKit}
               onClearSecret={vault.clearGeneratedSecret}
             />
+            <PassphraseChangePanel
+              onChangePassphrase={vault.changePassphrase}
+            />
+            <ExportPanel
+              onExportReadable={vault.exportReadableVault}
+              onExportEncrypted={vault.exportEncryptedSnapshot}
+            />
           </section>
         ) : null}
       </SidebarInset>
@@ -612,7 +666,7 @@ function EmptyList({
     <div className="flex min-h-72 flex-col items-center justify-center px-6 text-center">
       <div className="mb-4 flex size-11 items-center justify-center rounded-[var(--radius-default)] border bg-[var(--surface)] shadow-[var(--fancy-shadow-basic)]">
         <HugeiconsIcon
-          icon={PackageIcon}
+          icon={FolderOpenIcon}
           strokeWidth={2}
           className="size-5 text-[var(--icon)]"
         />
@@ -643,7 +697,7 @@ function DetailPlaceholder() {
     <div className="flex min-h-[60svh] flex-col items-center justify-center text-center">
       <div className="mb-5 flex size-12 items-center justify-center rounded-[var(--radius-default)] bg-[var(--surface-secondary)] text-[var(--icon)]">
         <HugeiconsIcon
-          icon={ShieldCheckIcon}
+          icon={FileViewIcon}
           strokeWidth={2}
           className="size-5"
         />
@@ -664,11 +718,7 @@ function LoadingVault() {
         <SidebarHeader className="px-3 py-3">
           <div className="flex h-10 items-center gap-2 overflow-hidden rounded-[var(--radius-default)] px-1.5">
             <div className="flex size-8 shrink-0 items-center justify-center rounded-[var(--radius-default)] bg-[var(--primary)] text-[var(--primary-foreground)] shadow-[var(--fancy-shadow-basic)]">
-              <HugeiconsIcon
-                icon={ShieldCheckIcon}
-                strokeWidth={2}
-                className="size-4"
-              />
+              <Safe2Icon className="size-[18px]" aria-hidden="true" />
             </div>
             <div className="min-w-0 group-data-[collapsible=icon]:hidden">
               <p className="truncate text-sm font-semibold tracking-tight">
@@ -731,7 +781,7 @@ function LoadingVault() {
               Opening Safeory
             </p>
             <p className="mt-1 text-xs text-[var(--text-secondary)]">
-              Loading your encrypted local vault…
+              Loading your encrypted local vaultâ€¦
             </p>
           </div>
         </div>

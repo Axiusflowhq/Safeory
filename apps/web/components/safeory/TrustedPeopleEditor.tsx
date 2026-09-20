@@ -8,7 +8,9 @@ import type {
 } from "@safeory/contracts"
 import {
   Delete02Icon,
+  DeviceAccessIcon,
   UserAdd01Icon,
+  UserKeyIcon,
   UserMultipleIcon,
 } from "@hugeicons/core-free-icons"
 import { HugeiconsIcon } from "@hugeicons/react"
@@ -430,7 +432,7 @@ export function TrustedPeopleEditor({
             onClick={() => setPrincipals((current) => [...current, emptyPrincipal()])}
           >
             <HugeiconsIcon
-              icon={UserAdd01Icon}
+              icon={UserKeyIcon}
               strokeWidth={2}
               data-icon="inline-start"
             />
@@ -472,6 +474,11 @@ export function TrustedPeopleEditor({
                       )
                     }
                   >
+                    <HugeiconsIcon
+                      icon={Delete02Icon}
+                      strokeWidth={2}
+                      data-icon="inline-start"
+                    />
                     Remove identity
                   </Button>
                 </div>
@@ -529,6 +536,11 @@ export function TrustedPeopleEditor({
                         })
                       }
                     >
+                      <HugeiconsIcon
+                        icon={DeviceAccessIcon}
+                        strokeWidth={2}
+                        data-icon="inline-start"
+                      />
                       Add device
                     </Button>
                   </div>
@@ -611,6 +623,11 @@ export function TrustedPeopleEditor({
                             })
                           }
                         >
+                          <HugeiconsIcon
+                            icon={Delete02Icon}
+                            strokeWidth={2}
+                            data-icon="inline-start"
+                          />
                           Remove
                         </Button>
                         {persistedDeviceIds.has(device.id) &&

@@ -1,4 +1,24 @@
-export { saveSnapshot, loadSnapshot, clearSnapshot } from "./persistence";
+export {
+  saveSnapshot,
+  loadSnapshot,
+  clearSnapshot,
+  saveAttachmentImport,
+  saveAttachmentDelete,
+  saveItemPurge,
+  loadAttachmentManifest,
+  loadAttachmentChunk,
+  loadAllAttachmentState,
+  loadVaultBackupState,
+  replaceVaultFromBackup,
+} from "./persistence";
+export type {
+  LoadedAttachmentManifest,
+  PersistedAttachmentManifest,
+  PersistedAttachmentChunk,
+  PersistedAttachmentState,
+  PersistedVaultBackupState,
+  ItemPurgeAttachmentWrite,
+} from "./persistence";
 export { VaultDurabilityError, VaultSession } from "./session";
 export type {
   WasmVaultLike,
@@ -12,4 +32,6 @@ export type {
   TrustedPrincipal,
   PairingChallengeV1,
   PairingProofV1,
+  AttachmentSummary,
+  TrashedItemSummary,
 } from "./session";

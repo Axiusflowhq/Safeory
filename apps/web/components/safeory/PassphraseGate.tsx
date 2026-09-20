@@ -4,9 +4,10 @@ import { useRef, useState } from "react"
 import {
   AlertCircleIcon,
   ArrowLeft01Icon,
-  Key01Icon,
+  DatabaseRestoreIcon,
+  KeyRoundIcon,
   LockKeyIcon,
-  ShieldKeyIcon,
+  VaultIcon,
 } from "@hugeicons/core-free-icons"
 import { HugeiconsIcon } from "@hugeicons/react"
 
@@ -28,8 +29,14 @@ interface Props {
   error: string | null
   onSubmit: (passphrase: string) => void
   onRecoveryUnlock: (secretHex: string) => void
+  onImportBackup?: (
+    snapshotJson: string,
+    passphrase: string
+  ) => void | Promise<unknown>
   hasRecoveryKit?: boolean
 }
+
+const MAX_BACKUP_FILE_BYTES = 512 * 1024 * 1024
 
 type Strength = {
   label: string
@@ -64,10 +71,15 @@ export function PassphraseGate({
   error,
   onSubmit,
   onRecoveryUnlock,
+  onImportBackup,
   hasRecoveryKit,
 }: Props) {
   const [passphrase, setPassphrase] = useState("")
   const [showRecovery, setShowRecovery] = useState(false)
+  const [showImport, setShowImport] = useState(false)
+  const [importSnapshot, setImportSnapshot] = useState<string | null>(null)
+  const [importFileName, setImportFileName] = useState<string | null>(null)
+  const [importError, setImportError] = useState<string | null>(null)
   const [secret, setSecret] = useState("")
   const [passphraseError, setPassphraseError] = useState<string | null>(null)
   const [recoveryError, setRecoveryError] = useState<string | null>(null)
@@ -75,6 +87,31 @@ export function PassphraseGate({
   const recoveryInputRef = useRef<HTMLInputElement>(null)
   const passphraseStrength = strength(passphrase)
   const isSetup = mode === "setup"
+  const isImport = isSetup && showImport
+
+  async function selectBackup(file: File | undefined) {
+    setImportSnapshot(null)
+    setImportFileName(null)
+    setImportError(null)
+    if (!file) return
+    if (file.size === 0) {
+      setImportError("The selected backup file is empty.")
+      return
+    }
+    if (file.size > MAX_BACKUP_FILE_BYTES) {
+      setImportError(
+        "This backup is too large to restore safely in the browser."
+      )
+      return
+    }
+    try {
+      const snapshot = await file.text()
+      setImportSnapshot(snapshot)
+      setImportFileName(file.name)
+    } catch {
+      setImportError("Safeory could not read the selected backup file.")
+    }
+  }
 
   return (
     <main className="flex min-h-svh items-center justify-center bg-[var(--surface)] px-4 py-10">
@@ -82,7 +119,15 @@ export function PassphraseGate({
         <div className="border-b bg-[var(--surface-secondary)] px-6 py-6 sm:px-8">
           <div className="mb-5 flex size-11 items-center justify-center rounded-[var(--radius-default)] border bg-[var(--surface)] shadow-[var(--fancy-shadow-basic)]">
             <HugeiconsIcon
-              icon={showRecovery ? ShieldKeyIcon : LockKeyIcon}
+              icon={
+                showRecovery
+                  ? KeyRoundIcon
+                  : isImport
+                    ? DatabaseRestoreIcon
+                    : isSetup
+                      ? VaultIcon
+                      : LockKeyIcon
+              }
               strokeWidth={1.8}
               className="size-5 text-[var(--icon-active)]"
             />
@@ -90,16 +135,20 @@ export function PassphraseGate({
           <h1 className="text-xl font-semibold tracking-tight text-[var(--text-primary)]">
             {showRecovery
               ? "Unlock with recovery key"
-              : isSetup
-                ? "Create your Safeory vault"
-                : "Welcome back"}
+              : isImport
+                ? "Restore encrypted backup"
+                : isSetup
+                  ? "Create your Safeory vault"
+                  : "Welcome back"}
           </h1>
           <p className="mt-1.5 text-sm leading-relaxed text-[var(--text-secondary)]">
             {showRecovery
               ? "Use the recovery key you saved when you created or replaced your recovery kit."
-              : isSetup
-                ? "Choose a master passphrase that only you know. Your vault is encrypted on this device."
-                : "Enter your master passphrase to decrypt your vault on this device."}
+              : isImport
+                ? "Choose a Safeory encrypted backup and authenticate it with the master passphrase that protected that vault."
+                : isSetup
+                  ? "Choose a master passphrase that only you know. Your vault is encrypted on this device."
+                  : "Enter your master passphrase to decrypt your vault on this device."}
           </p>
         </div>
 
@@ -108,9 +157,11 @@ export function PassphraseGate({
             <Alert variant="destructive">
               <HugeiconsIcon icon={AlertCircleIcon} strokeWidth={2} />
               <AlertTitle>
-                {isSetup
-                  ? "Couldn’t create the vault"
-                  : "Couldn’t unlock the vault"}
+                {isImport
+                  ? "Couldn’t restore the backup"
+                  : isSetup
+                    ? "Couldn’t create the vault"
+                    : "Couldn’t unlock the vault"}
               </AlertTitle>
               <AlertDescription>{error}</AlertDescription>
             </Alert>
@@ -120,6 +171,21 @@ export function PassphraseGate({
             <form
               onSubmit={(event) => {
                 event.preventDefault()
+                if (isImport) {
+                  if (importSnapshot === null) {
+                    setImportError("Choose an encrypted Safeory backup first.")
+                    return
+                  }
+                  if (passphrase.length === 0) {
+                    setPassphraseError("Enter the backup’s master passphrase.")
+                    passphraseInputRef.current?.focus()
+                    return
+                  }
+                  setPassphraseError(null)
+                  setImportError(null)
+                  void onImportBackup?.(importSnapshot, passphrase)
+                  return
+                }
                 if (isSetup && passphrase.length < 12) {
                   setPassphraseError(
                     "Use at least 12 characters for your master passphrase."
@@ -132,37 +198,70 @@ export function PassphraseGate({
               }}
             >
               <FieldGroup>
+                {isImport ? (
+                  <Field>
+                    <FieldLabel htmlFor="safeory-backup-file">
+                      Encrypted backup file
+                    </FieldLabel>
+                    <Input
+                      id="safeory-backup-file"
+                      type="file"
+                      accept="application/json,.json"
+                      onChange={(event) =>
+                        void selectBackup(event.target.files?.[0])
+                      }
+                      className="h-10 file:mr-3 file:border-0 file:bg-transparent file:text-sm file:font-medium"
+                      aria-invalid={importError ? true : undefined}
+                      aria-describedby="safeory-backup-file-help"
+                    />
+                    <FieldDescription id="safeory-backup-file-help">
+                      {importFileName
+                        ? `Selected: ${importFileName}`
+                        : "Use the encrypted JSON backup downloaded from Safeory."}
+                    </FieldDescription>
+                    {importError ? (
+                      <FieldError>{importError}</FieldError>
+                    ) : null}
+                  </Field>
+                ) : null}
+
                 <Field>
                   <FieldLabel htmlFor="safeory-master-passphrase">
-                    Master passphrase
+                    {isImport
+                      ? "Backup master passphrase"
+                      : "Master passphrase"}
                   </FieldLabel>
                   <Input
                     ref={passphraseInputRef}
                     id="safeory-master-passphrase"
                     type="password"
-                    autoComplete={isSetup ? "new-password" : "current-password"}
-                    autoFocus
+                    autoComplete={
+                      isSetup && !isImport ? "new-password" : "current-password"
+                    }
+                    autoFocus={!isImport}
                     value={passphrase}
                     onChange={(event) => {
                       setPassphrase(event.target.value)
                       if (passphraseError) setPassphraseError(null)
                     }}
                     placeholder={
-                      isSetup
-                        ? "Create a memorable passphrase"
-                        : "Enter your passphrase"
+                      isImport
+                        ? "Enter the passphrase used by this backup"
+                        : isSetup
+                          ? "Create a memorable passphrase"
+                          : "Enter your passphrase"
                     }
                     className="h-10"
                     aria-invalid={passphraseError ? true : undefined}
                     aria-describedby={
                       passphraseError
                         ? "safeory-master-passphrase-error"
-                        : isSetup
+                        : isSetup && !isImport
                           ? "safeory-master-passphrase-help"
                           : undefined
                     }
                   />
-                  {isSetup && passphrase.length > 0 ? (
+                  {isSetup && !isImport && passphrase.length > 0 ? (
                     <div className="flex items-center justify-between gap-3">
                       <FieldDescription id="safeory-master-passphrase-help">
                         Use at least 12 characters. Longer is better.
@@ -186,14 +285,52 @@ export function PassphraseGate({
                   className="w-full"
                   leadingIcon={
                     <HugeiconsIcon
-                      icon={isSetup ? Key01Icon : LockKeyIcon}
+                      icon={
+                        isImport
+                          ? DatabaseRestoreIcon
+                          : isSetup
+                            ? VaultIcon
+                            : LockKeyIcon
+                      }
                       strokeWidth={2}
                     />
                   }
                 >
-                  {isSetup ? "Create encrypted vault" : "Unlock vault"}
+                  {isImport
+                    ? "Authenticate & restore backup"
+                    : isSetup
+                      ? "Create encrypted vault"
+                      : "Unlock vault"}
                 </FancyButton>
               </FieldGroup>
+
+              {isSetup && onImportBackup ? (
+                <div className="mt-4 border-t pt-4">
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="lg"
+                    className="w-full"
+                    onClick={() => {
+                      setShowImport((current) => !current)
+                      setPassphrase("")
+                      setPassphraseError(null)
+                      setImportSnapshot(null)
+                      setImportFileName(null)
+                      setImportError(null)
+                    }}
+                  >
+                    <HugeiconsIcon
+                      icon={isImport ? ArrowLeft01Icon : DatabaseRestoreIcon}
+                      strokeWidth={2}
+                      data-icon="inline-start"
+                    />
+                    {isImport
+                      ? "Back to new vault setup"
+                      : "Restore encrypted backup instead"}
+                  </Button>
+                </div>
+              ) : null}
 
               {mode === "unlock" ? (
                 <div className="mt-4 border-t pt-4">
@@ -205,7 +342,7 @@ export function PassphraseGate({
                     onClick={() => setShowRecovery(true)}
                   >
                     <HugeiconsIcon
-                      icon={ShieldKeyIcon}
+                      icon={KeyRoundIcon}
                       strokeWidth={2}
                       data-icon="inline-start"
                     />
@@ -275,7 +412,7 @@ export function PassphraseGate({
                   size="medium"
                   className="w-full"
                   leadingIcon={
-                    <HugeiconsIcon icon={ShieldKeyIcon} strokeWidth={2} />
+                    <HugeiconsIcon icon={KeyRoundIcon} strokeWidth={2} />
                   }
                 >
                   Unlock with recovery kit
@@ -300,7 +437,7 @@ export function PassphraseGate({
 
           {mode === "unlock" && hasRecoveryKit === false && !showRecovery ? (
             <Alert>
-              <HugeiconsIcon icon={ShieldKeyIcon} strokeWidth={2} />
+              <HugeiconsIcon icon={KeyRoundIcon} strokeWidth={2} />
               <AlertTitle>Recovery kit not installed</AlertTitle>
               <AlertDescription>
                 Unlock with your passphrase first, then create a recovery kit

@@ -4,8 +4,8 @@ import { useState } from "react"
 import {
   CheckmarkCircle02Icon,
   Copy01Icon,
+  KeyRoundIcon,
   RefreshIcon,
-  ShieldKeyIcon,
 } from "@hugeicons/core-free-icons"
 import { HugeiconsIcon } from "@hugeicons/react"
 
@@ -46,7 +46,7 @@ export function RecoveryKitPanel({
         <div className="flex items-start gap-3">
           <div className="flex size-10 shrink-0 items-center justify-center rounded-[var(--radius-default)] border bg-[var(--surface-secondary)]">
             <HugeiconsIcon
-              icon={ShieldKeyIcon}
+              icon={KeyRoundIcon}
               strokeWidth={1.8}
               className="size-5 text-[var(--icon-active)]"
             />
@@ -72,7 +72,7 @@ export function RecoveryKitPanel({
       {generatedSecret ? (
         <div className="rounded-[var(--radius-default)] border bg-[var(--surface)] p-5 shadow-[var(--fancy-shadow-basic)]">
           <Alert className="mb-4">
-            <HugeiconsIcon icon={ShieldKeyIcon} strokeWidth={2} />
+            <HugeiconsIcon icon={KeyRoundIcon} strokeWidth={2} />
             <AlertTitle>Save this recovery key now</AlertTitle>
             <AlertDescription>
               This is the only time Safeory shows the key in plaintext. Print it
@@ -160,7 +160,7 @@ export function RecoveryKitPanel({
             className="shrink-0"
           >
             <HugeiconsIcon
-              icon={hasRecoveryKit ? RefreshIcon : ShieldKeyIcon}
+              icon={hasRecoveryKit ? RefreshIcon : KeyRoundIcon}
               strokeWidth={2}
               data-icon="inline-start"
             />

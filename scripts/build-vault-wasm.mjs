@@ -1,11 +1,15 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { copyFileSync, existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const WASM_PACK_VERSION = "0.15.0";
 const WASM_TARGET = "wasm32-unknown-unknown";
 const CRATE_PATH = "crates/vault-wasm";
 const PKG_PATH = resolve(CRATE_PATH, "pkg");
+const LOCAL_CONSUMERS = [
+  resolve("apps/web/node_modules/vault-wasm"),
+  resolve("apps/extension/node_modules/vault-wasm"),
+];
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
@@ -62,6 +66,26 @@ function verifyPackage() {
   }
 }
 
+function refreshInstalledWasmBinary() {
+  const source = resolve(PKG_PATH, "vault_wasm_bg.wasm");
+  const sourceBytes = readFileSync(source);
+
+  for (const consumer of LOCAL_CONSUMERS) {
+    const installed = resolve(consumer, "vault_wasm_bg.wasm");
+    if (!existsSync(installed)) continue;
+
+    const installedBytes = readFileSync(installed);
+    if (!sourceBytes.equals(installedBytes)) {
+      copyFileSync(source, installed);
+      console.log(`Refreshed ${installed} from the generated WASM package.`);
+    }
+
+    if (!sourceBytes.equals(readFileSync(installed))) {
+      throw new Error(`Installed vault-wasm binary did not refresh: ${installed}`);
+    }
+  }
+}
+
 try {
   requireTooling();
   run("wasm-pack", [
@@ -75,6 +99,7 @@ try {
     "--locked",
   ]);
   verifyPackage();
+  refreshInstalledWasmBinary();
   console.log(`Generated ${CRATE_PATH}/pkg with wasm-pack ${WASM_PACK_VERSION}.`);
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error));

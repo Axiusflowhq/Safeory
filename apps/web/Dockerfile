@@ -13,13 +13,13 @@ RUN wasm-pack build crates/vault-wasm \
 
 FROM node:24-bookworm-slim AS web-builder
 
-RUN npm install --global pnpm@12.4.1
+COPY --from=oven/bun:1.4.1 /usr/local/bin/bun /usr/local/bin/bun
 
 WORKDIR /src
 COPY . .
 COPY --from=wasm-builder /src/crates/vault-wasm/pkg ./crates/vault-wasm/pkg
-RUN pnpm install --frozen-lockfile \
-    && pnpm --filter @safeory/web build
+RUN bun install --frozen-lockfile \
+    && bun run --filter @safeory/web build
 
 FROM caddy:2.11.4-alpine
 

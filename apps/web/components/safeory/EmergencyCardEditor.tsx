@@ -2,7 +2,7 @@
 
 import { useState } from "react"
 import type { EmergencyCard } from "@safeory/contracts"
-import { ShieldKeyIcon } from "@hugeicons/core-free-icons"
+import { IdCardIcon } from "@hugeicons/core-free-icons"
 import { HugeiconsIcon } from "@hugeicons/react"
 
 import { Badge } from "@/components/ui/badge"
@@ -31,7 +31,7 @@ export function EmergencyCardEditor({ initial, onSaveInstructions }: Props) {
           <div className="flex items-center gap-2">
             <div className="flex size-9 items-center justify-center rounded-[var(--radius-default)] border bg-[var(--surface-secondary)]">
               <HugeiconsIcon
-                icon={ShieldKeyIcon}
+                icon={IdCardIcon}
                 strokeWidth={1.8}
                 className="size-4 text-[var(--icon-active)]"
               />

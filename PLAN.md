@@ -11,7 +11,7 @@ Rule: cloud integration starts only after the local platform below is stable.
 ### PRIVATE LIFE
 | # | Item | Status |
 |---|------|--------|
-| 1 | Documents | ✅ Done — encrypted metadata (number masked), search, trash/restore |
+| 1 | Documents | ✅ Done — encrypted metadata (number masked), search, browser/native trash/restore + permanent purge |
 | 2 | Important records | ✅ Done — secure notes, credentials (masked + generator + guarded 30s clipboard copy) |
 | 3 | Property | ✅ Done — masked address/reference, ownership validation |
 | 4 | Insurance | ✅ Done — masked policy number, renewal feeds Today |
@@ -49,7 +49,7 @@ Rule: cloud integration starts only after the local platform below is stable.
 | 20 | E2EE sharing | 🟡 Partial — `vault-sharing` v2 provides recipient-confidential X25519 envelopes plus a separate Ed25519 trusted-device pairing/signing foundation; share-v2's `sender_public` itself remains unauthenticated and there is no transport/release protocol |
 | 21 | Recovery kit | ✅ Done — save/print, install/confirm, live-key replacement, unlock-with-kit, recovery-authenticated backup restore with new passphrase, 2-of-3 social recovery crypto + e2e test |
 | 22 | Device management | 🟡 Partial — configurable auto-lock, lock-on-background, settings, Strict local lock shortcut; no multi-device, no revoke, no travel mode |
-| 23 | Portable export | ✅ Done — readable JSON + encrypted DB backup to user-chosen paths |
+| 23 | Portable export | ✅ Done — readable JSON + authenticated encrypted browser/native backups, including encrypted attachments |
 
 ## What is implemented but not wired (crypto-ready, no IPC/UI)
 - `vault-sharing`: seal/open envelopes for item keys and recovery shares.
@@ -75,6 +75,6 @@ autofill is a core extension feature and is intentionally in scope.
 ## Verification gates (must stay green)
 `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
 `cargo test --workspace`, `cargo audit`, `cargo deny check advisories bans licenses sources`,
-frozen-lockfile JavaScript install, Compose config validation, `pnpm typecheck`, `pnpm test:browser`, `pnpm lint`,
-`pnpm check:icons`, `pnpm build`, and `pnpm audit:js`. Dependency additions follow the review
+frozen-lockfile JavaScript install, Compose config validation, `bun run typecheck`, `bun run test:browser`, `bun run lint`,
+`bun run check:icons`, `bun run build`, and `bun run audit:js`. Dependency additions follow the review
 rule in `docs/security/dependency-risk-register.md` — deny failures block, no silent ignores.

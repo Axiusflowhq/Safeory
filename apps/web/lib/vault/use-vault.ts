@@ -4,9 +4,11 @@ import { useCallback, useEffect, useRef, useState } from "react"
 
 import {
   VaultDurabilityError,
+  type AttachmentSummary,
   type DeadlineSummary,
   type EmergencyCard,
   type EmergencyContact,
+  type TrashedItemSummary,
   type TrustedPrincipal,
   type VaultSession,
 } from "@safeory/contracts"
@@ -50,6 +52,7 @@ export function useVault() {
   const operationTailRef = useRef<Promise<void>>(Promise.resolve())
   const [phase, setPhase] = useState<VaultPhase>("loading")
   const [items, setItems] = useState<ListedEntry[]>([])
+  const [trashedItems, setTrashedItems] = useState<TrashedItemSummary[]>([])
   const [error, setError] = useState<string | null>(null)
   const [hasRecoveryKit, setHasRecoveryKit] = useState(false)
   const [generatedSecret, setGeneratedSecret] = useState<string | null>(null)
@@ -62,6 +65,7 @@ export function useVault() {
     const session = sessionRef.current
     if (!session || !session.isUnlocked()) {
       setItems([])
+      setTrashedItems([])
       setEmergencyCardSnapshot(null)
       return
     }
@@ -69,6 +73,7 @@ export function useVault() {
     const list = session.listItems() as ListedEntry[]
     list.sort((a, b) => a.item.title.localeCompare(b.item.title))
     setItems(list)
+    setTrashedItems(session.listTrashedItems())
     setEmergencyCardSnapshot(session.getEmergencyCard())
     setHasRecoveryKit(session.hasRecoveryKit())
   }, [])
@@ -124,7 +129,9 @@ export function useVault() {
   }, [refresh])
 
   const run = useCallback(
-    (operation: (session: VaultSession) => void | Promise<void>): Promise<boolean> => {
+    (
+      operation: (session: VaultSession) => void | Promise<void>
+    ): Promise<boolean> => {
       const session = sessionRef.current
       if (!session) return Promise.resolve(false)
 
@@ -141,6 +148,7 @@ export function useVault() {
             clearSessionResume()
             sessionRef.current = null
             setItems([])
+            setTrashedItems([])
             setEmergencyCardSnapshot(null)
             setHasRecoveryKit(false)
             setGeneratedSecret(null)
@@ -170,6 +178,16 @@ export function useVault() {
     [run]
   )
 
+  const importEncryptedBackup = useCallback(
+    (snapshotJson: string, passphrase: string) =>
+      run(async (session) => {
+        await session.importEncryptedSnapshot(snapshotJson, passphrase)
+        await refreshSessionResume(session)
+        setPhase("open")
+      }),
+    [run]
+  )
+
   const unlock = useCallback(
     (passphrase: string) =>
       run(async (session) => {
@@ -190,6 +208,15 @@ export function useVault() {
     [run]
   )
 
+  const changePassphrase = useCallback(
+    (currentPassphrase: string, newPassphrase: string) =>
+      run(async (session) => {
+        await session.changePassphrase(currentPassphrase, newPassphrase)
+        await refreshSessionResume(session)
+      }),
+    [run]
+  )
+
   const lock = useCallback(() => {
     try {
       if (!clearSessionResume()) {
@@ -200,6 +227,7 @@ export function useVault() {
       }
       sessionRef.current?.lock()
       setItems([])
+      setTrashedItems([])
       setEmergencyCardSnapshot(null)
       setPhase("unlock")
     } catch (lockError: unknown) {
@@ -227,6 +255,105 @@ export function useVault() {
         await session.trashItem(id, expectedRevision, Date.now())
       }),
     [run]
+  )
+
+  const restoreItem = useCallback(
+    (id: string, expectedRevision: number) =>
+      run(async (session) => {
+        await session.restoreItem(id, expectedRevision)
+      }),
+    [run]
+  )
+
+  const purgeItem = useCallback(
+    (id: string, expectedRevision: number) =>
+      run(async (session) => {
+        await session.purgeItem(id, expectedRevision)
+      }),
+    [run]
+  )
+
+  const getAttachments = useCallback(
+    async (entry: EditableEntry): Promise<AttachmentSummary[]> => {
+      const session = sessionRef.current
+      if (!session || !session.isUnlocked()) return []
+      try {
+        setError(null)
+        return await session.listAttachments(
+          entry.item.id,
+          entry.item.attachments
+        )
+      } catch (attachmentError: unknown) {
+        setError(errorMessage(attachmentError))
+        return []
+      }
+    },
+    []
+  )
+
+  const addAttachment = useCallback(
+    async (entry: EditableEntry, file: File): Promise<EditableEntry | null> => {
+      let updated: EditableEntry | null = null
+      const saved = await run(async (session) => {
+        const result = await session.addAttachment(
+          entry.item.id,
+          entry.revision,
+          file
+        )
+        const item = JSON.parse(session.getItem(entry.item.id)) as VaultItemJson
+        updated = { item, revision: result.itemRevision }
+      })
+      return saved ? updated : null
+    },
+    [run]
+  )
+
+  const deleteAttachment = useCallback(
+    async (
+      entry: EditableEntry,
+      summary: AttachmentSummary
+    ): Promise<EditableEntry | null> => {
+      let updated: EditableEntry | null = null
+      const saved = await run(async (session) => {
+        const revision = await session.deleteAttachment(
+          entry.item.id,
+          entry.revision,
+          summary,
+          Date.now()
+        )
+        const item = JSON.parse(session.getItem(entry.item.id)) as VaultItemJson
+        updated = { item, revision }
+      })
+      return saved ? updated : null
+    },
+    [run]
+  )
+
+  const downloadAttachment = useCallback(
+    async (
+      entry: EditableEntry,
+      summary: AttachmentSummary
+    ): Promise<{ summary: AttachmentSummary; blob: Blob } | null> => {
+      const session = sessionRef.current
+      if (!session || !session.isUnlocked()) return null
+      try {
+        setError(null)
+        const downloaded = await session.downloadAttachment(
+          entry.item.id,
+          summary.id
+        )
+        if (downloaded.summary.revision !== summary.revision) {
+          throw new Error(
+            "The attachment changed before it could be downloaded."
+          )
+        }
+        return downloaded
+      } catch (attachmentError: unknown) {
+        setError(errorMessage(attachmentError))
+        return null
+      }
+    },
+    []
   )
 
   const getItem = useCallback((entry: ListedEntry): EditableEntry | null => {
@@ -340,21 +467,60 @@ export function useVault() {
     }
   }, [])
 
+  const exportReadableVault = useCallback((): string | null => {
+    const session = sessionRef.current
+    if (!session || !session.isUnlocked()) return null
+
+    try {
+      setError(null)
+      return session.exportReadableVault()
+    } catch (exportError: unknown) {
+      setError(errorMessage(exportError))
+      return null
+    }
+  }, [])
+
+  const exportEncryptedSnapshot = useCallback(async (): Promise<
+    string | null
+  > => {
+    const session = sessionRef.current
+    if (!session || !session.isUnlocked()) return null
+
+    try {
+      setError(null)
+      return await session.exportEncryptedSnapshot()
+    } catch (exportError: unknown) {
+      setError(errorMessage(exportError))
+      return null
+    }
+  }, [])
+
   return {
     phase,
     items,
+    trashedItems,
     error,
     hasRecoveryKit,
     generatedSecret,
     newId,
     generatePassword,
+    exportReadableVault,
+    exportEncryptedSnapshot,
     create,
+    importEncryptedBackup,
     unlock,
     unlockWithRecoveryKit,
+    changePassphrase,
     lock,
     putItem,
     updateItem,
     trashItem,
+    restoreItem,
+    purgeItem,
+    getAttachments,
+    addAttachment,
+    deleteAttachment,
+    downloadAttachment,
     getItem,
     getDeadlines,
     getEmergencyCard,

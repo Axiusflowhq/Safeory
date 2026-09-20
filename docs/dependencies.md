@@ -1,4 +1,4 @@
-﻿# Dependency Baseline
+# Dependency Baseline
 
 Verified: 2026-09-15
 
@@ -7,7 +7,7 @@ Safeory uses stable production releases only for core dependencies. Alpha, beta,
 | Dependency | Version | Verified date | Official source | Reason |
 | --- | ---: | --- | --- | --- |
 | Rust | 1.98.1 | 2026-09-15 | rust-lang.org releases | Primary security/business core toolchain |
-| pnpm | 12.4.1 | 2026-09-15 | npm registry / pnpm | Reproducible JS workspace manager |
+| Bun | 1.4.1 | 2026-09-20 | bun.sh | Primary reproducible JavaScript workspace/package manager |
 | TypeScript | 7.0.2 | 2026-09-15 | npm registry | Strict frontend/contracts typing |
 | React / React DOM | 19.2.8 | 2026-09-19 | npm registry | Browser presentation layer |
 | Vite | 8.3.0 | 2026-09-15 | npm registry / vite.dev | Frontend build/dev tooling |
@@ -15,7 +15,7 @@ Safeory uses stable production releases only for core dependencies. Alpha, beta,
 | Tailwind CSS / @tailwindcss/vite | 4.3.3 | 2026-09-15 | npm registry | UI styling and Vite integration |
 | @base-ui/react | 1.8.0 | 2026-09-15 | npm registry / base-ui.com | Accessible primitives under shadcn |
 | shadcn CLI | 4.21.0 | 2026-09-15 | npm registry / ui.shadcn.com | Source-owned component generator |
-| @solar-icons/react | 2.2.0 | 2026-09-15 | npm registry / Solar Icons | Product-specific React icons |
+| @solar-icons/react | 2.3.0 | 2026-09-20 | npm registry / Solar Icons | Product-specific React icons |
 | @hugeicons/react | 1.1.10 | 2026-09-15 | npm registry / Hugeicons | React renderer for Hugeicons |
 | @hugeicons/core-free-icons | 4.3.3 | 2026-09-15 | npm registry / Hugeicons | Free Hugeicons data used by the React renderer |
 | Oxlint | 1.83.0 | 2026-09-15 | npm registry / oxc.rs | TypeScript/React linting without an incompatible TypeScript peer ceiling |
@@ -49,7 +49,7 @@ Safeory uses stable production releases only for core dependencies. Alpha, beta,
 1. Verify each stable version from the official registry/project source.
 2. Check release recency, compatibility, and published advisories.
 3. Run `cargo audit` after generating `Cargo.lock`.
-4. Run `pnpm audit --prod` after generating `pnpm-lock.yaml`.
+4. Run `bun audit` after generating `bun.lock`.
 5. Run `cargo deny check` in CI for advisories, licenses, sources, and duplicate policy.
 6. Record any exception in an ADR; never suppress an advisory silently.
 

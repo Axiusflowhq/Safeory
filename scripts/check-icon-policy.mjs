@@ -14,6 +14,13 @@ const sourceExtensions = new Set([".js", ".jsx", ".ts", ".tsx"]);
 const ignoredDirectories = new Set(["node_modules", "dist", "target", ".git"]);
 const errors = [];
 
+function isAllowedPackage(moduleName) {
+  return [...allowedPackages].some(
+    (packageName) =>
+      moduleName === packageName || moduleName.startsWith(`${packageName}/`),
+  );
+}
+
 function walk(directory) {
   if (!existsSync(directory)) return [];
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -36,7 +43,7 @@ for (const root of [
         "peerDependencies",
       ]) {
         for (const packageName of Object.keys(packageJson[groupName] ?? {})) {
-          if (iconLike.test(packageName) && !allowedPackages.has(packageName)) {
+          if (iconLike.test(packageName) && !isAllowedPackage(packageName)) {
             errors.push(
               `Disallowed icon dependency in ${file}: ${packageName}`,
             );
@@ -50,7 +57,7 @@ for (const root of [
     const source = readFileSync(file, "utf8");
     for (const match of source.matchAll(/from\s+["']([^"']+)["']/g)) {
       const moduleName = match[1];
-      if (iconLike.test(moduleName) && !allowedPackages.has(moduleName)) {
+      if (iconLike.test(moduleName) && !isAllowedPackage(moduleName)) {
         errors.push(`Disallowed icon import in ${file}: ${moduleName}`);
       }
     }

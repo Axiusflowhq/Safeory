@@ -4,12 +4,15 @@
 
 use wasm_bindgen::prelude::*;
 
-use vault_crypto::{RecoverySecret, SessionResumeSecret, SessionResumeWrapV1};
+use vault_crypto::{
+    EncryptedAttachmentV1, RecoverySecret, SessionResumeSecret, SessionResumeWrapV1,
+};
 use vault_sharing::PairingProofV1;
 
 use crate::{BrowserVault, DeadlineEntry, WasmVaultError, generate_strong_password};
 
 const SESSION_RESUME_PAYLOAD_VERSION: u16 = 2;
+const READABLE_EXPORT_FORMAT_VERSION: u16 = 1;
 
 fn js_err(e: WasmVaultError) -> JsValue {
     JsValue::from_str(&e.to_string())
@@ -59,6 +62,17 @@ impl WasmVault {
 
     pub fn unlock(&mut self, passphrase: &str) -> Result<(), JsValue> {
         self.inner.unlock(passphrase).map_err(js_err)
+    }
+
+    #[wasm_bindgen(js_name = changePassphrase)]
+    pub fn change_passphrase(
+        &mut self,
+        current_passphrase: &str,
+        new_passphrase: &str,
+    ) -> Result<(), JsValue> {
+        self.inner
+            .change_passphrase(current_passphrase, new_passphrase)
+            .map_err(js_err)
     }
 
     pub fn lock(&mut self) {
@@ -138,6 +152,15 @@ impl WasmVault {
         serde_json::to_string(&projected).map_err(|_| ser_err())
     }
 
+    /// Export the complete active vault as explicit plaintext JSON. This is a
+    /// deliberate disclosure boundary for user-initiated portable export: all
+    /// active item fields and the Emergency Card may cross to JS, but root-key,
+    /// passphrase, recovery-secret, and session-resume material never do.
+    #[wasm_bindgen(js_name = exportReadableJson)]
+    pub fn export_readable_json(&self) -> Result<String, JsValue> {
+        readable_export_json(&self.inner).map_err(js_err)
+    }
+
     /// List redacted local deadline metadata for an explicitly supplied local
     /// calendar date. Full record fields remain inside WASM.
     #[wasm_bindgen(js_name = listDeadlinesJson)]
@@ -181,6 +204,135 @@ impl WasmVault {
             .map_err(js_err)
     }
 
+    #[wasm_bindgen(js_name = beginAttachmentImportJson)]
+    pub fn begin_attachment_import_json(
+        &self,
+        owner_item_id: &str,
+        expected_item_revision: u64,
+        filename: &str,
+        plaintext_size: u64,
+    ) -> Result<String, JsValue> {
+        let owner_item_id = parse_uuid(owner_item_id)?;
+        let summary = self
+            .inner
+            .begin_attachment_import(
+                owner_item_id,
+                expected_item_revision,
+                filename,
+                plaintext_size,
+            )
+            .map_err(js_err)?;
+        serde_json::to_string(&summary).map_err(|_| ser_err())
+    }
+
+    #[wasm_bindgen(js_name = encryptAttachmentImportChunk)]
+    pub fn encrypt_attachment_import_chunk(
+        &self,
+        attachment_id: &str,
+        index: u32,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, JsValue> {
+        let attachment_id = parse_uuid(attachment_id)?;
+        self.inner
+            .encrypt_attachment_import_chunk(attachment_id, index, plaintext)
+            .map_err(js_err)
+    }
+
+    #[wasm_bindgen(js_name = cancelAttachmentImport)]
+    pub fn cancel_attachment_import(&self, attachment_id: &str) -> Result<(), JsValue> {
+        let attachment_id = parse_uuid(attachment_id)?;
+        self.inner.cancel_attachment_import(attachment_id);
+        Ok(())
+    }
+
+    #[wasm_bindgen(js_name = commitAttachmentImportJson)]
+    pub fn commit_attachment_import_json(&self, attachment_id: &str) -> Result<String, JsValue> {
+        let attachment_id = parse_uuid(attachment_id)?;
+        let committed = self
+            .inner
+            .commit_attachment_import(attachment_id)
+            .map_err(js_err)?;
+        let encrypted_record_json =
+            serde_json::to_string(&committed.encrypted_attachment).map_err(|_| ser_err())?;
+        serde_json::to_string(&AttachmentImportCommitPayload {
+            summary: committed.summary,
+            item_revision: committed.item_revision,
+            encrypted_record_json,
+        })
+        .map_err(|_| ser_err())
+    }
+
+    #[wasm_bindgen(js_name = describeAttachmentJson)]
+    pub fn describe_attachment_json(
+        &self,
+        owner_item_id: &str,
+        attachment_id: &str,
+        encrypted_record_json: &str,
+    ) -> Result<String, JsValue> {
+        let owner_item_id = parse_uuid(owner_item_id)?;
+        let attachment_id = parse_uuid(attachment_id)?;
+        let encrypted: EncryptedAttachmentV1 =
+            serde_json::from_str(encrypted_record_json).map_err(|_| ser_err())?;
+        let summary = self
+            .inner
+            .describe_attachment(owner_item_id, attachment_id, &encrypted)
+            .map_err(js_err)?;
+        serde_json::to_string(&summary).map_err(|_| ser_err())
+    }
+
+    #[wasm_bindgen(js_name = decryptAttachmentChunk)]
+    pub fn decrypt_attachment_chunk(
+        &self,
+        owner_item_id: &str,
+        attachment_id: &str,
+        encrypted_record_json: &str,
+        index: u32,
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, JsValue> {
+        let owner_item_id = parse_uuid(owner_item_id)?;
+        let attachment_id = parse_uuid(attachment_id)?;
+        let encrypted: EncryptedAttachmentV1 =
+            serde_json::from_str(encrypted_record_json).map_err(|_| ser_err())?;
+        self.inner
+            .decrypt_attachment_chunk(owner_item_id, attachment_id, &encrypted, index, ciphertext)
+            .map_err(js_err)
+    }
+
+    #[wasm_bindgen(js_name = deleteAttachmentJson)]
+    pub fn delete_attachment_json(
+        &self,
+        owner_item_id: &str,
+        attachment_id: &str,
+        expected_item_revision: u64,
+        expected_attachment_revision: u64,
+        encrypted_record_json: &str,
+        deleted_at_ms: u64,
+    ) -> Result<String, JsValue> {
+        let owner_item_id = parse_uuid(owner_item_id)?;
+        let attachment_id = parse_uuid(attachment_id)?;
+        let encrypted: EncryptedAttachmentV1 =
+            serde_json::from_str(encrypted_record_json).map_err(|_| ser_err())?;
+        let committed = self
+            .inner
+            .delete_attachment(
+                owner_item_id,
+                attachment_id,
+                expected_item_revision,
+                expected_attachment_revision,
+                &encrypted,
+                deleted_at_ms,
+            )
+            .map_err(js_err)?;
+        let encrypted_record_json =
+            serde_json::to_string(&committed.tombstone).map_err(|_| ser_err())?;
+        serde_json::to_string(&AttachmentDeleteCommitPayload {
+            item_revision: committed.item_revision,
+            attachment_revision: committed.attachment_revision,
+            encrypted_record_json,
+        })
+        .map_err(|_| ser_err())
+    }
+
     /// Trash an item; returns the new revision.
     #[wasm_bindgen(js_name = trashItem)]
     pub fn trash_item(
@@ -193,6 +345,70 @@ impl WasmVault {
         self.inner
             .trash_item(id, expected_revision, deleted_at_ms)
             .map_err(js_err)
+    }
+
+    #[wasm_bindgen(js_name = listTrashedItemsJson)]
+    pub fn list_trashed_items_json(&self) -> Result<String, JsValue> {
+        let items = self.inner.list_trashed_items().map_err(js_err)?;
+        serde_json::to_string(&items).map_err(|_| ser_err())
+    }
+
+    #[wasm_bindgen(js_name = restoreItem)]
+    pub fn restore_item(&self, id: &str, expected_revision: u64) -> Result<u64, JsValue> {
+        let id = parse_uuid(id)?;
+        self.inner
+            .restore_item(id, expected_revision)
+            .map_err(js_err)
+    }
+
+    #[wasm_bindgen(js_name = trashedAttachmentIdsJson)]
+    pub fn trashed_attachment_ids_json(
+        &self,
+        id: &str,
+        expected_revision: u64,
+    ) -> Result<String, JsValue> {
+        let id = parse_uuid(id)?;
+        let ids = self
+            .inner
+            .trashed_attachment_ids(id, expected_revision)
+            .map_err(js_err)?;
+        serde_json::to_string(&ids).map_err(|_| ser_err())
+    }
+
+    #[wasm_bindgen(js_name = purgeItemJson)]
+    pub fn purge_item_json(
+        &self,
+        id: &str,
+        expected_revision: u64,
+        attachment_records_json: &str,
+    ) -> Result<String, JsValue> {
+        let id = parse_uuid(id)?;
+        let attachments: Vec<EncryptedAttachmentV1> =
+            serde_json::from_str(attachment_records_json).map_err(|_| ser_err())?;
+        let committed = self
+            .inner
+            .purge_item(id, expected_revision, &attachments)
+            .map_err(js_err)?;
+        let attachments = committed
+            .attachments
+            .into_iter()
+            .map(|attachment| {
+                let encrypted_record_json =
+                    serde_json::to_string(&attachment.tombstone).map_err(|_| ser_err())?;
+                Ok(ItemPurgeAttachmentPayload {
+                    id: attachment.id,
+                    expected_revision: attachment.expected_revision,
+                    attachment_revision: attachment.attachment_revision,
+                    chunk_count: attachment.chunk_count,
+                    encrypted_record_json,
+                })
+            })
+            .collect::<Result<Vec<_>, JsValue>>()?;
+        serde_json::to_string(&ItemPurgeCommitPayload {
+            item_revision: committed.item_revision,
+            attachments,
+        })
+        .map_err(|_| ser_err())
     }
 
     /// Get the Emergency Card as `{ card, revision }` JSON, or `null`.
@@ -327,6 +543,49 @@ struct EmergencyCardEntry {
     revision: u64,
 }
 
+#[derive(serde::Serialize)]
+struct ReadableVaultExport {
+    format: &'static str,
+    format_version: u16,
+    items: Vec<ReadableItemEntry>,
+    emergency_card: Option<EmergencyCardEntry>,
+}
+
+#[derive(serde::Serialize)]
+struct ReadableItemEntry {
+    item: vault_models::VaultItem,
+    revision: u64,
+}
+
+#[derive(serde::Serialize)]
+struct AttachmentImportCommitPayload {
+    summary: crate::BrowserAttachmentSummary,
+    item_revision: u64,
+    encrypted_record_json: String,
+}
+
+#[derive(serde::Serialize)]
+struct AttachmentDeleteCommitPayload {
+    item_revision: u64,
+    attachment_revision: u64,
+    encrypted_record_json: String,
+}
+
+#[derive(serde::Serialize)]
+struct ItemPurgeAttachmentPayload {
+    id: uuid::Uuid,
+    expected_revision: u64,
+    attachment_revision: u64,
+    chunk_count: u64,
+    encrypted_record_json: String,
+}
+
+#[derive(serde::Serialize)]
+struct ItemPurgeCommitPayload {
+    item_revision: u64,
+    attachments: Vec<ItemPurgeAttachmentPayload>,
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SessionResumePayload {
@@ -351,6 +610,26 @@ fn deadline_entries_json(entries: Vec<DeadlineEntry>) -> Result<String, serde_js
     serde_json::to_string(&projected)
 }
 
+fn readable_export_json(vault: &BrowserVault) -> Result<String, WasmVaultError> {
+    let items = vault
+        .list_items()?
+        .into_iter()
+        .map(|(item, revision)| ReadableItemEntry { item, revision })
+        .collect();
+    let emergency_card = vault
+        .get_emergency_card()?
+        .map(|(card, revision)| EmergencyCardEntry { card, revision });
+    let payload = ReadableVaultExport {
+        format: "safeory-readable-export",
+        format_version: READABLE_EXPORT_FORMAT_VERSION,
+        items,
+        emergency_card,
+    };
+    serde_json::to_string(&payload)
+        .map_err(vault_storage::StorageError::from)
+        .map_err(WasmVaultError::from)
+}
+
 fn parse_uuid(s: &str) -> Result<uuid::Uuid, JsValue> {
     uuid::Uuid::parse_str(s).map_err(|_| JsValue::from_str("invalid item id"))
 }
@@ -362,7 +641,7 @@ fn parse_secret(hex: &str) -> Result<RecoverySecret, JsValue> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vault_models::VaultItem;
+    use vault_models::{EmergencyCard, VaultItem};
 
     #[test]
     fn deadline_projection_excludes_secret_fields_and_notes() {
@@ -398,5 +677,44 @@ mod tests {
                 "title",
             ]
         );
+    }
+
+    #[test]
+    fn readable_export_is_explicit_full_plaintext_and_requires_unlock() {
+        const SECRET: &str = "READABLE-EXPORT-SECRET";
+        let mut vault = BrowserVault::new_empty();
+        vault.create("correct horse battery").expect("create");
+        let item = VaultItem::secure_note("Export me", SECRET);
+        let item_id = item.id;
+        vault.put_item(&item).expect("put");
+        let mut card = EmergencyCard::empty();
+        card.selected_item_ids.push(item_id);
+        card.instructions = "Call the executor".to_owned();
+        vault.set_emergency_card(&card).expect("set emergency card");
+        let recovery_secret_hex =
+            BrowserVault::generate_recovery_secret().expect("recovery secret");
+        let recovery_secret = RecoverySecret::from_hex(&recovery_secret_hex).expect("parse secret");
+        vault
+            .install_recovery_kit(&recovery_secret)
+            .expect("install recovery kit");
+
+        let json = readable_export_json(&vault).expect("readable export");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("parse export");
+        assert_eq!(value["format"], "safeory-readable-export");
+        assert_eq!(value["format_version"], READABLE_EXPORT_FORMAT_VERSION);
+        assert_eq!(value["items"].as_array().expect("items").len(), 1);
+        assert_eq!(value["items"][0]["item"]["id"], item_id.to_string());
+        assert!(json.contains(SECRET));
+        assert_eq!(
+            value["emergency_card"]["card"]["instructions"],
+            "Call the executor"
+        );
+        assert!(!json.contains(&recovery_secret_hex));
+
+        vault.lock();
+        assert!(matches!(
+            readable_export_json(&vault),
+            Err(WasmVaultError::Locked)
+        ));
     }
 }

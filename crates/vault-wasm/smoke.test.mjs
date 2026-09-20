@@ -69,6 +69,13 @@ if (!lockedRestoreFailed) throw new Error("restored vault should start locked");
 restored.unlock(pass);
 const refetched = JSON.parse(restored.getItemJson(item.id));
 if (refetched.title !== "Bank password") throw new Error("post-restore decrypt mismatch");
+const readableExport = JSON.parse(restored.exportReadableJson());
+if (readableExport.format !== "safeory-readable-export") {
+  throw new Error("readable export format mismatch");
+}
+if (readableExport.items.length !== 1 || readableExport.items[0].item.id !== item.id) {
+  throw new Error("readable export item mismatch");
+}
 
 // 7. Wrong passphrase fails closed.
 const restored2 = WasmVault.fromSnapshotJson(snapshotJson);
@@ -141,7 +148,76 @@ try {
 }
 if (!revivalFailed) throw new Error("retired principal UUID must not be reusable");
 
-// 10. Recovery kit: generate, install, verify, unlock fresh instance with it.
+// 10. Attachment lifecycle through the generated Uint8Array bindings.
+const attachmentPlaintext = new TextEncoder().encode("browser attachment payload");
+const attachmentSummary = JSON.parse(
+  restored.beginAttachmentImportJson(
+    item.id,
+    1n,
+    "proof.txt",
+    BigInt(attachmentPlaintext.byteLength),
+  ),
+);
+const attachmentCiphertext = restored.encryptAttachmentImportChunk(
+  attachmentSummary.id,
+  0,
+  attachmentPlaintext,
+);
+let duplicateChunkFailed = false;
+try {
+  restored.encryptAttachmentImportChunk(attachmentSummary.id, 0, attachmentPlaintext);
+} catch {
+  duplicateChunkFailed = true;
+}
+if (!duplicateChunkFailed) throw new Error("duplicate attachment chunk encryption must fail");
+const attachmentCommit = JSON.parse(
+  restored.commitAttachmentImportJson(attachmentSummary.id),
+);
+if (attachmentCommit.item_revision !== 2) {
+  throw new Error("attachment import should advance item revision to 2");
+}
+const ownerWithAttachment = JSON.parse(restored.getItemJson(item.id));
+if (!ownerWithAttachment.attachments.includes(attachmentSummary.id)) {
+  throw new Error("attachment reference was not committed to parent item");
+}
+const describedAttachment = JSON.parse(
+  restored.describeAttachmentJson(
+    item.id,
+    attachmentSummary.id,
+    attachmentCommit.encrypted_record_json,
+  ),
+);
+if (describedAttachment.filename !== "proof.txt") {
+  throw new Error("attachment manifest description mismatch");
+}
+const decryptedAttachment = restored.decryptAttachmentChunk(
+  item.id,
+  attachmentSummary.id,
+  attachmentCommit.encrypted_record_json,
+  0,
+  attachmentCiphertext,
+);
+if (new TextDecoder().decode(decryptedAttachment) !== "browser attachment payload") {
+  throw new Error("attachment chunk decrypt mismatch");
+}
+const attachmentDelete = JSON.parse(
+  restored.deleteAttachmentJson(
+    item.id,
+    attachmentSummary.id,
+    2n,
+    1n,
+    attachmentCommit.encrypted_record_json,
+    42n,
+  ),
+);
+if (attachmentDelete.item_revision !== 3 || attachmentDelete.attachment_revision !== 2) {
+  throw new Error("attachment delete revisions mismatch");
+}
+if (JSON.parse(restored.getItemJson(item.id)).attachments.length !== 0) {
+  throw new Error("attachment delete did not remove parent reference");
+}
+
+// 11. Recovery kit: generate, install, verify, unlock fresh instance with it.
 const secretHex = WasmVault.generateRecoverySecret();
 if (!/^[0-9a-f]{64}$/.test(secretHex)) throw new Error("recovery secret should be 64 hex chars");
 restored.installRecoveryKit(secretHex);
@@ -155,7 +231,7 @@ if (JSON.parse(viaKit.getItemJson(item.id)).title !== "Bank password") {
   throw new Error("recovery-kit-unlocked decrypt mismatch");
 }
 
-// 11. Password generation: length + all character classes.
+// 12. Password generation: length + all character classes.
 const pw = WasmVault.generatePassword(24);
 if (pw.length !== 24) throw new Error("password length mismatch");
 for (const re of [/[a-z]/, /[A-Z]/, /[0-9]/, /[^A-Za-z0-9]/]) {

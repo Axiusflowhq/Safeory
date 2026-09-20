@@ -13,14 +13,14 @@ Implemented now:
 
 - portable Rust crypto/domain/storage crates with Argon2id root-key wrapping, HKDF-separated per-item keys, XChaCha20-Poly1305 authenticated envelopes, explicit schema/version checks, bounded encrypted records, and negative security tests;
 - `crates/vault-wasm`, which runs the browser vault core in WebAssembly, keeps usable vault keys inside WASM memory, persists ciphertext snapshots through browser storage, and exposes only redacted list/deadline projections until a user explicitly opens a record;
-- `apps/web`, the primary full-vault interface, with setup/unlock/recovery, schema-driven record editing, Emergency Card, recovery kit, search, trash, and a local Today/deadlines view;
+- `apps/web`, the primary full-vault interface, with setup/unlock/recovery, schema-driven record editing, encrypted attachments, Emergency Card, recovery kit, master-passphrase rotation, search, trash/restore/permanent purge, and a local Today/deadlines view;
 - `apps/extension`, an MV3 browser extension with an isolated background vault, exact-origin credential matching, trusted-click discovery, bounded request throttling, one-shot fill authorization, and a compact credential surface;
 - ciphertext-only browser snapshot validation, IndexedDB CAS persistence, and fail-closed durability poisoning when an in-memory mutation cannot be saved;
-- portable emergency/recovery primitives, encrypted legacy/account-closure planning metadata, bounded history and attachment formats in the native core, plus Trust Engine policy/threshold foundations and local dual-key trusted-device pairing verification;
+- portable emergency/recovery primitives, encrypted legacy/account-closure planning metadata, bounded history and attachment formats in the native core, browser encrypted attachment persistence with authenticated chunked add/download/delete and backup/restore, browser readable export, plus Trust Engine policy/threshold foundations and local dual-key trusted-device pairing verification;
 - `apps/api` plus a local Docker integration stack for account/device coordination and opaque encrypted-object sync using PostgreSQL, Valkey, S3-compatible object storage, and SMTP; the production target is AWS as documented in `docs/architecture/aws.md`;
 - pinned Rust/JS lockfiles and dependency/security CI policy.
 
-Not implemented yet: complete browser attachment/export parity, recipient-side durable browser device-key storage/pairing responder, timed emergency release, automated account closure, account/passkey flows, and end-to-end multi-device sync UX.
+Not implemented yet: recipient-side durable browser device-key storage/pairing responder, timed emergency release, automated account closure, account/passkey flows, and end-to-end multi-device sync UX.
 
 ## Validation
 ```text
@@ -32,18 +32,20 @@ cargo deny check advisories bans licenses sources
 rustup target add wasm32-unknown-unknown
 cargo install wasm-pack --version 0.15.0 --locked
 node scripts/build-vault-wasm.mjs
-corepack pnpm install --frozen-lockfile
+bun install --frozen-lockfile
 cp .env.example .env
 docker compose config --quiet
-corepack pnpm typecheck
-corepack pnpm test:browser
-corepack pnpm lint
-corepack pnpm check:icons
-corepack pnpm build
-corepack pnpm audit:js
+bun run typecheck
+bun run test:browser
+bun run lint
+bun run check:icons
+bun run build
+bun run audit:js
 ```
 
 Security design and known dependency risks live under `docs/security/`.
+The JavaScript workspace uses Bun 1.4.1 as its primary package manager; `bun.lock`
+is the canonical JavaScript lockfile.
 The post-V1 strategy (password-manager + autofill + sync/mobile) is in
 `docs/ROADMAP.md`. The product ships as a **web app + browser extension**
 (ADR 0002) running the Rust core compiled to WASM (ADR 0003); see

@@ -13,19 +13,25 @@ mod store;
 
 pub use store::MemStore;
 
-use std::{cell::RefCell, collections::BTreeMap};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet},
+};
 use thiserror::Error;
 use uuid::Uuid;
 use vault_crypto::{
-    AccountRootKey, CryptoError, EncryptedItemV1, RecoverySecret, SessionResumeSecret,
+    ATTACHMENT_CHUNK_SIZE, ATTACHMENT_MAX_FILENAME_CHARS, ATTACHMENT_MAX_PLAINTEXT_BYTES,
+    AccountRootKey, AttachmentCipherContext, AttachmentManifestV1, CryptoError,
+    EncryptedAttachmentV1, EncryptedItemV1, RecoverySecret, SessionResumeSecret,
     SessionResumeWrapV1, decrypt_item, decrypt_item_state, encrypt_item, encrypt_item_state,
-    recovery_secret_matches_root_key, unwrap_root_key, unwrap_root_key_with_recovery_secret,
+    open_attachment_manifest, recovery_secret_matches_root_key, seal_attachment_manifest,
+    unwrap_root_key, unwrap_root_key_with_recovery_secret,
     unwrap_root_key_with_session_resume_secret, wrap_root_key, wrap_root_key_with_recovery_secret,
     wrap_root_key_with_session_resume_secret,
 };
 use vault_models::{
-    EMERGENCY_CARD_ID, EmergencyCard, VaultItem, VaultItemState, VaultItemValidationError,
-    carry_forward_trusted_identity_retirements,
+    EMERGENCY_CARD_ID, EmergencyCard, MAX_ITEM_ATTACHMENTS, VaultItem, VaultItemState,
+    VaultItemValidationError, carry_forward_trusted_identity_retirements,
     reminders::{Deadline, deadline_for_item},
     validate_emergency_card, validate_trusted_devices_unpaired,
     validate_trusted_identity_continuity, validate_vault_item,
@@ -93,6 +99,20 @@ pub enum WasmVaultError {
     PairingChallengeUnavailable,
     #[error("attachment references are managed by attachment operations")]
     AttachmentReferencesManagedSeparately,
+    #[error("attachment source is invalid")]
+    InvalidAttachmentSource,
+    #[error("attachment exceeds the supported size limit")]
+    AttachmentTooLarge,
+    #[error("item has reached the attachment limit")]
+    AttachmentLimitReached,
+    #[error("attachment is not linked to this item")]
+    AttachmentNotOwned,
+    #[error("attachment record is inconsistent")]
+    InconsistentAttachment,
+    #[error("attachment import is missing, incomplete, or already consumed")]
+    AttachmentImportUnavailable,
+    #[error("item is not in trash")]
+    ItemNotTrashed,
     #[error("session resume credential is unavailable or stale")]
     InvalidSessionResume,
 }
@@ -116,11 +136,65 @@ pub struct BrowserVault {
     store: MemStore,
     root_key: Option<AccountRootKey>,
     pending_pairings: RefCell<BTreeMap<Uuid, PendingTrustedDevicePairing>>,
+    pending_attachment_imports: RefCell<BTreeMap<Uuid, PendingAttachmentImport>>,
 }
 
 struct PendingTrustedDevicePairing {
     package: PairingChallengeV1,
     state: PairingVerifierState,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct BrowserAttachmentSummary {
+    pub id: Uuid,
+    pub revision: u64,
+    pub filename: String,
+    pub plaintext_size: u64,
+    pub chunk_count: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct BrowserTrashedItemSummary {
+    pub id: Uuid,
+    pub title: String,
+    pub kind: vault_models::ItemKind,
+    pub revision: u64,
+    pub deleted_at_ms: u64,
+}
+
+pub struct AttachmentImportCommit {
+    pub summary: BrowserAttachmentSummary,
+    pub item_revision: u64,
+    pub encrypted_attachment: EncryptedAttachmentV1,
+}
+
+pub struct AttachmentDeleteCommit {
+    pub item_revision: u64,
+    pub attachment_revision: u64,
+    pub tombstone: EncryptedAttachmentV1,
+}
+
+pub struct ItemPurgeAttachmentCommit {
+    pub id: Uuid,
+    pub expected_revision: u64,
+    pub attachment_revision: u64,
+    pub chunk_count: u64,
+    pub tombstone: EncryptedAttachmentV1,
+}
+
+pub struct ItemPurgeCommit {
+    pub item_revision: u64,
+    pub attachments: Vec<ItemPurgeAttachmentCommit>,
+}
+
+struct PendingAttachmentImport {
+    summary: BrowserAttachmentSummary,
+    expected_item_revision: u64,
+    item_revision: u64,
+    encrypted_item: EncryptedItemV1,
+    encrypted_attachment: EncryptedAttachmentV1,
+    context: AttachmentCipherContext,
+    encrypted_chunks: BTreeSet<u32>,
 }
 
 impl BrowserVault {
@@ -130,6 +204,7 @@ impl BrowserVault {
             store: MemStore::new(),
             root_key: None,
             pending_pairings: RefCell::new(BTreeMap::new()),
+            pending_attachment_imports: RefCell::new(BTreeMap::new()),
         }
     }
 
@@ -144,6 +219,7 @@ impl BrowserVault {
             store: MemStore::from_snapshot(snapshot)?,
             root_key: None,
             pending_pairings: RefCell::new(BTreeMap::new()),
+            pending_attachment_imports: RefCell::new(BTreeMap::new()),
         })
     }
 
@@ -171,10 +247,39 @@ impl BrowserVault {
         Ok(())
     }
 
+    pub fn change_passphrase(
+        &mut self,
+        current_passphrase: &str,
+        new_passphrase: &str,
+    ) -> Result<(), WasmVaultError> {
+        self.root_key()?;
+        if new_passphrase.chars().count() < 12 {
+            return Err(WasmVaultError::PassphraseTooShort);
+        }
+        let current_wrap = self.store.load_root_wrap()?;
+        let reauthenticated_root = unwrap_root_key(current_passphrase, &current_wrap)?;
+
+        // Authenticate the persisted root against the ciphertext set before
+        // replacing either the in-memory root or the durable wrap. This catches
+        // inconsistent/tampered snapshots rather than rewrapping an unrelated key.
+        for id in self.store.list_item_ids()? {
+            let encrypted = self.store.load_item(id)?;
+            decrypt_item_state(&reauthenticated_root, &encrypted)?;
+        }
+
+        let replacement = wrap_root_key(new_passphrase, &reauthenticated_root)?;
+        self.store.replace_root_wrap(&replacement)?;
+        self.pending_pairings.borrow_mut().clear();
+        self.pending_attachment_imports.borrow_mut().clear();
+        self.root_key = Some(reauthenticated_root);
+        Ok(())
+    }
+
     /// Lock the vault, dropping (zeroizing) the root key.
     pub fn lock(&mut self) {
         self.root_key = None;
         self.pending_pairings.get_mut().clear();
+        self.pending_attachment_imports.get_mut().clear();
     }
 
     pub fn is_unlocked(&self) -> bool {
@@ -391,6 +496,243 @@ impl BrowserVault {
         Ok(revision)
     }
 
+    pub fn begin_attachment_import(
+        &self,
+        owner_item_id: Uuid,
+        expected_item_revision: u64,
+        filename: &str,
+        plaintext_size: u64,
+    ) -> Result<BrowserAttachmentSummary, WasmVaultError> {
+        ensure_mutable_user_item_id(owner_item_id)?;
+        if filename.is_empty() || filename.chars().count() > ATTACHMENT_MAX_FILENAME_CHARS {
+            return Err(WasmVaultError::InvalidAttachmentSource);
+        }
+        if plaintext_size > ATTACHMENT_MAX_PLAINTEXT_BYTES {
+            return Err(WasmVaultError::AttachmentTooLarge);
+        }
+        let current = self.store.load_item(owner_item_id)?;
+        if current.revision != expected_item_revision {
+            return Err(WasmVaultError::Storage(StorageError::StaleRevision));
+        }
+        let VaultItemState::Active { mut item } = decrypt_item_state(self.root_key()?, &current)?
+        else {
+            return Err(WasmVaultError::ItemNotFound);
+        };
+        if item.attachments.len() >= MAX_ITEM_ATTACHMENTS {
+            return Err(WasmVaultError::AttachmentLimitReached);
+        }
+
+        let attachment_id = Uuid::new_v4();
+        let chunk_count = if plaintext_size == 0 {
+            0
+        } else {
+            plaintext_size.div_ceil(ATTACHMENT_CHUNK_SIZE)
+        };
+        let manifest = AttachmentManifestV1::Active {
+            attachment_id,
+            owner_item_id,
+            filename: filename.to_owned(),
+            plaintext_size,
+            chunk_size: ATTACHMENT_CHUNK_SIZE,
+            chunk_count,
+        };
+        let (encrypted_attachment, context) =
+            seal_attachment_manifest(self.root_key()?, &manifest, 1)?;
+        let context = context.ok_or(WasmVaultError::InconsistentAttachment)?;
+        item.attachments.push(attachment_id);
+        validate_item(&item)?;
+        let item_revision = expected_item_revision
+            .checked_add(1)
+            .ok_or(WasmVaultError::RevisionExhausted)?;
+        let encrypted_item = encrypt_item(self.root_key()?, &item, item_revision)?;
+        let summary = BrowserAttachmentSummary {
+            id: attachment_id,
+            revision: 1,
+            filename: filename.to_owned(),
+            plaintext_size,
+            chunk_count,
+        };
+        self.pending_attachment_imports.borrow_mut().insert(
+            attachment_id,
+            PendingAttachmentImport {
+                summary: summary.clone(),
+                expected_item_revision,
+                item_revision,
+                encrypted_item,
+                encrypted_attachment,
+                context,
+                encrypted_chunks: BTreeSet::new(),
+            },
+        );
+        Ok(summary)
+    }
+
+    pub fn encrypt_attachment_import_chunk(
+        &self,
+        attachment_id: Uuid,
+        index: u32,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, WasmVaultError> {
+        self.root_key()?;
+        let mut imports = self.pending_attachment_imports.borrow_mut();
+        let pending = imports
+            .get_mut(&attachment_id)
+            .ok_or(WasmVaultError::AttachmentImportUnavailable)?;
+        if pending.encrypted_chunks.contains(&index) {
+            return Err(WasmVaultError::AttachmentImportUnavailable);
+        }
+        let ciphertext = pending.context.encrypt_chunk(u64::from(index), plaintext)?;
+        pending.encrypted_chunks.insert(index);
+        Ok(ciphertext)
+    }
+
+    pub fn cancel_attachment_import(&self, attachment_id: Uuid) {
+        self.pending_attachment_imports
+            .borrow_mut()
+            .remove(&attachment_id);
+    }
+
+    pub fn commit_attachment_import(
+        &self,
+        attachment_id: Uuid,
+    ) -> Result<AttachmentImportCommit, WasmVaultError> {
+        self.root_key()?;
+        let pending = self
+            .pending_attachment_imports
+            .borrow_mut()
+            .remove(&attachment_id)
+            .ok_or(WasmVaultError::AttachmentImportUnavailable)?;
+        let expected_chunk_count = usize::try_from(pending.summary.chunk_count)
+            .map_err(|_| WasmVaultError::InconsistentAttachment)?;
+        if pending.encrypted_chunks.len() != expected_chunk_count
+            || pending
+                .encrypted_chunks
+                .iter()
+                .enumerate()
+                .any(|(expected, actual)| usize::try_from(*actual).ok() != Some(expected))
+        {
+            return Err(WasmVaultError::AttachmentImportUnavailable);
+        }
+        self.store
+            .update_item_if_revision(&pending.encrypted_item, pending.expected_item_revision)?;
+        Ok(AttachmentImportCommit {
+            summary: pending.summary,
+            item_revision: pending.item_revision,
+            encrypted_attachment: pending.encrypted_attachment,
+        })
+    }
+
+    pub fn describe_attachment(
+        &self,
+        owner_item_id: Uuid,
+        attachment_id: Uuid,
+        encrypted: &EncryptedAttachmentV1,
+    ) -> Result<BrowserAttachmentSummary, WasmVaultError> {
+        let item = self.get_item(owner_item_id)?;
+        if !item.attachments.contains(&attachment_id) || encrypted.attachment_id != attachment_id {
+            return Err(WasmVaultError::AttachmentNotOwned);
+        }
+        let (manifest, _context) = open_attachment_manifest(self.root_key()?, encrypted)?;
+        let AttachmentManifestV1::Active {
+            owner_item_id: manifest_owner,
+            filename,
+            plaintext_size,
+            chunk_count,
+            ..
+        } = manifest
+        else {
+            return Err(WasmVaultError::InconsistentAttachment);
+        };
+        if manifest_owner != owner_item_id {
+            return Err(WasmVaultError::AttachmentNotOwned);
+        }
+        Ok(BrowserAttachmentSummary {
+            id: attachment_id,
+            revision: encrypted.revision,
+            filename,
+            plaintext_size,
+            chunk_count,
+        })
+    }
+
+    pub fn decrypt_attachment_chunk(
+        &self,
+        owner_item_id: Uuid,
+        attachment_id: Uuid,
+        encrypted: &EncryptedAttachmentV1,
+        index: u32,
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, WasmVaultError> {
+        self.describe_attachment(owner_item_id, attachment_id, encrypted)?;
+        let (_manifest, context) = open_attachment_manifest(self.root_key()?, encrypted)?;
+        let context = context.ok_or(WasmVaultError::InconsistentAttachment)?;
+        Ok(context.decrypt_chunk(u64::from(index), ciphertext)?)
+    }
+
+    pub fn delete_attachment(
+        &self,
+        owner_item_id: Uuid,
+        attachment_id: Uuid,
+        expected_item_revision: u64,
+        expected_attachment_revision: u64,
+        encrypted: &EncryptedAttachmentV1,
+        deleted_at_ms: u64,
+    ) -> Result<AttachmentDeleteCommit, WasmVaultError> {
+        ensure_mutable_user_item_id(owner_item_id)?;
+        let current = self.store.load_item(owner_item_id)?;
+        if current.revision != expected_item_revision {
+            return Err(WasmVaultError::Storage(StorageError::StaleRevision));
+        }
+        if encrypted.attachment_id != attachment_id
+            || encrypted.revision != expected_attachment_revision
+        {
+            return Err(WasmVaultError::Storage(StorageError::StaleRevision));
+        }
+        let VaultItemState::Active { mut item } = decrypt_item_state(self.root_key()?, &current)?
+        else {
+            return Err(WasmVaultError::ItemNotFound);
+        };
+        let Some(position) = item
+            .attachments
+            .iter()
+            .position(|candidate| *candidate == attachment_id)
+        else {
+            return Err(WasmVaultError::AttachmentNotOwned);
+        };
+        let (manifest, _context) = open_attachment_manifest(self.root_key()?, encrypted)?;
+        if !matches!(
+            manifest,
+            AttachmentManifestV1::Active { owner_item_id: owner, .. } if owner == owner_item_id
+        ) {
+            return Err(WasmVaultError::AttachmentNotOwned);
+        }
+        item.attachments.remove(position);
+        let item_revision = expected_item_revision
+            .checked_add(1)
+            .ok_or(WasmVaultError::RevisionExhausted)?;
+        let attachment_revision = expected_attachment_revision
+            .checked_add(1)
+            .ok_or(WasmVaultError::RevisionExhausted)?;
+        let encrypted_item = encrypt_item(self.root_key()?, &item, item_revision)?;
+        let tombstone_manifest = AttachmentManifestV1::Tombstone {
+            attachment_id,
+            owner_item_id,
+            deleted_at_ms,
+        };
+        let (tombstone, context) =
+            seal_attachment_manifest(self.root_key()?, &tombstone_manifest, attachment_revision)?;
+        if context.is_some() {
+            return Err(WasmVaultError::InconsistentAttachment);
+        }
+        self.store
+            .update_item_if_revision(&encrypted_item, expected_item_revision)?;
+        Ok(AttachmentDeleteCommit {
+            item_revision,
+            attachment_revision,
+            tombstone,
+        })
+    }
+
     /// Move an item to trash (encrypted state change), returning new revision.
     pub fn trash_item(
         &self,
@@ -418,6 +760,162 @@ impl BrowserVault {
         self.store
             .update_item_if_revision(&encrypted, expected_revision)?;
         Ok(revision)
+    }
+
+    pub fn list_trashed_items(&self) -> Result<Vec<BrowserTrashedItemSummary>, WasmVaultError> {
+        let root = self.root_key()?;
+        let mut out = Vec::new();
+        for id in self.store.list_item_ids()? {
+            if id == EMERGENCY_CARD_ID || id == SESSION_RESUME_MARKER_ID {
+                continue;
+            }
+            let encrypted = self.store.load_item(id)?;
+            if let VaultItemState::Trashed {
+                item,
+                deleted_at_ms,
+            } = decrypt_item_state(root, &encrypted)?
+            {
+                out.push(BrowserTrashedItemSummary {
+                    id: item.id,
+                    title: item.title,
+                    kind: item.kind,
+                    revision: encrypted.revision,
+                    deleted_at_ms,
+                });
+            }
+        }
+        out.sort_by(|left, right| {
+            right
+                .deleted_at_ms
+                .cmp(&left.deleted_at_ms)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Ok(out)
+    }
+
+    pub fn restore_item(&self, id: Uuid, expected_revision: u64) -> Result<u64, WasmVaultError> {
+        ensure_mutable_user_item_id(id)?;
+        let current = self.store.load_item(id)?;
+        if current.revision != expected_revision {
+            return Err(WasmVaultError::Storage(StorageError::StaleRevision));
+        }
+        let VaultItemState::Trashed { item, .. } = decrypt_item_state(self.root_key()?, &current)?
+        else {
+            return Err(WasmVaultError::ItemNotTrashed);
+        };
+        validate_item(&item)?;
+        let revision = expected_revision
+            .checked_add(1)
+            .ok_or(WasmVaultError::RevisionExhausted)?;
+        let encrypted =
+            encrypt_item_state(self.root_key()?, &VaultItemState::Active { item }, revision)?;
+        self.store
+            .update_item_if_revision(&encrypted, expected_revision)?;
+        Ok(revision)
+    }
+
+    pub fn trashed_attachment_ids(
+        &self,
+        id: Uuid,
+        expected_revision: u64,
+    ) -> Result<Vec<Uuid>, WasmVaultError> {
+        ensure_mutable_user_item_id(id)?;
+        let current = self.store.load_item(id)?;
+        if current.revision != expected_revision {
+            return Err(WasmVaultError::Storage(StorageError::StaleRevision));
+        }
+        let VaultItemState::Trashed { item, .. } = decrypt_item_state(self.root_key()?, &current)?
+        else {
+            return Err(WasmVaultError::ItemNotTrashed);
+        };
+        Ok(item.attachments)
+    }
+
+    pub fn purge_item(
+        &self,
+        id: Uuid,
+        expected_revision: u64,
+        attachments: &[EncryptedAttachmentV1],
+    ) -> Result<ItemPurgeCommit, WasmVaultError> {
+        ensure_mutable_user_item_id(id)?;
+        let current = self.store.load_item(id)?;
+        if current.revision != expected_revision {
+            return Err(WasmVaultError::Storage(StorageError::StaleRevision));
+        }
+        let VaultItemState::Trashed {
+            item,
+            deleted_at_ms,
+        } = decrypt_item_state(self.root_key()?, &current)?
+        else {
+            return Err(WasmVaultError::ItemNotTrashed);
+        };
+
+        let expected_ids = item.attachments.iter().copied().collect::<BTreeSet<_>>();
+        let provided_ids = attachments
+            .iter()
+            .map(|attachment| attachment.attachment_id)
+            .collect::<BTreeSet<_>>();
+        if expected_ids.len() != item.attachments.len()
+            || provided_ids.len() != attachments.len()
+            || expected_ids != provided_ids
+        {
+            return Err(WasmVaultError::InconsistentAttachment);
+        }
+
+        let mut attachment_commits = Vec::with_capacity(attachments.len());
+        for attachment in attachments {
+            let (manifest, _context) = open_attachment_manifest(self.root_key()?, attachment)?;
+            let AttachmentManifestV1::Active {
+                owner_item_id,
+                chunk_count,
+                ..
+            } = manifest
+            else {
+                return Err(WasmVaultError::InconsistentAttachment);
+            };
+            if owner_item_id != id {
+                return Err(WasmVaultError::AttachmentNotOwned);
+            }
+            let attachment_revision = attachment
+                .revision
+                .checked_add(1)
+                .ok_or(WasmVaultError::RevisionExhausted)?;
+            let tombstone_manifest = AttachmentManifestV1::Tombstone {
+                attachment_id: attachment.attachment_id,
+                owner_item_id: id,
+                deleted_at_ms,
+            };
+            let (tombstone, context) = seal_attachment_manifest(
+                self.root_key()?,
+                &tombstone_manifest,
+                attachment_revision,
+            )?;
+            if context.is_some() {
+                return Err(WasmVaultError::InconsistentAttachment);
+            }
+            attachment_commits.push(ItemPurgeAttachmentCommit {
+                id: attachment.attachment_id,
+                expected_revision: attachment.revision,
+                attachment_revision,
+                chunk_count,
+                tombstone,
+            });
+        }
+
+        let item_revision = expected_revision
+            .checked_add(1)
+            .ok_or(WasmVaultError::RevisionExhausted)?;
+        let encrypted = encrypt_item_state(
+            self.root_key()?,
+            &VaultItemState::Tombstone { id, deleted_at_ms },
+            item_revision,
+        )?;
+        self.store
+            .update_item_if_revision(&encrypted, expected_revision)?;
+        Ok(ItemPurgeCommit {
+            item_revision,
+            attachments: attachment_commits,
+        })
     }
 
     /// Fetch the Emergency Card singleton, if present. Mirrors vault-core:
@@ -876,6 +1374,45 @@ mod tests {
         let mut restored = BrowserVault::from_snapshot(snapshot).expect("from_snapshot");
         assert!(restored.unlock("wrong passphrase!!").is_err());
         assert!(!restored.is_unlocked());
+    }
+
+    #[test]
+    fn passphrase_change_reauthenticates_and_rewraps() {
+        let mut vault = BrowserVault::new_empty();
+        vault.create("correct horse battery").expect("create");
+        let item = sample_item("Rewrap me");
+        let item_id = item.id;
+        vault.put_item(&item).expect("put");
+
+        assert!(
+            vault
+                .change_passphrase("invalid current value", "new correct horse battery")
+                .is_err()
+        );
+        vault
+            .change_passphrase("correct horse battery", "new correct horse battery")
+            .expect("change passphrase");
+        assert_eq!(
+            vault.get_item(item_id).expect("item readable").title,
+            "Rewrap me"
+        );
+
+        let snapshot = vault.to_snapshot();
+        vault.lock();
+        assert!(vault.unlock("correct horse battery").is_err());
+        vault
+            .unlock("new correct horse battery")
+            .expect("new unlock");
+
+        let mut restored = BrowserVault::from_snapshot(snapshot).expect("restore");
+        assert!(restored.unlock("correct horse battery").is_err());
+        restored
+            .unlock("new correct horse battery")
+            .expect("restored unlock");
+        assert_eq!(
+            restored.get_item(item_id).expect("restored item").title,
+            "Rewrap me"
+        );
     }
 
     #[test]
@@ -1549,6 +2086,203 @@ mod tests {
             Err(WasmVaultError::AttachmentReferencesManagedSeparately)
         ));
         assert!(vault.list_items().expect("list").is_empty());
+    }
+
+    #[test]
+    fn browser_attachment_round_trip_enforces_chunk_uniqueness_and_tombstones_delete() {
+        let mut vault = BrowserVault::new_empty();
+        vault.create("correct horse battery").expect("create");
+        let item = sample_item("Attachment owner");
+        let item_id = item.id;
+        vault.put_item(&item).expect("put owner");
+
+        let second_chunk = b"tail".to_vec();
+        let plaintext_size = ATTACHMENT_CHUNK_SIZE + second_chunk.len() as u64;
+        let summary = vault
+            .begin_attachment_import(item_id, 0, "evidence.bin", plaintext_size)
+            .expect("begin import");
+        let first_chunk = vec![0x5a; ATTACHMENT_CHUNK_SIZE as usize];
+        let encrypted_first = vault
+            .encrypt_attachment_import_chunk(summary.id, 0, &first_chunk)
+            .expect("encrypt first chunk");
+        assert!(matches!(
+            vault.encrypt_attachment_import_chunk(summary.id, 0, &first_chunk),
+            Err(WasmVaultError::AttachmentImportUnavailable)
+        ));
+        let encrypted_second = vault
+            .encrypt_attachment_import_chunk(summary.id, 1, &second_chunk)
+            .expect("encrypt second chunk");
+        let committed = vault
+            .commit_attachment_import(summary.id)
+            .expect("commit import");
+        assert_eq!(committed.item_revision, 1);
+        assert_eq!(committed.summary, summary);
+
+        let owner = vault.get_item(item_id).expect("owner after import");
+        assert_eq!(owner.attachments, vec![summary.id]);
+        let described = vault
+            .describe_attachment(item_id, summary.id, &committed.encrypted_attachment)
+            .expect("describe attachment");
+        assert_eq!(described, summary);
+        assert_eq!(
+            vault
+                .decrypt_attachment_chunk(
+                    item_id,
+                    summary.id,
+                    &committed.encrypted_attachment,
+                    0,
+                    &encrypted_first,
+                )
+                .expect("decrypt first"),
+            first_chunk
+        );
+        assert_eq!(
+            vault
+                .decrypt_attachment_chunk(
+                    item_id,
+                    summary.id,
+                    &committed.encrypted_attachment,
+                    1,
+                    &encrypted_second,
+                )
+                .expect("decrypt second"),
+            second_chunk
+        );
+
+        let deleted = vault
+            .delete_attachment(
+                item_id,
+                summary.id,
+                1,
+                1,
+                &committed.encrypted_attachment,
+                42,
+            )
+            .expect("delete attachment");
+        assert_eq!(deleted.item_revision, 2);
+        assert_eq!(deleted.attachment_revision, 2);
+        assert!(
+            vault
+                .get_item(item_id)
+                .expect("owner after delete")
+                .attachments
+                .is_empty()
+        );
+        let (manifest, context) =
+            open_attachment_manifest(vault.root_key().expect("root"), &deleted.tombstone)
+                .expect("open tombstone");
+        assert!(matches!(
+            manifest,
+            AttachmentManifestV1::Tombstone {
+                attachment_id,
+                owner_item_id,
+                deleted_at_ms: 42,
+            } if attachment_id == summary.id && owner_item_id == item_id
+        ));
+        assert!(context.is_none());
+    }
+
+    #[test]
+    fn incomplete_browser_attachment_import_does_not_mutate_parent() {
+        let mut vault = BrowserVault::new_empty();
+        vault.create("correct horse battery").expect("create");
+        let item = sample_item("Attachment owner");
+        let item_id = item.id;
+        vault.put_item(&item).expect("put owner");
+
+        let summary = vault
+            .begin_attachment_import(item_id, 0, "one.bin", 1)
+            .expect("begin import");
+        assert!(matches!(
+            vault.commit_attachment_import(summary.id),
+            Err(WasmVaultError::AttachmentImportUnavailable)
+        ));
+        let owner = vault.get_item(item_id).expect("owner unchanged");
+        assert!(owner.attachments.is_empty());
+        assert_eq!(
+            vault.store.load_item(item_id).expect("owner row").revision,
+            0
+        );
+    }
+
+    #[test]
+    fn browser_trash_restore_and_purge_preserve_attachment_lifecycle() {
+        let mut vault = BrowserVault::new_empty();
+        vault.create("correct horse battery").expect("create");
+        let item = sample_item("Lifecycle owner");
+        let item_id = item.id;
+        vault.put_item(&item).expect("put owner");
+        let summary = vault
+            .begin_attachment_import(item_id, 0, "proof.bin", 1)
+            .expect("begin import");
+        let _chunk = vault
+            .encrypt_attachment_import_chunk(summary.id, 0, &[7])
+            .expect("encrypt chunk");
+        let attachment = vault
+            .commit_attachment_import(summary.id)
+            .expect("commit attachment");
+
+        let trashed_revision = vault.trash_item(item_id, 1, 123).expect("trash");
+        assert_eq!(trashed_revision, 2);
+        assert!(vault.list_items().expect("active list").is_empty());
+        assert_eq!(
+            vault
+                .trashed_attachment_ids(item_id, 2)
+                .expect("trashed attachments"),
+            vec![summary.id]
+        );
+        let trashed = vault.list_trashed_items().expect("trash list");
+        assert_eq!(trashed.len(), 1);
+        assert_eq!(trashed[0].id, item_id);
+        assert_eq!(trashed[0].title, "Lifecycle owner");
+        assert_eq!(trashed[0].revision, 2);
+        assert_eq!(trashed[0].deleted_at_ms, 123);
+
+        let restored_revision = vault.restore_item(item_id, 2).expect("restore");
+        assert_eq!(restored_revision, 3);
+        assert_eq!(vault.list_items().expect("active after restore").len(), 1);
+        assert!(
+            vault
+                .list_trashed_items()
+                .expect("trash after restore")
+                .is_empty()
+        );
+
+        vault.trash_item(item_id, 3, 456).expect("trash again");
+        let purged = vault
+            .purge_item(item_id, 4, &[attachment.encrypted_attachment])
+            .expect("purge");
+        assert_eq!(purged.item_revision, 5);
+        assert_eq!(purged.attachments.len(), 1);
+        assert_eq!(purged.attachments[0].id, summary.id);
+        assert_eq!(purged.attachments[0].expected_revision, 1);
+        assert_eq!(purged.attachments[0].attachment_revision, 2);
+        assert_eq!(purged.attachments[0].chunk_count, 1);
+        let (manifest, context) = open_attachment_manifest(
+            vault.root_key().expect("root"),
+            &purged.attachments[0].tombstone,
+        )
+        .expect("open attachment tombstone");
+        assert!(matches!(
+            manifest,
+            AttachmentManifestV1::Tombstone {
+                attachment_id,
+                owner_item_id,
+                deleted_at_ms: 456,
+            } if attachment_id == summary.id && owner_item_id == item_id
+        ));
+        assert!(context.is_none());
+        assert!(vault.list_items().expect("active after purge").is_empty());
+        assert!(
+            vault
+                .list_trashed_items()
+                .expect("trash after purge")
+                .is_empty()
+        );
+        assert!(matches!(
+            vault.restore_item(item_id, 5),
+            Err(WasmVaultError::ItemNotTrashed)
+        ));
     }
 
     #[test]

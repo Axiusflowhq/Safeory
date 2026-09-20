@@ -2,17 +2,26 @@
   "name": "safeory",
   "private": true,
   "license": "AGPL-3.0-or-later",
-  "packageManager": "pnpm@12.4.1",
+  "packageManager": "bun@1.4.1",
+  "workspaces": [
+    "apps/web",
+    "apps/extension",
+    "packages/*"
+  ],
+  "trustedDependencies": [
+    "@swc/core",
+    "unrs-resolver"
+  ],
   "scripts": {
     "build:wasm": "node scripts/build-vault-wasm.mjs",
-    "build": "corepack pnpm run build:wasm && corepack pnpm --filter @safeory/web --filter @safeory/extension build",
-    "typecheck": "corepack pnpm --filter @safeory/contracts --filter @safeory/web --filter @safeory/extension typecheck",
-    "lint": "corepack pnpm --filter @safeory/contracts --filter @safeory/web --filter @safeory/extension lint",
-    "audit:js": "corepack pnpm audit --prod",
+    "build": "bun run build:wasm && bun run --filter @safeory/web build && bun run --filter @safeory/extension build",
+    "typecheck": "bun run --filter @safeory/contracts typecheck && bun run --filter @safeory/web typecheck && bun run --filter @safeory/extension typecheck",
+    "lint": "bun run --filter @safeory/contracts lint && bun run --filter @safeory/web lint && bun run --filter @safeory/extension lint",
+    "audit:js": "bun audit",
     "check:icons": "node scripts/check-icon-policy.mjs",
     "test:rust": "cargo test --workspace",
-    "test:contracts": "corepack pnpm --filter @safeory/contracts test",
-    "test:wasm": "corepack pnpm run build:wasm && node crates/vault-wasm/smoke.test.mjs",
-    "test:browser": "corepack pnpm --filter @safeory/contracts --filter @safeory/web --filter @safeory/extension test && corepack pnpm run test:wasm"
+    "test:contracts": "bun run --filter @safeory/contracts test",
+    "test:wasm": "bun run build:wasm && node crates/vault-wasm/smoke.test.mjs",
+    "test:browser": "bun run --filter @safeory/contracts test && bun run --filter @safeory/web test && bun run --filter @safeory/extension test && bun run test:wasm"
   }
 }

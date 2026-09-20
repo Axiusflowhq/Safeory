@@ -19,13 +19,15 @@ jobs:
           rustup toolchain install 1.98.1 --profile minimal --component rustfmt --component clippy
           rustup default 1.98.1
 
-      - name: Install Node 24 and enable pnpm
+      - name: Install Node 24
         uses: actions/setup-node@v7
         with:
           node-version: 24
-      - run: |
-          corepack enable
-          corepack prepare pnpm@12.4.1 --activate
+
+      - name: Install Bun 1.4.1
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.1
 
       - name: Install WASM build tooling
         run: |
@@ -36,7 +38,7 @@ jobs:
         run: node scripts/build-vault-wasm.mjs
 
       - name: Install locked JavaScript dependencies
-        run: corepack pnpm install --frozen-lockfile
+        run: bun install --frozen-lockfile
 
       - name: Validate self-hosted Compose configuration
         run: |
@@ -51,15 +53,15 @@ jobs:
         run: cargo test --workspace
 
       - name: Frontend typecheck
-        run: corepack pnpm typecheck
+        run: bun run typecheck
       - name: Browser vault tests
-        run: corepack pnpm test:browser
+        run: bun run test:browser
       - name: Frontend lint
-        run: corepack pnpm lint
+        run: bun run lint
       - name: Enforce icon-family policy
-        run: corepack pnpm check:icons
+        run: bun run check:icons
       - name: Frontend build
-        run: corepack pnpm build
+        run: bun run build
 
       - name: Install Rust security tools
         run: |
@@ -70,4 +72,4 @@ jobs:
       - name: Rust dependency policy
         run: cargo deny check advisories bans licenses sources
       - name: JavaScript production audit
-        run: corepack pnpm audit:js
+        run: bun run audit:js

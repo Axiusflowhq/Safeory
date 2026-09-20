@@ -11,38 +11,66 @@ import {
 class FakeVault implements WasmVaultLike {
   unlocked: boolean;
   recoveryInstalled: boolean;
+  initialized: boolean;
   putCount = 0;
   sessionResumeCount = 0;
+  passphraseChangeCount = 0;
   snapshotCount = 0;
   deadlineJson = "[]";
   failMutation = false;
+  trashedAttachmentIds: string[] = [];
+  purgeCommitJson = JSON.stringify({ item_revision: 3, attachments: [] });
   private readonly onPut: (() => void) | undefined;
   private readonly expectedResumePayload: string | null;
+  private readonly expectedPassphrase: string | null;
+  private readonly snapshotOverride: string | null;
+  private readonly attachmentOwnerId: string | null;
+  private readonly attachmentIds: string[];
 
   constructor(
     unlocked = true,
     recoveryInstalled = false,
     onPut?: () => void,
     expectedResumePayload: string | null = null,
+    initialized = true,
+    expectedPassphrase: string | null = null,
+    snapshotOverride: string | null = null,
+    attachmentOwnerId: string | null = null,
+    attachmentIds: string[] = [],
   ) {
     this.unlocked = unlocked;
     this.recoveryInstalled = recoveryInstalled;
+    this.initialized = initialized;
     this.onPut = onPut;
     this.expectedResumePayload = expectedResumePayload;
+    this.expectedPassphrase = expectedPassphrase;
+    this.snapshotOverride = snapshotOverride;
+    this.attachmentOwnerId = attachmentOwnerId;
+    this.attachmentIds = attachmentIds;
   }
 
   isInitialized(): boolean {
-    return true;
+    return this.initialized;
   }
 
   isUnlocked(): boolean {
     return this.unlocked;
   }
 
-  create(): void {}
-
-  unlock(): void {
+  create(): void {
+    this.initialized = true;
     this.unlocked = true;
+  }
+
+  unlock(passphrase: string): void {
+    if (this.expectedPassphrase !== null && passphrase !== this.expectedPassphrase) {
+      throw new Error("wrong passphrase");
+    }
+    this.unlocked = true;
+  }
+
+  changePassphrase(): void {
+    this.passphraseChangeCount += 1;
   }
 
   lock(): void {
@@ -63,7 +91,7 @@ class FakeVault implements WasmVaultLike {
 
   snapshotJson(): string {
     this.snapshotCount += 1;
-    return JSON.stringify({ recoveryInstalled: this.recoveryInstalled });
+    return this.snapshotOverride ?? JSON.stringify({ recoveryInstalled: this.recoveryInstalled });
   }
 
   putItemJson(): void {
@@ -72,12 +100,32 @@ class FakeVault implements WasmVaultLike {
     this.onPut?.();
   }
 
-  getItemJson(): string {
+  getItemJson(id: string): string {
+    if (this.attachmentOwnerId !== null && id === this.attachmentOwnerId) {
+      return JSON.stringify({ attachments: this.attachmentIds });
+    }
     return "{}";
   }
 
   listItemsJson(): string {
+    if (this.attachmentOwnerId !== null) {
+      return JSON.stringify([
+        {
+          item: { id: this.attachmentOwnerId, title: "Attachment owner", kind: "secure_note" },
+          revision: 2,
+        },
+      ]);
+    }
     return "[]";
+  }
+
+  exportReadableJson(): string {
+    return JSON.stringify({
+      format: "safeory-readable-export",
+      format_version: 1,
+      items: [],
+      emergency_card: null,
+    });
   }
 
   listDeadlinesJson(): string {
@@ -90,6 +138,89 @@ class FakeVault implements WasmVaultLike {
 
   trashItem(): bigint {
     return 1n;
+  }
+
+  listTrashedItemsJson(): string {
+    return "[]";
+  }
+
+  restoreItem(): bigint {
+    return 2n;
+  }
+
+  trashedAttachmentIdsJson(): string {
+    return JSON.stringify(this.trashedAttachmentIds);
+  }
+
+  purgeItemJson(): string {
+    return this.purgeCommitJson;
+  }
+
+  beginAttachmentImportJson(
+    _ownerItemId: string,
+    _expectedItemRevision: number | bigint,
+    filename: string,
+    plaintextSize: number | bigint,
+  ): string {
+    return JSON.stringify({
+      id: "00000000-0000-4000-8000-0000000000aa",
+      revision: 1,
+      filename,
+      plaintext_size: Number(plaintextSize),
+      chunk_count: Number(plaintextSize) === 0 ? 0 : 1,
+    });
+  }
+
+  encryptAttachmentImportChunk(
+    _attachmentId: string,
+    _index: number,
+    plaintext: Uint8Array,
+  ): Uint8Array {
+    return plaintext.slice();
+  }
+
+  cancelAttachmentImport(): void {}
+
+  commitAttachmentImportJson(): string {
+    return JSON.stringify({
+      summary: {
+        id: "00000000-0000-4000-8000-0000000000aa",
+        revision: 1,
+        filename: "attachment.bin",
+        plaintext_size: 1,
+        chunk_count: 1,
+      },
+      item_revision: 2,
+      encrypted_record_json: "{}",
+    });
+  }
+
+  describeAttachmentJson(): string {
+    return JSON.stringify({
+      id: "00000000-0000-4000-8000-0000000000aa",
+      revision: 1,
+      filename: "attachment.bin",
+      plaintext_size: 1,
+      chunk_count: 1,
+    });
+  }
+
+  decryptAttachmentChunk(
+    _ownerItemId: string,
+    _attachmentId: string,
+    _encryptedRecordJson: string,
+    _index: number,
+    ciphertext: Uint8Array,
+  ): Uint8Array {
+    return ciphertext.slice();
+  }
+
+  deleteAttachmentJson(): string {
+    return JSON.stringify({
+      item_revision: 3,
+      attachment_revision: 2,
+      encrypted_record_json: "{}",
+    });
   }
 
   getEmergencyCardJson(): string | null {
@@ -212,6 +343,125 @@ function installSnapshotIndexedDb(record: {
   } as unknown as IDBFactory;
 }
 
+function installWritableIndexedDb(initial: {
+  format: number;
+  version: number;
+  snapshotJson: string | null;
+}, options: { failWrites?: boolean } = {}): {
+  getVaultRecord: () => { format: number; version: number; snapshotJson: string | null };
+  getManifest: (id: string) => unknown;
+  getChunk: (key: string) => unknown;
+} {
+  const stores = new Map<string, Map<string, unknown>>([
+    ["vault", new Map([["snapshot", structuredClone(initial)]])],
+    ["attachment_manifests", new Map()],
+    ["attachment_chunks", new Map()],
+  ]);
+  const db = {
+    close() {},
+    transaction() {
+      let pending = 0;
+      let completionScheduled = false;
+      let aborted = false;
+      const tx: Record<string, unknown> = { error: null };
+
+      const maybeComplete = () => {
+        if (aborted || pending !== 0 || completionScheduled) return;
+        completionScheduled = true;
+        queueMicrotask(() => {
+          completionScheduled = false;
+          if (!aborted && pending === 0) {
+            (tx.oncomplete as (() => void) | undefined)?.();
+          }
+        });
+      };
+
+      const request = <T>(operation: () => T) => {
+        pending += 1;
+        const result: Record<string, unknown> = { error: null, result: undefined };
+        queueMicrotask(() => {
+          if (aborted) return;
+          try {
+            result.result = operation();
+            (result.onsuccess as (() => void) | undefined)?.();
+          } catch (error) {
+            result.error = error;
+            tx.error = error;
+            (result.onerror as (() => void) | undefined)?.();
+            aborted = true;
+            (tx.onabort as (() => void) | undefined)?.();
+          } finally {
+            pending -= 1;
+            maybeComplete();
+          }
+        });
+        return result;
+      };
+
+      tx.abort = () => {
+        if (aborted) return;
+        aborted = true;
+        queueMicrotask(() => (tx.onabort as (() => void) | undefined)?.());
+      };
+      tx.objectStore = (name: string) => {
+        const data = stores.get(name);
+        if (!data) throw new Error(`unknown object store ${name}`);
+        return {
+          get(key: IDBValidKey) {
+            return request(() => structuredClone(data.get(String(key))));
+          },
+          put(value: unknown, key: IDBValidKey) {
+            return request(() => {
+              if (options.failWrites) throw new Error("disk full");
+              data.set(String(key), structuredClone(value));
+              return key;
+            });
+          },
+          delete(key: IDBValidKey) {
+            return request(() => {
+              if (options.failWrites) throw new Error("disk full");
+              data.delete(String(key));
+              return undefined;
+            });
+          },
+          clear() {
+            return request(() => {
+              if (options.failWrites) throw new Error("disk full");
+              data.clear();
+              return undefined;
+            });
+          },
+          getAllKeys() {
+            return request(() => Array.from(data.keys()));
+          },
+          getAll() {
+            return request(() => Array.from(data.values(), (value) => structuredClone(value)));
+          },
+        };
+      };
+      return tx;
+    },
+  };
+
+  globalThis.indexedDB = {
+    open() {
+      const request: Record<string, unknown> = { error: null, result: db };
+      queueMicrotask(() => (request.onsuccess as (() => void) | undefined)?.());
+      return request;
+    },
+  } as unknown as IDBFactory;
+  return {
+    getVaultRecord: () =>
+      structuredClone(stores.get("vault")?.get("snapshot")) as {
+        format: number;
+        version: number;
+        snapshotJson: string | null;
+      },
+    getManifest: (id) => structuredClone(stores.get("attachment_manifests")?.get(id)),
+    getChunk: (key) => structuredClone(stores.get("attachment_chunks")?.get(key)),
+  };
+}
+
 test("durability failure poisons recovery installation and fences queued mutations", async () => {
   installFailingIndexedDb();
   let totalPutCount = 0;
@@ -245,6 +495,271 @@ test("WASM mutation errors remain recoverable and do not poison the session", as
 
   await assert.rejects(session.putItem("{}"), /validation failed/);
   assert.equal(session.isUnlocked(), true);
+  assert.deepEqual(session.listItems(), []);
+});
+
+test("master passphrase change persists through the normal durability fence", async () => {
+  const snapshot = JSON.stringify({ recoveryInstalled: false });
+  const indexedDb = installWritableIndexedDb({ format: 1, version: 0, snapshotJson: snapshot });
+  const liveVault = new FakeVault(true, false, undefined, null, true, null, snapshot);
+  const session = newSession(() => new FakeVault(false, false), liveVault);
+
+  await session.changePassphrase("current passphrase", "replacement passphrase");
+
+  assert.equal(liveVault.passphraseChangeCount, 1);
+  assert.deepEqual(indexedDb.getVaultRecord(), {
+    format: 1,
+    version: 1,
+    snapshotJson: snapshot,
+  });
+});
+
+test("portable exports require unlock and encrypted backup reads the durable fenced state", async () => {
+  const liveVault = new FakeVault(true, false);
+  const session = newSession(() => new FakeVault(false, false), liveVault);
+  const durableSnapshot = JSON.stringify({ recoveryInstalled: false });
+  installWritableIndexedDb({ format: 1, version: 0, snapshotJson: durableSnapshot });
+
+  const readable = JSON.parse(session.exportReadableVault()) as { format: string };
+  assert.equal(readable.format, "safeory-readable-export");
+  const encrypted = JSON.parse(await session.exportEncryptedSnapshot()) as {
+    format: string;
+    snapshot_json: string;
+    attachment_manifests: unknown[];
+    attachment_chunks: unknown[];
+  };
+  assert.equal(encrypted.format, "safeory-encrypted-browser-backup");
+  assert.equal(encrypted.snapshot_json, durableSnapshot);
+  assert.deepEqual(encrypted.attachment_manifests, []);
+  assert.deepEqual(encrypted.attachment_chunks, []);
+  assert.equal(liveVault.snapshotCount, 0);
+
+  session.lock();
+  assert.throws(() => session.exportReadableVault(), /Vault is locked/);
+  await assert.rejects(session.exportEncryptedSnapshot(), /Vault is locked/);
+});
+
+test("attachment persistence survives download, encrypted backup restore, delete, and reset", async () => {
+  const attachmentId = "00000000-0000-4000-8000-0000000000aa";
+  const ownerId = "00000000-0000-4000-8000-000000000001";
+  const indexedDb = installWritableIndexedDb({
+    format: 1,
+    version: 0,
+    snapshotJson: JSON.stringify({ recoveryInstalled: false }),
+  });
+  const liveVault = new FakeVault(true, false);
+  const session = newSession(() => new FakeVault(false, false), liveVault);
+  const fileBytes = Uint8Array.of(7);
+  const file = {
+    name: "attachment.bin",
+    size: fileBytes.byteLength,
+    slice(start?: number, end?: number) {
+      return new Blob([fileBytes.slice(start ?? 0, end ?? fileBytes.length)]);
+    },
+  } as File;
+
+  const added = await session.addAttachment(ownerId, 1, file);
+  assert.equal(added.summary.id, attachmentId);
+  assert.equal(added.itemRevision, 2);
+  assert.deepEqual(indexedDb.getManifest(attachmentId), {
+    format: 1,
+    revision: 1,
+    encryptedRecordJson: "{}",
+  });
+  assert.deepEqual(
+    new Uint8Array(indexedDb.getChunk(`${attachmentId}:0`) as ArrayBuffer),
+    fileBytes,
+  );
+
+  const downloaded = await session.downloadAttachment(ownerId, attachmentId);
+  assert.equal(downloaded.summary.filename, "attachment.bin");
+  assert.deepEqual(new Uint8Array(await downloaded.blob.arrayBuffer()), fileBytes);
+
+  const backupJson = await session.exportEncryptedSnapshot();
+  const backup = JSON.parse(backupJson) as {
+    attachment_manifests: unknown[];
+    attachment_chunks: Array<{ ciphertext_base64: string }>;
+  };
+  assert.equal(backup.attachment_manifests.length, 1);
+  assert.equal(backup.attachment_chunks.length, 1);
+  assert.equal(backup.attachment_chunks[0]?.ciphertext_base64, "Bw==");
+
+  const restoredIndexedDb = installWritableIndexedDb({
+    format: 1,
+    version: 0,
+    snapshotJson: null,
+  });
+  const fresh = new FakeVault(false, false, undefined, null, false);
+  const restored = newSession(
+    () =>
+      new FakeVault(
+        false,
+        false,
+        undefined,
+        null,
+        true,
+        "backup-passphrase",
+        null,
+        ownerId,
+        [attachmentId],
+      ),
+    fresh,
+  );
+  await restored.importEncryptedSnapshot(backupJson, "backup-passphrase");
+  assert.deepEqual(restoredIndexedDb.getManifest(attachmentId), {
+    format: 1,
+    revision: 1,
+    encryptedRecordJson: "{}",
+  });
+  assert.deepEqual(
+    new Uint8Array(restoredIndexedDb.getChunk(`${attachmentId}:0`) as ArrayBuffer),
+    fileBytes,
+  );
+
+  const summaries = await restored.listAttachments(ownerId, [attachmentId]);
+  assert.equal(summaries.length, 1);
+  await restored.deleteAttachment(ownerId, 2, summaries[0]!, 42);
+  assert.deepEqual(restoredIndexedDb.getManifest(attachmentId), {
+    format: 1,
+    revision: 2,
+    encryptedRecordJson: "{}",
+  });
+  assert.equal(restoredIndexedDb.getChunk(`${attachmentId}:0`), undefined);
+
+  await restored.reset();
+  assert.equal(restoredIndexedDb.getManifest(attachmentId), undefined);
+  assert.equal(restoredIndexedDb.getChunk(`${attachmentId}:0`), undefined);
+  assert.deepEqual(restoredIndexedDb.getVaultRecord(), {
+    format: 1,
+    version: 3,
+    snapshotJson: null,
+  });
+});
+
+test("permanent item purge atomically tombstones linked attachments and removes chunks", async () => {
+  const attachmentId = "00000000-0000-4000-8000-0000000000aa";
+  const ownerId = "00000000-0000-4000-8000-000000000001";
+  const indexedDb = installWritableIndexedDb({
+    format: 1,
+    version: 0,
+    snapshotJson: JSON.stringify({ recoveryInstalled: false }),
+  });
+  const liveVault = new FakeVault(true, false);
+  const session = newSession(() => new FakeVault(false, false), liveVault);
+  const file = {
+    name: "attachment.bin",
+    size: 1,
+    slice() {
+      return new Blob([Uint8Array.of(9)]);
+    },
+  } as File;
+  await session.addAttachment(ownerId, 1, file);
+  assert.notEqual(indexedDb.getChunk(`${attachmentId}:0`), undefined);
+
+  liveVault.trashedAttachmentIds = [attachmentId];
+  liveVault.purgeCommitJson = JSON.stringify({
+    item_revision: 4,
+    attachments: [
+      {
+        id: attachmentId,
+        expected_revision: 1,
+        attachment_revision: 2,
+        chunk_count: 1,
+        encrypted_record_json: JSON.stringify({ state: "tombstone" }),
+      },
+    ],
+  });
+  const purgedRevision = await session.purgeItem(ownerId, 3);
+
+  assert.equal(purgedRevision, 4);
+  assert.deepEqual(indexedDb.getManifest(attachmentId), {
+    format: 1,
+    revision: 2,
+    encryptedRecordJson: JSON.stringify({ state: "tombstone" }),
+  });
+  assert.equal(indexedDb.getChunk(`${attachmentId}:0`), undefined);
+  assert.equal(indexedDb.getVaultRecord().version, 2);
+});
+
+test("encrypted backup restore authenticates before replacing or persisting a fresh vault", async () => {
+  const indexedDb = installWritableIndexedDb({ format: 1, version: 0, snapshotJson: null });
+  const backup = JSON.stringify({ backup: "ciphertext" });
+  const fresh = new FakeVault(false, false, undefined, null, false);
+  let factorySnapshot: string | null = null;
+  const factory: VaultFactory = (snapshot) => {
+    factorySnapshot = snapshot;
+    return new FakeVault(false, false, undefined, null, true, "backup-passphrase", backup);
+  };
+  const session = newSession(factory, fresh);
+
+  await session.importEncryptedSnapshot(backup, "backup-passphrase");
+
+  assert.equal(factorySnapshot, backup);
+  assert.equal(session.isInitialized(), true);
+  assert.equal(session.isUnlocked(), true);
+  assert.deepEqual(indexedDb.getVaultRecord(), {
+    format: 1,
+    version: 1,
+    snapshotJson: backup,
+  });
+});
+
+test("encrypted backup restore rejects wrong authentication without changing the fresh vault", async () => {
+  const backup = JSON.stringify({ backup: "ciphertext" });
+  const fresh = new FakeVault(false, false, undefined, null, false);
+  const factory: VaultFactory = () =>
+    new FakeVault(false, false, undefined, null, true, "correct-passphrase", backup);
+  const session = newSession(factory, fresh);
+
+  await assert.rejects(
+    session.importEncryptedSnapshot(backup, "wrong-passphrase"),
+    /wrong passphrase/,
+  );
+  assert.equal(session.isInitialized(), false);
+  assert.equal(session.isUnlocked(), false);
+  assert.equal(fresh.snapshotCount, 0, "failed authentication must not snapshot or mutate the fresh vault");
+});
+
+test("encrypted backup restore cannot overwrite an initialized browser vault", async () => {
+  const liveVault = new FakeVault(true, false);
+  let factoryCalls = 0;
+  const session = newSession(
+    () => {
+      factoryCalls += 1;
+      return new FakeVault(false, false);
+    },
+    liveVault,
+  );
+
+  await assert.rejects(
+    session.importEncryptedSnapshot("{}", "passphrase"),
+    /available only before this browser vault is created/,
+  );
+  assert.equal(factoryCalls, 0);
+  assert.equal(session.isUnlocked(), true);
+});
+
+test("encrypted backup restore persistence failure leaves the fresh vault healthy and retryable", async () => {
+  installWritableIndexedDb(
+    { format: 1, version: 0, snapshotJson: null },
+    { failWrites: true },
+  );
+  const backup = JSON.stringify({ backup: "ciphertext" });
+  const fresh = new FakeVault(false, false, undefined, null, false);
+  const factory: VaultFactory = (snapshot) => {
+    if (snapshot === backup) {
+      return new FakeVault(false, false, undefined, null, true, "backup-passphrase", backup);
+    }
+    return new FakeVault(false, false, undefined, null, false);
+  };
+  const session = newSession(factory, fresh);
+
+  await assert.rejects(
+    session.importEncryptedSnapshot(backup, "backup-passphrase"),
+    /disk full/,
+  );
+  assert.equal(session.isInitialized(), false);
+  assert.equal(session.isUnlocked(), false);
   assert.deepEqual(session.listItems(), []);
 });
 

@@ -2,7 +2,12 @@
 
 import { useRef, useState } from "react"
 import type { TrustedPrincipal } from "@safeory/contracts"
-import { SparklesIcon, ViewIcon, ViewOffIcon } from "@hugeicons/core-free-icons"
+import type { AttachmentSummary } from "@safeory/contracts"
+import {
+  KeyGeneratorFobIcon,
+  ViewIcon,
+  ViewOffIcon,
+} from "@hugeicons/core-free-icons"
 import { HugeiconsIcon } from "@hugeicons/react"
 
 import { Badge } from "@/components/ui/badge"
@@ -24,6 +29,8 @@ import { Input } from "@/components/ui/input"
 import { Separator } from "@/components/ui/separator"
 import { Textarea } from "@/components/ui/textarea"
 import { AccessGrantEditor } from "@/components/safeory/AccessGrantEditor"
+import { AttachmentEditor } from "@/components/safeory/AttachmentEditor"
+import type { EditableEntry } from "@/lib/vault/use-vault"
 import type {
   AccessPolicy,
   AccountClosureDisposition,
@@ -51,6 +58,20 @@ interface Props {
   generatePassword: (length: number) => string
   trustedPrincipals: TrustedPrincipal[]
   onTrash?: () => void | Promise<void>
+  onOwnerChange: (owner: EditableEntry) => void
+  getAttachments: (owner: EditableEntry) => Promise<AttachmentSummary[]>
+  addAttachment: (
+    owner: EditableEntry,
+    file: File
+  ) => Promise<EditableEntry | null>
+  deleteAttachment: (
+    owner: EditableEntry,
+    summary: AttachmentSummary
+  ) => Promise<EditableEntry | null>
+  downloadAttachment: (
+    owner: EditableEntry,
+    summary: AttachmentSummary
+  ) => Promise<{ summary: AttachmentSummary; blob: Blob } | null>
 }
 
 export function ItemEditor({
@@ -61,6 +82,11 @@ export function ItemEditor({
   generatePassword,
   trustedPrincipals,
   onTrash,
+  onOwnerChange,
+  getAttachments,
+  addAttachment,
+  deleteAttachment,
+  downloadAttachment,
 }: Props) {
   const isEdit = existing !== null
   const kind: ItemKind =
@@ -231,7 +257,7 @@ export function ItemEditor({
                         title="Generate strong password"
                         onClick={() => setField(spec.key, generatePassword(20))}
                       >
-                        <HugeiconsIcon icon={SparklesIcon} strokeWidth={2} />
+                        <HugeiconsIcon icon={KeyGeneratorFobIcon} strokeWidth={2} />
                         <span className="hidden sm:inline">Generate</span>
                       </InputGroupButton>
                     ) : null}
@@ -313,6 +339,20 @@ export function ItemEditor({
         ) : null}
 
         <Separator />
+
+        {existing ? (
+          <>
+            <AttachmentEditor
+              owner={existing}
+              onOwnerChange={onOwnerChange}
+              getAttachments={getAttachments}
+              addAttachment={addAttachment}
+              deleteAttachment={deleteAttachment}
+              downloadAttachment={downloadAttachment}
+            />
+            <Separator />
+          </>
+        ) : null}
 
         <div className="space-y-4">
           <div>

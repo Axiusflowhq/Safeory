@@ -111,7 +111,7 @@ gates are green, including the generated-WASM Node smoke test.**
   dual-key pairing verification is implemented; it does not enable release.
 - ✅ DONE: Today/deadlines is exposed as a redacted unlocked-only WASM projection and rendered lazily in the web app. TODO: browser attachments and item links/jump navigation; add headless-browser `wasm-pack test` when a browser is available.
 - Keep gates: frozen-lockfile install, `cargo fmt/clippy/test/audit/deny`, Compose
-  config validation, pnpm typecheck/test:browser/lint/check:icons/build/audit:js.
+  config validation, Bun typecheck/test:browser/lint/check:icons/build/audit:js.
 
 ### Phase 2 — Credential core upgrade (pure `vault-*` crates)
 Make credentials a first-class password-manager record, not a secure note:
