@@ -67,8 +67,8 @@ Rule: cloud integration starts only after the local platform below is stable.
 
 1. Integrate the implemented versioned account -> household -> private/shared
    space contracts and ciphertext-preserving single-owner migration with the
-   browser/API, then add independently rotatable space-key envelopes without
-   weakening existing encryption.
+   browser/API. The independently rotatable, device-specific space-key envelope
+   crypto is implemented; durable publication and rotation fencing remain.
 2. Finalize a reviewed high-entropy Account Secret/device-enrollment design for
    cloud accounts, plus new-device and recovery flows. Cognito identity must not
    become the sole protection for remotely stored root wraps.

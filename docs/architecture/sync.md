@@ -4,8 +4,9 @@ Status: target protocol architecture; not implemented end-to-end. The existing
 `apps/api` opaque object endpoints are an initial transport surface.
 `crates/vault-sync` now implements the bounded versioned account/household/
 membership/space domain contracts and a ciphertext-preserving single-owner
-migration plan; key envelopes, mutation/pull protocol, and client integration
-remain incomplete.
+migration plan. It also prepares and opens device-specific, generation-bound
+space-key envelopes; atomic server rotation fencing, mutation/pull protocol,
+and client persistence remain incomplete.
 
 ## Goals
 

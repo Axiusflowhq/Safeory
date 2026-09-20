@@ -28,7 +28,8 @@ Implemented now:
 - `apps/api` plus a local Docker integration stack for account/device coordination and opaque encrypted-object sync using PostgreSQL, Valkey, S3-compatible object storage, and SMTP; the production target is AWS as documented in `docs/architecture/aws.md`;
 - `vault-sync` versioned account/household/membership/private-and-shared-space
   contracts, including fail-closed topology validation and a local single-owner
-  ciphertext-preserving migration plan;
+  ciphertext-preserving migration plan, plus independently rotatable
+  device-specific space-key envelopes;
 - pinned Rust/JS lockfiles and dependency/security CI policy.
 
 Not implemented yet: browser/API integration and server enforcement for the

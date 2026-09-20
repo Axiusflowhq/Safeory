@@ -160,8 +160,11 @@ gates are green, including the generated-WASM Node smoke test.**
 - 🟡 Contract ready: a single-owner migration plan preserves existing opaque
   object IDs while assigning them to one account, household, and private space;
   wiring that plan into browser persistence is still outstanding.
-- Implement independently rotatable private/shared/purpose-space keys and
-  membership envelopes. Keep random per-item and attachment keys.
+- ✅ DONE (crypto foundation): independently rotatable random SpaceKeys and
+  device-specific membership envelopes bind space/member/device/generation
+  context and reject transplant, rollback, duplicate-recipient, and overflow
+  cases. Server publication/rotation fencing and browser persistence remain.
+  Random per-item and attachment keys remain unchanged.
 - Write the sync protocol specification and compatibility matrix before adding
   a second implementation.
 - Decide the high-entropy Account Secret/device-enrollment construction in an
@@ -320,7 +323,7 @@ Additional completion requirements from the combined-product architecture:
 | 6 | Sync backend | RESOLVED — AWS production: Rust HTTP API + Cognito + RDS PostgreSQL + S3 ciphertext storage + Valkey/ElastiCache as ephemeral coordination + SES + CloudFront/Route 53/ACM; Docker Compose is local development only |
 | 7 | AWS production packaging | RESOLVED architecture in `docs/architecture/aws.md`; implement reviewable IaC under `infra/aws/`, OIDC CI/CD, migrations, health checks, observability, and tested backup/restore before Phase 4 is production-ready |
 | 8 | Product parity boundary | RESOLVED — target 1Password Individual/Families + Trustworthy household/continuity; exclude 1Password Business/Enterprise/Developer |
-| 9 | Household key boundary | Domain contracts are implemented; finalize the space-key envelope/rotation ADR before cryptographic integration |
+| 9 | Household key boundary | RESOLVED — ADR 0005 defines device-specific space-key envelopes and monotonic rotation; server/client integration remains |
 | 10 | Cloud offline-attack factor | Add a high-entropy Account Secret or equivalent device-enrollment factor; exact construction and migration require review |
 | 11 | Document automation | Local/private processing by default; any remote OCR/AI is explicit opt-in with a separate disclosure/threat ADR |
 | 12 | Reminder scheduling | Offer private-local and opt-in minimal-metadata cloud scheduling; never put reminder content in email/push metadata |

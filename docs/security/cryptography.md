@@ -171,6 +171,14 @@ Implemented additional domains (Trust Engine foundation):
   rejected fail-closed at the v2 boundary. Long-term device
   secrets rely on `x25519-dalek`'s `zeroize` drop handling (default feature,
   kept on).
+- `space-key:v1` share purpose plus the authenticated fixed-binary
+  `safeory:space-key-envelope:v1\0` payload — transports one random 256-bit
+  SpaceKey to one authorized device while binding the space, generation,
+  membership, recipient device, and sender device. Routing fields are mirrored
+  outside the ciphertext and must match the authenticated payload when opened,
+  preventing cross-space and cross-generation transplantation. Rotation always
+  generates a fresh SpaceKey; old delivered keys cannot be recalled. As with
+  every v2 share envelope, the claimed X25519 sender is not a signature.
 - `safeory:trusted-device-pairing-challenge:v1` plus
   `safeory:v1:trusted-device-pairing-challenge-wrap` — owner-generated one-time
   256-bit challenge encrypted under a fresh ephemeral X25519 -> recipient DH.

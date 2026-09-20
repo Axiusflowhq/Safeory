@@ -12,6 +12,13 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
+mod space_keys;
+
+pub use space_keys::{
+    PreparedSpaceKeyGeneration, SpaceKey, SpaceKeyEnvelopeV1, SpaceKeyError, SpaceKeyRecipient,
+    open_space_key, prepare_initial_space_key, prepare_rotated_space_key,
+};
+
 pub const DOMAIN_FORMAT_VERSION: u16 = 1;
 pub const MAX_HOUSEHOLDS_PER_ACCOUNT: usize = 32;
 pub const MAX_DEVICES_PER_ACCOUNT: usize = 64;

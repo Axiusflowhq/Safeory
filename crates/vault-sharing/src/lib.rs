@@ -62,6 +62,7 @@ pub enum SharingError {
 pub enum SharePurpose {
     ItemKey,
     RecoveryShare,
+    SpaceKey,
 }
 
 impl SharePurpose {
@@ -70,6 +71,7 @@ impl SharePurpose {
         match self {
             Self::ItemKey => "item-key:v1",
             Self::RecoveryShare => "recovery-share:v1",
+            Self::SpaceKey => "space-key:v1",
         }
     }
 }
@@ -484,6 +486,7 @@ fn pairing_proof_transcript(
 /// Version 2 envelope that transports one shared secret to exactly one recipient
 /// device and binds the claimed sender key into the key schedule and AAD.
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ShareEnvelopeV2 {
     pub format_version: u16,
     pub algorithm: String,

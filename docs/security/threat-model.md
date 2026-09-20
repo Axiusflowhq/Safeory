@@ -8,7 +8,7 @@ Status: browser/WASM + extension + AWS-hosted API baseline. Update this document
 - AccountRootKey and derived/wrapped item keys.
 - Device private keys and recovery-key material.
 - Production Account Secret/device-enrollment material and private/shared space
-  keys when those formats land.
+  keys.
 - Trusted-person authorization and emergency-grant state.
 - Household membership, collaborator permissions, SecureLinks, reminder
   schedules, Inbox contents, and security/activity history.
@@ -58,6 +58,8 @@ Status: browser/WASM + extension + AWS-hosted API baseline. Update this document
 | Malicious or removed household member | Reads future shared data or mutates household state | Dual server/crypto authorization, explicit space membership, device revoke, key rotation, signed security events | Previously received plaintext or keys cannot be recalled |
 | Organizer overreach | Household organizer reads a member's private records | Private-space keys never follow administrative role alone | Compromised member device can still reveal that member's private space |
 | Space-key rotation failure | Revoked member continues receiving future updates | Versioned membership envelopes, rotation fencing, client compatibility tests | Rotation cannot erase earlier copies |
+| Space-key envelope transplant | A key is accepted for the wrong space, generation, membership, or device | Authenticated fixed-binary inner context must match bounded outer routing fields and caller expectations | An authorized recipient still learns the key intentionally addressed to that device |
+| Forged space-key sender claim | A recipient represents a self-forged X25519 envelope as owner-issued | Treat claimed sender only as context; require separate signed security mutation plus active-device authorization before server publication | Device signatures prove key possession, not human identity or intent |
 | SecureLink guessing or forwarding | Unauthorized external access to a shared copy | High-entropy capability, audience binding where selected, expiry, revocation, rate limits, encrypted immutable copy | Authorized recipient can copy plaintext |
 | Travel Mode implemented as hiding | Sensitive vault remains physically recoverable on device | Remove non-travel space keys and local ciphertext; test authenticated restoration | OS/browser backups may retain prior device data outside immediate control |
 | Reminder metadata leakage | Household events or sensitive conditions inferred | Private-local default; opt-in minimum schedule envelope; generic notifications | Timing and frequency leak in cloud mode |
@@ -101,6 +103,9 @@ Status: browser/WASM + extension + AWS-hosted API baseline. Update this document
   space keys.
 - Removing a member/device blocks future delivery and rotates affected space
   keys; it cannot retract previously decrypted information.
+- Space-key envelopes authenticate space, generation, membership, recipient
+  device, and sender-device context. Their X25519 sender field is not a
+  signature; remote rotation publication requires a separately signed mutation.
 - Legacy designation alone grants no current space or item key.
 - Travel Mode is a key/ciphertext residency control, not a filtering feature.
 - Automated extraction and filing suggestions are untrusted input and enter an

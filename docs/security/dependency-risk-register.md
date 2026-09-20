@@ -1,6 +1,6 @@
 # Dependency Risk Register
 
-Verified: 2026-09-19
+Verified: 2026-09-20
 
 This register records security-relevant direct dependencies and narrowly scoped policy exceptions that require ongoing review. It is not an allowlist of vulnerabilities.
 
@@ -13,6 +13,9 @@ This register records security-relevant direct dependencies and narrowly scoped 
   (default features kept on so the `zeroize` drop handling for `StaticSecret`
   / `SharedSecret` stays active — verified against the vendored source; the
   memory-handling section of `cryptography.md` depends on this).
+- `vault-sync` reuses the `vault-sharing` envelope for the `space-key:v1`
+  purpose; it does not add another curve implementation or public-key
+  construction.
 - No custom curve code: ephemeral keygen, DH, and contributory checks all come
   from the audited crate; Safeory only adds key encoding/bounds, HKDF key
   separation, and AEAD envelope framing with reviewed RustCrypto primitives.
