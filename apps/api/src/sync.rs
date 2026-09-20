@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use axum::{
     Json,
     body::{Body, Bytes},
@@ -12,7 +14,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::warn;
 use uuid::Uuid;
-use vault_sync::{AccountId, ObjectId, OpaqueMutationV1};
+use vault_sync::{
+    AccountId, DeviceId, HouseholdId, HouseholdTopologyV1, ObjectId, ObjectScopeV1,
+    OpaqueMutationV1, TopologyAction,
+};
 
 use crate::{
     AppState,
@@ -24,11 +29,12 @@ use crate::{
         DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT, ObjectMetadataResponse, OperationOutcome, PolicyError,
         StoredObject, WritePrecondition, strong_etag, validate_write_policy,
     },
-    store::{AuthContext, CommitError, StoreError},
+    store::{AuthContext, CommitError, StoreError, TopologyWriteError, TopologyWriteOutcome},
 };
 
 pub(crate) const MAX_CIPHERTEXT_OBJECT_BYTES: usize =
     vault_sync::MAX_SYNC_CIPHERTEXT_BYTES as usize;
+pub(crate) const MAX_TOPOLOGY_BYTES: usize = 1024 * 1024;
 const MUTATION_HEADER: &str = "x-safeory-mutation";
 const CHANGE_SEQ_HEADER: &str = "x-safeory-change-seq";
 const MAX_MUTATION_HEADER_BYTES: usize = 8 * 1024;
@@ -110,6 +116,59 @@ pub(crate) async fn revoke_device(
     Ok(StatusCode::NO_CONTENT)
 }
 
+pub(crate) async fn get_household_topology(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(household_id): Path<Uuid>,
+) -> Result<Json<HouseholdTopologyV1>, ApiError> {
+    let auth = authenticate_device(&state, &headers).await?;
+    let topology = state
+        .metadata
+        .get_household_topology(household_id)
+        .await
+        .map_err(|error| backend_store_error("read household topology", error))?
+        .ok_or(ApiError::NotFound)?;
+    let authorized = topology
+        .authorizes_device_scope(
+            AccountId(auth.account_id),
+            DeviceId(auth.device_id),
+            ObjectScopeV1::Household {
+                account_id: AccountId(auth.account_id),
+                household_id: HouseholdId(household_id),
+            },
+            TopologyAction::Read,
+        )
+        .map_err(|_| ApiError::Internal)?;
+    if !authorized {
+        return Err(ApiError::Forbidden);
+    }
+    Ok(Json(topology))
+}
+
+pub(crate) async fn put_household_topology(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(household_id): Path<Uuid>,
+    Json(topology): Json<HouseholdTopologyV1>,
+) -> Result<StatusCode, ApiError> {
+    let auth = authenticate_device(&state, &headers).await?;
+    topology
+        .validate()
+        .map_err(|_| ApiError::BadRequest("invalid household topology"))?;
+    if topology.household.household_id.0 != household_id {
+        return Err(ApiError::BadRequest("household topology path mismatch"));
+    }
+    let outcome = state
+        .metadata
+        .put_household_topology(auth, &topology)
+        .await
+        .map_err(topology_write_error)?;
+    Ok(match outcome {
+        TopologyWriteOutcome::Created => StatusCode::CREATED,
+        TopologyWriteOutcome::Updated | TopologyWriteOutcome::Replayed => StatusCode::NO_CONTENT,
+    })
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct ListObjectsQuery {
     after: Option<i64>,
@@ -137,17 +196,27 @@ pub(crate) async fn list_objects(
         return Err(ApiError::BadRequest("limit must be between 1 and 256"));
     }
 
-    let objects = state
+    let candidates = state
         .metadata
         .list_objects(auth.account_id, after, i64::from(limit))
         .await
         .map_err(|error| backend_store_error("list objects", error))?;
-    let next_change_seq = objects.last().map_or(after, |object| object.change_seq);
-    let objects = objects
-        .iter()
-        .map(ObjectMetadataResponse::try_from)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| ApiError::Internal)?;
+    let next_change_seq = candidates.last().map_or(after, |object| object.change_seq);
+    let mut topology_cache = HashMap::new();
+    let mut objects = Vec::with_capacity(candidates.len());
+    for object in &candidates {
+        if scope_authorized_cached(
+            &state,
+            auth,
+            object.header.scope,
+            TopologyAction::Read,
+            &mut topology_cache,
+        )
+        .await?
+        {
+            objects.push(ObjectMetadataResponse::try_from(object).map_err(|_| ApiError::Internal)?);
+        }
+    }
 
     Ok(Json(ListObjectsResponse {
         objects,
@@ -177,6 +246,9 @@ pub(crate) async fn put_object(
             ciphertext_sha256,
         )
         .map_err(|_| ApiError::BadRequest("invalid opaque mutation binding"))?;
+    if !scope_authorized(&state, auth, mutation.object.scope, TopologyAction::Write).await? {
+        return Err(ApiError::Forbidden);
+    }
     let canonical_mutation = serde_json::to_vec(&mutation).map_err(|_| ApiError::Internal)?;
     let request_sha256: [u8; 32] = Sha256::digest(&canonical_mutation).into();
 
@@ -219,7 +291,7 @@ pub(crate) async fn put_object(
     let committed = match state
         .metadata
         .commit_object(
-            auth.account_id,
+            auth,
             &mutation,
             &precondition,
             ciphertext_size_bytes,
@@ -265,6 +337,7 @@ pub(crate) async fn put_object(
                 CommitError::PreconditionFailed => ApiError::PreconditionFailed,
                 CommitError::AccountMissing => ApiError::Unauthorized,
                 CommitError::OperationConflict => ApiError::OperationConflict,
+                CommitError::UnauthorizedScope => ApiError::Forbidden,
                 CommitError::InvalidContract => ApiError::Internal,
                 CommitError::Database(error) => {
                     backend_store_error("commit object", StoreError::Database(error))
@@ -306,6 +379,9 @@ pub(crate) async fn get_object(
         .await
         .map_err(|error| backend_store_error("read object metadata", error))?
         .ok_or(ApiError::NotFound)?;
+    if !scope_authorized(&state, auth, object.header.scope, TopologyAction::Read).await? {
+        return Err(ApiError::Forbidden);
+    }
     let body = state
         .blobs
         .get(&object.storage_key)
@@ -327,6 +403,73 @@ pub(crate) async fn get_object(
         .header(ETAG, etag)
         .header(CHANGE_SEQ_HEADER, object.change_seq.to_string())
         .body(Body::from(body))
+        .map_err(|_| ApiError::Internal)
+}
+
+async fn scope_authorized(
+    state: &AppState,
+    auth: AuthContext,
+    scope: ObjectScopeV1,
+    action: TopologyAction,
+) -> Result<bool, ApiError> {
+    match scope {
+        ObjectScopeV1::Account { account_id } => Ok(account_id.0 == auth.account_id),
+        ObjectScopeV1::Household { household_id, .. }
+        | ObjectScopeV1::Space { household_id, .. } => {
+            let topology = state
+                .metadata
+                .get_household_topology(household_id.0)
+                .await
+                .map_err(|error| backend_store_error("authorize object scope", error))?;
+            evaluate_scope(topology.as_ref(), auth, scope, action)
+        }
+    }
+}
+
+async fn scope_authorized_cached(
+    state: &AppState,
+    auth: AuthContext,
+    scope: ObjectScopeV1,
+    action: TopologyAction,
+    cache: &mut HashMap<Uuid, Option<HouseholdTopologyV1>>,
+) -> Result<bool, ApiError> {
+    let household_id = match scope {
+        ObjectScopeV1::Account { account_id } => return Ok(account_id.0 == auth.account_id),
+        ObjectScopeV1::Household { household_id, .. }
+        | ObjectScopeV1::Space { household_id, .. } => household_id.0,
+    };
+    if let std::collections::hash_map::Entry::Vacant(entry) = cache.entry(household_id) {
+        let topology = state
+            .metadata
+            .get_household_topology(household_id)
+            .await
+            .map_err(|error| backend_store_error("authorize object feed", error))?;
+        entry.insert(topology);
+    }
+    evaluate_scope(
+        cache.get(&household_id).and_then(Option::as_ref),
+        auth,
+        scope,
+        action,
+    )
+}
+
+fn evaluate_scope(
+    topology: Option<&HouseholdTopologyV1>,
+    auth: AuthContext,
+    scope: ObjectScopeV1,
+    action: TopologyAction,
+) -> Result<bool, ApiError> {
+    let Some(topology) = topology else {
+        return Ok(false);
+    };
+    topology
+        .authorizes_device_scope(
+            AccountId(auth.account_id),
+            DeviceId(auth.device_id),
+            scope,
+            action,
+        )
         .map_err(|_| ApiError::Internal)
 }
 
@@ -441,6 +584,21 @@ fn policy_error(error: PolicyError) -> ApiError {
     }
 }
 
+fn topology_write_error(error: TopologyWriteError) -> ApiError {
+    match error {
+        TopologyWriteError::InvalidContract => ApiError::BadRequest("invalid household topology"),
+        TopologyWriteError::Unauthorized => ApiError::Forbidden,
+        TopologyWriteError::PreconditionFailed => ApiError::PreconditionFailed,
+        TopologyWriteError::UnknownPrincipal => {
+            ApiError::BadRequest("household topology references an unknown principal")
+        }
+        TopologyWriteError::Database(_) | TopologyWriteError::Store(_) => {
+            warn!("household topology persistence failed");
+            ApiError::Unavailable
+        }
+    }
+}
+
 fn backend_store_error(operation: &'static str, _error: StoreError) -> ApiError {
     warn!(operation, "PostgreSQL metadata operation failed");
     ApiError::Unavailable
@@ -454,6 +612,7 @@ fn blob_error(operation: &'static str, _error: crate::blob::BlobStoreError) -> A
 #[derive(Debug)]
 pub(crate) enum ApiError {
     Unauthorized,
+    Forbidden,
     NotFound,
     BadRequest(&'static str),
     UnsupportedMediaType,
@@ -473,6 +632,7 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, error) = match self {
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
+            Self::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found"),
             Self::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
             Self::UnsupportedMediaType => (

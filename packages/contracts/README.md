@@ -13,3 +13,11 @@ credentials; successful writes are acknowledged separately so interrupted
 flushes retry through operation-ID idempotency. The pull coordinator downloads
 and verifies bounded pages, invokes an idempotent durable-acceptance callback,
 and compare-and-swap checkpoints each change cursor only after acceptance.
+Canonical browser parsers for the account, household, membership, space, and
+single-owner migration contracts mirror `vault-sync` bounds and fail closed on
+unknown fields, inconsistent routing references, or invalid access topology.
+The matching browser/Rust scope evaluator binds the authenticated account and
+device to account, household, or space routes and keeps read, write, and manage
+authority distinct; successful routing authorization never implies key access.
+Both implementations load the same canonical topology fixture in their test
+suites so JSON wire-shape drift fails CI on either side.

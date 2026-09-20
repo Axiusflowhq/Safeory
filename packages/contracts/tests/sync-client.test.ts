@@ -12,12 +12,65 @@ import {
   type OpaqueObjectHeaderV1,
   type SyncObjectMetadataV1,
 } from "../src/sync-client"
+import type { HouseholdTopologyV1 } from "../src/sync-domain"
 
 const ACCOUNT_ID = "11111111-1111-4111-8111-111111111111"
 const OBJECT_ID = "22222222-2222-4222-8222-222222222222"
 const OPERATION_ID = "33333333-3333-4333-8333-333333333333"
 const DEVICE_TOKEN = `sfo_dev_v1_${"a".repeat(64)}`
 const CIPHERTEXT = new TextEncoder().encode("opaque ciphertext")
+const HOUSEHOLD_ID = "44444444-4444-4444-8444-444444444444"
+const MEMBERSHIP_ID = "55555555-5555-4555-8555-555555555555"
+const DEVICE_ID = "66666666-6666-4666-8666-666666666666"
+const SPACE_ID = "77777777-7777-4777-8777-777777777777"
+
+function topology(): HouseholdTopologyV1 {
+  return {
+    format_version: 1,
+    accounts: [{
+      format_version: 1,
+      account_id: ACCOUNT_ID,
+      household_ids: [HOUSEHOLD_ID],
+      device_ids: [DEVICE_ID],
+    }],
+    household: {
+      format_version: 1,
+      household_id: HOUSEHOLD_ID,
+      encrypted_profile_object_id: "88888888-8888-4888-8888-888888888888",
+      membership_ids: [MEMBERSHIP_ID],
+      space_ids: [SPACE_ID],
+      revision: 0,
+    },
+    memberships: [{
+      format_version: 1,
+      membership_id: MEMBERSHIP_ID,
+      account_id: ACCOUNT_ID,
+      household_id: HOUSEHOLD_ID,
+      role: "owner",
+      state: "active",
+      revision: 0,
+    }],
+    spaces: [{
+      format_version: 1,
+      space_id: SPACE_ID,
+      household_id: HOUSEHOLD_ID,
+      kind: "private",
+      encrypted_manifest_object_id: "99999999-9999-4999-8999-999999999999",
+      key_generation: 1,
+      revision: 0,
+    }],
+    space_members: [{
+      format_version: 1,
+      space_id: SPACE_ID,
+      membership_id: MEMBERSHIP_ID,
+      access: "manage",
+      envelope_object_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      device_id: DEVICE_ID,
+      key_generation: 1,
+      revision: 0,
+    }],
+  }
+}
 
 async function header(): Promise<OpaqueObjectHeaderV1> {
   return {
@@ -242,5 +295,72 @@ test("device credentials cannot be sent to insecure remote HTTP origins", async 
     ),
     (error: unknown) =>
       error instanceof SyncClientError && error.code === "invalid_configuration",
+  )
+})
+
+test("client publishes and retrieves canonical household topology", async () => {
+  const expected = topology()
+  const requests: Array<{ url: string; init: RequestInit }> = []
+  const fetcher: typeof fetch = async (input, init = {}) => {
+    requests.push({ url: String(input), init })
+    if (String(input).endsWith("/v1/compatibility")) {
+      return Response.json(CURRENT_SYNC_COMPATIBILITY)
+    }
+    if (init.method === "PUT") return new Response(null, { status: 201 })
+    return Response.json(expected)
+  }
+  const client = await SyncClient.connect(
+    "https://sync.example.test",
+    ACCOUNT_ID,
+    DEVICE_TOKEN,
+    { fetcher },
+  )
+
+  await client.putHouseholdTopology(expected)
+  assert.deepEqual(await client.getHouseholdTopology(HOUSEHOLD_ID), expected)
+  assert.equal(
+    requests[1]?.url,
+    `https://sync.example.test/v1/households/${HOUSEHOLD_ID}/topology`,
+  )
+  assert.deepEqual(JSON.parse(String(requests[1]?.init.body)), expected)
+})
+
+test("topology client rejects cross-account responses and maps forbidden access", async () => {
+  const expected = topology()
+  let forbidden = false
+  const fetcher: typeof fetch = async (input) => {
+    if (String(input).endsWith("/v1/compatibility")) {
+      return Response.json(CURRENT_SYNC_COMPATIBILITY)
+    }
+    if (forbidden) return new Response(null, { status: 403 })
+    return Response.json({
+      ...expected,
+      accounts: [{
+        ...expected.accounts[0],
+        account_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      }],
+      memberships: [{
+        ...expected.memberships[0],
+        account_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      }],
+    })
+  }
+  const client = await SyncClient.connect(
+    "https://sync.example.test",
+    ACCOUNT_ID,
+    DEVICE_TOKEN,
+    { fetcher },
+  )
+
+  await assert.rejects(
+    client.getHouseholdTopology(HOUSEHOLD_ID),
+    (error: unknown) =>
+      error instanceof SyncClientError && error.code === "invalid_contract",
+  )
+  forbidden = true
+  await assert.rejects(
+    client.getHouseholdTopology(HOUSEHOLD_ID),
+    (error: unknown) =>
+      error instanceof SyncClientError && error.code === "forbidden",
   )
 })

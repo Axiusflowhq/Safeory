@@ -2,6 +2,13 @@ import {
   fetchSyncCompatibility,
   type NegotiatedCompatibility,
 } from "./sync-compatibility"
+import {
+  parseHouseholdTopology,
+  type HouseholdTopologyV1,
+} from "./sync-domain"
+import { SyncClientError } from "./sync-error"
+
+export { SyncClientError } from "./sync-error"
 
 const SYNC_PROTOCOL_VERSION = 1
 const OBJECT_HEADER_FORMAT_VERSION = 1
@@ -11,6 +18,7 @@ const MAX_WIRE_INTEGER = Number.MAX_SAFE_INTEGER
 const MAX_CIPHERTEXT_BYTES = 128 * 1024 * 1024
 const MAX_MUTATION_HEADER_CHARS = 8 * 1024
 const MAX_METADATA_RESPONSE_CHARS = 2 * 1024 * 1024
+const MAX_TOPOLOGY_BYTES = 1024 * 1024
 const DEVICE_TOKEN = /^sfo_dev_v1_[0-9a-f]{64}$/
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const NIL_UUID = "00000000-0000-0000-0000-000000000000"
@@ -82,25 +90,6 @@ export interface SyncObjectPageV1 {
   next_change_seq: number
 }
 
-export class SyncClientError extends Error {
-  constructor(
-    readonly code:
-      | "invalid_configuration"
-      | "invalid_contract"
-      | "request_failed"
-      | "unauthorized"
-      | "not_found"
-      | "precondition_failed"
-      | "operation_conflict"
-      | "invalid_response"
-      | "ciphertext_mismatch",
-    message: string,
-  ) {
-    super(message)
-    this.name = "SyncClientError"
-  }
-}
-
 export class SyncClient {
   private constructor(
     private readonly baseUrl: URL,
@@ -164,13 +153,6 @@ export class SyncClient {
       throw new SyncClientError(
         "invalid_response",
         "The sync response repeated an acknowledged change.",
-      )
-    }
-    const expectedNext = page.objects.at(-1)?.change_seq ?? after
-    if (page.next_change_seq !== expectedNext) {
-      throw new SyncClientError(
-        "invalid_response",
-        "The sync response cursor does not match the returned changes.",
       )
     }
     for (const object of page.objects) this.requireAccount(object.object)
@@ -251,6 +233,61 @@ export class SyncClient {
     return metadata
   }
 
+  async getHouseholdTopology(
+    householdIdValue: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<HouseholdTopologyV1> {
+    const householdId = uuid(householdIdValue, "household ID")
+    const response = await this.request(
+      this.endpoint(`v1/households/${encodeURIComponent(householdId)}/topology`),
+      {
+        method: "GET",
+        headers: this.headers({ Accept: "application/json" }),
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+      },
+    )
+    const topology = parseHouseholdTopology(
+      await boundedJson(response, MAX_TOPOLOGY_BYTES),
+    )
+    requireTopologyAccount(topology, this.accountId)
+    if (topology.household.household_id !== householdId) {
+      throw new SyncClientError(
+        "invalid_response",
+        "The household topology does not match the requested household.",
+      )
+    }
+    return topology
+  }
+
+  async putHouseholdTopology(
+    topologyValue: HouseholdTopologyV1,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<void> {
+    const topology = parseHouseholdTopology(topologyValue)
+    requireTopologyAccount(topology, this.accountId)
+    const encoded = JSON.stringify(topology)
+    if (new TextEncoder().encode(encoded).byteLength > MAX_TOPOLOGY_BYTES) {
+      throw new SyncClientError(
+        "invalid_contract",
+        "The household topology exceeds the transport bound.",
+      )
+    }
+    await this.request(
+      this.endpoint(
+        `v1/households/${encodeURIComponent(topology.household.household_id)}/topology`,
+      ),
+      {
+        method: "PUT",
+        headers: this.headers({
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        }),
+        body: encoded,
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+      },
+    )
+  }
+
   private endpoint(path: string): URL {
     return new URL(path, this.baseUrl)
   }
@@ -287,6 +324,9 @@ export class SyncClient {
     if (response.status === 401) {
       throw new SyncClientError("unauthorized", "The device credential was rejected.")
     }
+    if (response.status === 403) {
+      throw new SyncClientError("forbidden", "The device is not authorized for this scope.")
+    }
     if (response.status === 404) {
       throw new SyncClientError("not_found", "The opaque object was not found.")
     }
@@ -303,6 +343,15 @@ export class SyncClient {
       )
     }
     throw new SyncClientError("request_failed", "The sync endpoint returned an error.")
+  }
+}
+
+function requireTopologyAccount(topology: HouseholdTopologyV1, accountId: string): void {
+  if (!topology.accounts.some((account) => account.account_id === accountId)) {
+    throw new SyncClientError(
+      "invalid_contract",
+      "The household topology does not include the authenticated account.",
+    )
   }
 }
 

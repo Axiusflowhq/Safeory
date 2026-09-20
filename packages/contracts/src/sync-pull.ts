@@ -85,11 +85,9 @@ export class DurableSyncPuller {
       accepted += 1
     }
 
-    if (cursor !== page.next_change_seq) {
-      throw new SyncClientError(
-        "invalid_response",
-        "The accepted sync cursor does not match the response page.",
-      )
+    if (cursor < page.next_change_seq) {
+      await this.store.advance(this.accountId, cursor, page.next_change_seq)
+      cursor = page.next_change_seq
     }
     return { accepted, cursor }
   }

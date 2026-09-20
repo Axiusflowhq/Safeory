@@ -140,6 +140,12 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/objects", get(sync::list_objects))
         .route(
+            "/v1/households/{household_id}/topology",
+            get(sync::get_household_topology)
+                .put(sync::put_household_topology)
+                .layer(DefaultBodyLimit::max(sync::MAX_TOPOLOGY_BYTES)),
+        )
+        .route(
             "/v1/objects/{object_id}",
             get(sync::get_object)
                 .put(sync::put_object)

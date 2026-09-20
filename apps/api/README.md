@@ -67,8 +67,18 @@ List responses expose the persisted canonical opaque-object header plus change
 cursor and ETag; they do not reconstruct version or routing metadata from
 parallel API-specific fields.
 
-This endpoint set is not yet the complete combined-product protocol. The target
-account/household/space authorization, key-envelope distribution, conflict,
+`GET/PUT /v1/households/{household_id}/topology` retrieves or publishes the
+bounded canonical server-visible authorization topology. Initial publication is
+restricted to a revision-zero single-account topology managed by the calling
+device. Updates require current manage authority and exactly the next revision;
+an exact retry of the currently stored topology succeeds idempotently. All
+referenced accounts and devices must exist, match, and remain active.
+Household/space object list, download, and upload paths evaluate this topology.
+The change feed advances across filtered unauthorized changes so clients cannot
+loop on objects they are not permitted to discover.
+
+This endpoint set is not yet the complete combined-product protocol. Shared
+cross-account object routing, key-envelope distribution, conflict,
 revocation, attachment, SecureLink, reminder, Travel Mode, and compatibility
 contract is documented in `docs/architecture/sync.md`. Implementations must not
 invent incompatible behavior outside that contract without an ADR and matching

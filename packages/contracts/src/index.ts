@@ -76,6 +76,31 @@ export {
   DurableSyncPuller,
   IndexedDbSyncCursorStore,
 } from "./sync-pull";
+export {
+  MEMBERSHIP_ROLES,
+  MEMBERSHIP_STATES,
+  SPACE_ACCESS_LEVELS,
+  SPACE_KINDS,
+  TOPOLOGY_ACTIONS,
+  canDeviceAccessScope,
+  parseHouseholdTopology,
+  parseSingleOwnerMigration,
+} from "./sync-domain";
+export type {
+  AccountV1,
+  HouseholdTopologyV1,
+  HouseholdV1,
+  MembershipRoleV1,
+  MembershipStateV1,
+  MembershipV1,
+  ObjectSpaceAssignmentV1,
+  SingleOwnerMigrationV1,
+  SpaceAccessV1,
+  SpaceKindV1,
+  SpaceMemberV1,
+  SpaceV1,
+  TopologyActionV1,
+} from "./sync-domain";
 export type {
   AcceptPulledObject,
   PulledOpaqueObject,

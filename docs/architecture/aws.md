@@ -123,9 +123,9 @@ flowchart TD
 - The current `ACCOUNT_REGISTRATION_TOKEN` bootstrap flow is development-stage
   infrastructure and must not be the public production account-registration
   mechanism.
-- The API binds authenticated Cognito accounts to Safeory account/device rows;
-  authorization remains account-scoped server-side and never trusts a caller-
-  supplied account ID.
+- The API binds authenticated Cognito accounts to Safeory account/device rows.
+  Server-side routing authorization combines that identity with the published
+  household/space topology and never trusts a caller-supplied account ID.
 
 ### Email
 

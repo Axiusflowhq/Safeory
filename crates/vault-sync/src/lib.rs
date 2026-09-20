@@ -104,6 +104,13 @@ pub enum SpaceAccess {
     Manage,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TopologyAction {
+    Read,
+    Write,
+    Manage,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccountV1 {
@@ -349,6 +356,83 @@ impl HouseholdTopologyV1 {
         }
 
         Ok(())
+    }
+
+    /// Evaluates server-visible routing authorization only. A successful
+    /// result never substitutes for possession of the applicable client-side
+    /// decryption key.
+    pub fn authorizes_device_scope(
+        &self,
+        account_id: AccountId,
+        device_id: DeviceId,
+        scope: ObjectScopeV1,
+        action: TopologyAction,
+    ) -> Result<bool, ContractError> {
+        self.validate()?;
+        let Some(account) = self
+            .accounts
+            .iter()
+            .find(|account| account.account_id == account_id)
+        else {
+            return Ok(false);
+        };
+        if !account.device_ids.contains(&device_id) || scope.account_id() != account_id {
+            return Ok(false);
+        }
+
+        match scope {
+            ObjectScopeV1::Account { .. } => Ok(true),
+            ObjectScopeV1::Household { household_id, .. } => {
+                if household_id != self.household.household_id {
+                    return Ok(false);
+                }
+                Ok(self.memberships.iter().any(|membership| {
+                    membership.account_id == account_id
+                        && membership.household_id == household_id
+                        && membership.state == MembershipState::Active
+                        && match action {
+                            TopologyAction::Read => {
+                                membership.role != MembershipRole::LegacyCollaborator
+                            }
+                            TopologyAction::Write | TopologyAction::Manage => matches!(
+                                membership.role,
+                                MembershipRole::Owner | MembershipRole::Organizer
+                            ),
+                        }
+                }))
+            }
+            ObjectScopeV1::Space {
+                household_id,
+                space_id,
+                ..
+            } => {
+                if household_id != self.household.household_id {
+                    return Ok(false);
+                }
+                Ok(self.space_members.iter().any(|space_member| {
+                    if space_member.space_id != space_id || space_member.device_id != device_id {
+                        return false;
+                    }
+                    let Some(membership) = self
+                        .memberships
+                        .iter()
+                        .find(|membership| membership.membership_id == space_member.membership_id)
+                    else {
+                        return false;
+                    };
+                    membership.account_id == account_id
+                        && membership.state == MembershipState::Active
+                        && match action {
+                            TopologyAction::Read => true,
+                            TopologyAction::Write => matches!(
+                                space_member.access,
+                                SpaceAccess::Edit | SpaceAccess::Manage
+                            ),
+                            TopologyAction::Manage => space_member.access == SpaceAccess::Manage,
+                        }
+                }))
+            }
+        }
     }
 }
 
@@ -678,6 +762,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn shared_household_topology_fixture_round_trips_canonically() {
+        let source = include_str!("../fixtures/household_topology_v1.json");
+        let topology: HouseholdTopologyV1 =
+            serde_json::from_str(source).expect("parse shared topology fixture");
+
+        assert!(topology.validate().is_ok());
+        let encoded = serde_json::to_value(&topology).expect("serialize shared topology fixture");
+        let fixture: serde_json::Value =
+            serde_json::from_str(source).expect("parse shared topology fixture value");
+        assert_eq!(encoded, fixture);
+    }
+
+    #[test]
     fn single_owner_migration_preserves_object_ids_and_validates() {
         let existing = vec![ObjectId::new(), ObjectId::new()];
         let migration = SingleOwnerMigrationV1::new(existing.clone());
@@ -880,5 +977,131 @@ mod tests {
         migration.topology.memberships[1].role = MembershipRole::LegacyCollaborator;
         migration.topology.space_members[1].access = SpaceAccess::Read;
         assert_eq!(migration.validate(), Err(ContractError::InvalidRoleAccess));
+    }
+
+    #[test]
+    fn topology_authorization_binds_account_device_scope_and_access() {
+        let migration = SingleOwnerMigrationV1::new([]);
+        let topology = &migration.topology;
+        let account = &topology.accounts[0];
+        let account_id = account.account_id;
+        let device_id = account.device_ids[0];
+        let household_id = topology.household.household_id;
+        let space_id = topology.spaces[0].space_id;
+
+        assert_eq!(
+            topology.authorizes_device_scope(
+                account_id,
+                device_id,
+                ObjectScopeV1::Account { account_id },
+                TopologyAction::Write,
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            topology.authorizes_device_scope(
+                account_id,
+                device_id,
+                ObjectScopeV1::Household {
+                    account_id,
+                    household_id,
+                },
+                TopologyAction::Manage,
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            topology.authorizes_device_scope(
+                account_id,
+                device_id,
+                ObjectScopeV1::Space {
+                    account_id,
+                    household_id,
+                    space_id,
+                },
+                TopologyAction::Manage,
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            topology.authorizes_device_scope(
+                account_id,
+                DeviceId::new(),
+                ObjectScopeV1::Space {
+                    account_id,
+                    household_id,
+                    space_id,
+                },
+                TopologyAction::Read,
+            ),
+            Ok(false)
+        );
+        assert_eq!(
+            topology.authorizes_device_scope(
+                account_id,
+                device_id,
+                ObjectScopeV1::Space {
+                    account_id,
+                    household_id,
+                    space_id: SpaceId::new(),
+                },
+                TopologyAction::Read,
+            ),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn topology_authorization_separates_read_edit_and_manage() {
+        let mut migration = SingleOwnerMigrationV1::new([]);
+        let account_id = migration.topology.accounts[0].account_id;
+        let device_id = migration.topology.accounts[0].device_ids[0];
+        let household_id = migration.topology.household.household_id;
+        let space_id = migration.topology.spaces[0].space_id;
+        let scope = ObjectScopeV1::Space {
+            account_id,
+            household_id,
+            space_id,
+        };
+
+        migration.topology.space_members[0].access = SpaceAccess::Read;
+        assert_eq!(
+            migration.topology.authorizes_device_scope(
+                account_id,
+                device_id,
+                scope,
+                TopologyAction::Read,
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            migration.topology.authorizes_device_scope(
+                account_id,
+                device_id,
+                scope,
+                TopologyAction::Write,
+            ),
+            Ok(false)
+        );
+
+        migration.topology.space_members[0].access = SpaceAccess::Edit;
+        assert_eq!(
+            migration.topology.authorizes_device_scope(
+                account_id,
+                device_id,
+                scope,
+                TopologyAction::Write,
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            migration.topology.authorizes_device_scope(
+                account_id,
+                device_id,
+                scope,
+                TopologyAction::Manage,
+            ),
+            Ok(false)
+        );
     }
 }

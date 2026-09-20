@@ -3,7 +3,9 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::model::{OperationOutcome, StoredObject, WritePrecondition, validate_write_policy};
-use vault_sync::OpaqueMutationV1;
+use vault_sync::{
+    AccountId, DeviceId, HouseholdTopologyV1, ObjectScopeV1, OpaqueMutationV1, TopologyAction,
+};
 
 #[derive(Clone)]
 pub(crate) struct MetadataStore {
@@ -13,7 +15,7 @@ pub(crate) struct MetadataStore {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct AuthContext {
     pub account_id: Uuid,
-    pub _device_id: Uuid,
+    pub device_id: Uuid,
 }
 
 pub(crate) struct CommitResult {
@@ -21,6 +23,13 @@ pub(crate) struct CommitResult {
     pub previous_storage_key: Option<String>,
     pub created: bool,
     pub replayed: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TopologyWriteOutcome {
+    Created,
+    Updated,
+    Replayed,
 }
 
 impl MetadataStore {
@@ -45,7 +54,7 @@ impl MetadataStore {
         .await?;
         row.map(|row| {
             Ok(AuthContext {
-                _device_id: parse_uuid_column(&row, "device_id")?,
+                device_id: parse_uuid_column(&row, "device_id")?,
                 account_id: parse_uuid_column(&row, "account_id")?,
             })
         })
@@ -114,6 +123,147 @@ impl MetadataStore {
         Ok(result.rows_affected() == 1)
     }
 
+    pub(crate) async fn get_household_topology(
+        &self,
+        household_id: Uuid,
+    ) -> Result<Option<HouseholdTopologyV1>, StoreError> {
+        let row = sqlx::query(
+            "SELECT household_id::text AS household_id, revision, topology_json \
+             FROM household_topologies WHERE household_id = $1::uuid",
+        )
+        .bind(household_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(row_to_topology).transpose()
+    }
+
+    pub(crate) async fn put_household_topology(
+        &self,
+        auth: AuthContext,
+        topology: &HouseholdTopologyV1,
+    ) -> Result<TopologyWriteOutcome, TopologyWriteError> {
+        topology
+            .validate()
+            .map_err(|_| TopologyWriteError::InvalidContract)?;
+        let household_id = topology.household.household_id.0;
+        let candidate_revision = i64::try_from(topology.household.revision)
+            .map_err(|_| TopologyWriteError::InvalidContract)?;
+        let topology_json =
+            serde_json::to_string(topology).map_err(|_| TopologyWriteError::InvalidContract)?;
+        if topology_json.len() > 1024 * 1024 {
+            return Err(TopologyWriteError::InvalidContract);
+        }
+
+        let mut transaction = self.pool.begin().await?;
+        let current_row = sqlx::query(
+            "SELECT household_id::text AS household_id, revision, topology_json \
+             FROM household_topologies WHERE household_id = $1::uuid FOR UPDATE",
+        )
+        .bind(household_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let current = current_row.map(row_to_topology).transpose()?;
+
+        if let Some(current) = &current {
+            if !current
+                .authorizes_device_scope(
+                    AccountId(auth.account_id),
+                    DeviceId(auth.device_id),
+                    ObjectScopeV1::Household {
+                        account_id: AccountId(auth.account_id),
+                        household_id: current.household.household_id,
+                    },
+                    TopologyAction::Manage,
+                )
+                .map_err(|_| TopologyWriteError::InvalidContract)?
+            {
+                return Err(TopologyWriteError::Unauthorized);
+            }
+            match topology_update_outcome(current, topology)? {
+                TopologyWriteOutcome::Replayed => {
+                    transaction.commit().await?;
+                    return Ok(TopologyWriteOutcome::Replayed);
+                }
+                TopologyWriteOutcome::Updated => {}
+                TopologyWriteOutcome::Created => unreachable!("an existing topology is not new"),
+            }
+        } else {
+            let bootstraps_auth = topology.accounts.len() == 1
+                && topology.accounts[0].account_id.0 == auth.account_id
+                && topology.household.revision == 0
+                && topology
+                    .authorizes_device_scope(
+                        AccountId(auth.account_id),
+                        DeviceId(auth.device_id),
+                        ObjectScopeV1::Household {
+                            account_id: AccountId(auth.account_id),
+                            household_id: topology.household.household_id,
+                        },
+                        TopologyAction::Manage,
+                    )
+                    .map_err(|_| TopologyWriteError::InvalidContract)?;
+            if !bootstraps_auth {
+                return Err(TopologyWriteError::Unauthorized);
+            }
+        }
+
+        for account in &topology.accounts {
+            let account_exists = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM accounts WHERE account_id = $1::uuid)",
+            )
+            .bind(account.account_id.0.to_string())
+            .fetch_one(&mut *transaction)
+            .await?;
+            if !account_exists {
+                return Err(TopologyWriteError::UnknownPrincipal);
+            }
+            for device_id in &account.device_ids {
+                let device_matches = sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS( \
+                        SELECT 1 FROM devices \
+                        WHERE device_id = $1::uuid AND account_id = $2::uuid AND revoked_at IS NULL \
+                     )",
+                )
+                .bind(device_id.0.to_string())
+                .bind(account.account_id.0.to_string())
+                .fetch_one(&mut *transaction)
+                .await?;
+                if !device_matches {
+                    return Err(TopologyWriteError::UnknownPrincipal);
+                }
+            }
+        }
+
+        if current.is_some() {
+            sqlx::query(
+                "UPDATE household_topologies \
+                 SET revision = $2, topology_json = $3, updated_at = now() \
+                 WHERE household_id = $1::uuid",
+            )
+            .bind(household_id.to_string())
+            .bind(candidate_revision)
+            .bind(&topology_json)
+            .execute(&mut *transaction)
+            .await?;
+        } else {
+            sqlx::query(
+                "INSERT INTO household_topologies(household_id, revision, topology_json) \
+                 VALUES ($1::uuid, $2, $3)",
+            )
+            .bind(household_id.to_string())
+            .bind(candidate_revision)
+            .bind(&topology_json)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        Ok(if current.is_some() {
+            TopologyWriteOutcome::Updated
+        } else {
+            TopologyWriteOutcome::Created
+        })
+    }
+
     pub(crate) async fn get_object(
         &self,
         account_id: Uuid,
@@ -172,7 +322,7 @@ impl MetadataStore {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn commit_object(
         &self,
-        account_id: Uuid,
+        auth: AuthContext,
         mutation: &OpaqueMutationV1,
         precondition: &WritePrecondition,
         ciphertext_size_bytes: i64,
@@ -181,6 +331,7 @@ impl MetadataStore {
         request_sha256: [u8; 32],
     ) -> Result<CommitResult, CommitError> {
         let object_id = mutation.object.object_id.0;
+        let account_id = auth.account_id;
         let candidate_revision =
             i64::try_from(mutation.object.revision).map_err(|_| CommitError::PreconditionFailed)?;
         let header_json =
@@ -195,6 +346,38 @@ impl MetadataStore {
         .await?;
         if account_exists.is_none() {
             return Err(CommitError::AccountMissing);
+        }
+
+        match mutation.object.scope {
+            ObjectScopeV1::Account { account_id: scope } if scope.0 == account_id => {}
+            ObjectScopeV1::Household { household_id, .. }
+            | ObjectScopeV1::Space { household_id, .. } => {
+                let topology_row = sqlx::query(
+                    "SELECT household_id::text AS household_id, revision, topology_json \
+                     FROM household_topologies WHERE household_id = $1::uuid FOR SHARE",
+                )
+                .bind(household_id.0.to_string())
+                .fetch_optional(&mut *transaction)
+                .await?;
+                let topology = topology_row.map(row_to_topology).transpose()?;
+                let authorized = topology
+                    .as_ref()
+                    .map(|topology| {
+                        topology.authorizes_device_scope(
+                            AccountId(account_id),
+                            DeviceId(auth.device_id),
+                            mutation.object.scope,
+                            TopologyAction::Write,
+                        )
+                    })
+                    .transpose()
+                    .map_err(|_| CommitError::InvalidContract)?
+                    .unwrap_or(false);
+                if !authorized {
+                    return Err(CommitError::UnauthorizedScope);
+                }
+            }
+            ObjectScopeV1::Account { .. } => return Err(CommitError::UnauthorizedScope),
         }
 
         let operation_row = sqlx::query(
@@ -325,6 +508,19 @@ impl MetadataStore {
     }
 }
 
+fn topology_update_outcome(
+    current: &HouseholdTopologyV1,
+    candidate: &HouseholdTopologyV1,
+) -> Result<TopologyWriteOutcome, TopologyWriteError> {
+    if candidate == current {
+        return Ok(TopologyWriteOutcome::Replayed);
+    }
+    if current.household.revision.checked_add(1) == Some(candidate.household.revision) {
+        return Ok(TopologyWriteOutcome::Updated);
+    }
+    Err(TopologyWriteError::PreconditionFailed)
+}
+
 fn row_to_object(row: sqlx::postgres::PgRow) -> Result<StoredObject, StoreError> {
     let hash: Vec<u8> = row.get("ciphertext_sha256");
     let ciphertext_sha256 = hash
@@ -373,6 +569,22 @@ fn row_to_operation(row: sqlx::postgres::PgRow) -> Result<OperationOutcome, Stor
     })
 }
 
+fn row_to_topology(row: sqlx::postgres::PgRow) -> Result<HouseholdTopologyV1, StoreError> {
+    let household_id = parse_uuid_column(&row, "household_id")?;
+    let revision: i64 = row.get("revision");
+    let topology: HouseholdTopologyV1 = serde_json::from_str(row.get("topology_json"))
+        .map_err(|_| StoreError::InvalidHouseholdTopology)?;
+    topology
+        .validate()
+        .map_err(|_| StoreError::InvalidHouseholdTopology)?;
+    if topology.household.household_id.0 != household_id
+        || i64::try_from(topology.household.revision).ok() != Some(revision)
+    {
+        return Err(StoreError::InvalidHouseholdTopology);
+    }
+    Ok(topology)
+}
+
 fn parse_header(value: String) -> Result<vault_sync::OpaqueObjectHeaderV1, StoreError> {
     let header = serde_json::from_str(&value).map_err(|_| StoreError::InvalidObjectHeader)?;
     vault_sync::OpaqueObjectHeaderV1::validate(&header)
@@ -398,6 +610,24 @@ pub(crate) enum StoreError {
     InvalidUuid,
     #[error("stored opaque object header is invalid")]
     InvalidObjectHeader,
+    #[error("stored household topology is invalid")]
+    InvalidHouseholdTopology,
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum TopologyWriteError {
+    #[error("PostgreSQL operation failed")]
+    Database(#[from] sqlx::Error),
+    #[error("stored topology metadata is invalid")]
+    Store(#[from] StoreError),
+    #[error("topology contract is invalid")]
+    InvalidContract,
+    #[error("device is not authorized to manage the household")]
+    Unauthorized,
+    #[error("topology revision precondition failed")]
+    PreconditionFailed,
+    #[error("topology references an unknown or revoked principal")]
+    UnknownPrincipal,
 }
 
 #[derive(Debug, Error)]
@@ -414,6 +644,50 @@ pub(crate) enum CommitError {
     AccountMissing,
     #[error("operation ID was already used for a different mutation")]
     OperationConflict,
+    #[error("device is not authorized for the object scope")]
+    UnauthorizedScope,
     #[error("mutation contract could not be persisted")]
     InvalidContract,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn topology() -> HouseholdTopologyV1 {
+        serde_json::from_str(include_str!(
+            "../../../crates/vault-sync/fixtures/household_topology_v1.json"
+        ))
+        .expect("parse shared topology fixture")
+    }
+
+    #[test]
+    fn topology_transition_accepts_exact_replay_and_only_the_next_revision() {
+        let current = topology();
+        assert_eq!(
+            topology_update_outcome(&current, &current).ok(),
+            Some(TopologyWriteOutcome::Replayed)
+        );
+
+        let mut next = current.clone();
+        next.household.revision = 1;
+        assert_eq!(
+            topology_update_outcome(&current, &next).ok(),
+            Some(TopologyWriteOutcome::Updated)
+        );
+
+        let mut divergent = current.clone();
+        divergent.spaces[0].revision = 1;
+        assert!(matches!(
+            topology_update_outcome(&current, &divergent),
+            Err(TopologyWriteError::PreconditionFailed)
+        ));
+
+        let mut skipped = current.clone();
+        skipped.household.revision = 2;
+        assert!(matches!(
+            topology_update_outcome(&current, &skipped),
+            Err(TopologyWriteError::PreconditionFailed)
+        ));
+    }
 }

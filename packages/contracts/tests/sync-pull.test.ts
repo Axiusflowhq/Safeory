@@ -204,3 +204,27 @@ test("list rejects cursor rollback and repeated acknowledged changes", async () 
       error instanceof SyncClientError && error.code === "invalid_response",
   )
 })
+
+test("pull checkpoints gaps created by server-side authorization filtering", async () => {
+  const fetcher: typeof fetch = async (input) => {
+    const url = new URL(String(input))
+    if (url.pathname.endsWith("/v1/compatibility")) {
+      return Response.json(CURRENT_SYNC_COMPATIBILITY)
+    }
+    return Response.json({ objects: [], next_change_seq: 7 })
+  }
+  const client = await SyncClient.connect(
+    "https://sync.example.test",
+    ACCOUNT_ID,
+    DEVICE_TOKEN,
+    { fetcher },
+  )
+  const store = new MemoryCursorStore()
+  const puller = new DurableSyncPuller(ACCOUNT_ID, store)
+
+  assert.deepEqual(await puller.pullPage(client, async () => assert.fail()), {
+    accepted: 0,
+    cursor: 7,
+  })
+  assert.equal(store.value, 7)
+})

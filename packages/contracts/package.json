@@ -11,7 +11,8 @@
     "./sync-compatibility": "./src/sync-compatibility.ts",
     "./sync-client": "./src/sync-client.ts",
     "./sync-queue": "./src/sync-queue.ts",
-    "./sync-pull": "./src/sync-pull.ts"
+    "./sync-pull": "./src/sync-pull.ts",
+    "./sync-domain": "./src/sync-domain.ts"
   },
   "scripts": {
     "test": "node scripts/test-durability.mjs",

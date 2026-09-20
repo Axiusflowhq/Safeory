@@ -175,11 +175,18 @@ gates are green, including the generated-WASM Node smoke test.**
   `@safeory/contracts` also provides a bounded credential-free IndexedDB push
   outbox with idempotent replay and acknowledge-after-response semantics, plus
   verified pull-page processing with per-object durable acceptance and
-  compare-and-swap cursor checkpoints.
+  compare-and-swap cursor checkpoints. Browser-side account/household/
+  membership/space and single-owner migration parsers now mirror the canonical
+  Rust bounds and cross-reference validation. Matching Rust/browser routing
+  evaluators bind account and device identity to distinct account, household,
+  and space read/write/manage decisions without treating role as key access.
+  The API now persists revision-fenced topologies after verifying every declared
+  account/device principal and applies the evaluator to scoped object feeds,
+  downloads, and atomic upload commits.
   The opaque-object endpoint validates and durably persists canonical
   mutation/header metadata with atomic operation-ID idempotency. Binding this
   transport and its durable coordinators to web and extension application flows,
-  plus household/space authorization, remains.
+  plus cross-account shared-object routing, remains.
 - Decide the high-entropy Account Secret/device-enrollment construction in an
   ADR, implement recovery/new-device enrollment, and test server-dump offline
   attack resistance. Cognito authentication alone is insufficient.

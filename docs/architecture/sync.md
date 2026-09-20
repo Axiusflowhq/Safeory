@@ -17,8 +17,21 @@ retains canonical mutation/ciphertext pairs until a matching upload response is
 durably acknowledged, so interrupted acknowledgements replay by operation ID.
 A pull coordinator verifies each downloaded body, waits for an idempotent
 durable-acceptance callback, and only then compare-and-swap checkpoints that
-change sequence. Web/extension application wiring and household/space
-authorization remain incomplete.
+change sequence. The API now persists revision-fenced household topology,
+accepts exact publication retries idempotently, and enforces household/space
+authorization on object list, download, and upload paths. Web/extension
+application wiring and cross-account shared-object routing remain incomplete.
+
+The browser contracts package also parses the canonical versioned account,
+household, membership, space, space-member, and single-owner migration topology.
+It rejects unknown fields, unbounded collections, unsafe integers, duplicate or
+inconsistent references, missing active ownership, private-space over-sharing,
+invalid role access, and stale key-generation bindings before application use.
+Rust and browser implementations also share a fail-closed routing policy:
+account access requires the bound device, household writes require an active
+owner or organizer, and space read/write/manage actions require the matching
+device-specific membership and access level. This server-visible decision is
+necessary but never substitutes for possession of the client-side space key.
 
 ## Goals
 
