@@ -14,21 +14,34 @@ the implementation is complete and proven.
 
 ## Development direction
 
-Safeory has selected **Bitwarden OSS as the password-manager foundation**.
+Safeory has selected **Bitwarden OSS server + Rust SDK/core as the
+password-manager foundation**.
+
+Safeory is **not** adopting, importing, re-skinning, or building its product on
+Bitwarden's web frontend, browser-extension UI, component library, navigation,
+design system, or product shell. Safeory keeps its own frontend and browser UX.
+The Bitwarden clients repository is a reference/proof source only. Narrow,
+clearly isolated non-UI logic may be ported from it when that is the safest way
+to preserve a mature password-manager behavior, but whole client applications or
+their UI architecture must not enter the Safeory foundation.
 
 Development should no longer spend time rebuilding generic password-manager
 features already provided by that foundation.
 
 Primary engineering focus from now on:
 
-1. finish the OSS-clean Bitwarden import and prove it end to end;
-2. integrate the foundation cleanly into the Safeory repository;
-3. port Safeory's existing useful life-vault/domain work onto that foundation;
-4. implement Household and independently encrypted Safeory Spaces;
-5. migrate existing Safeory users/data safely;
-6. add Safeory-specific household, continuity, Emergency, Trust Engine, and
+1. finish the OSS-clean Bitwarden server + Rust SDK/core proof;
+2. adapt and integrate that backend/core foundation behind Safeory-owned web and
+   browser clients;
+3. fully test and stabilize the adapted foundation before feature expansion;
+4. port Safeory's existing useful life-vault/domain work onto that foundation;
+5. implement Household and independently encrypted Safeory Spaces;
+6. migrate existing Safeory users/data safely;
+7. add Safeory-specific household, continuity, Emergency, Trust Engine, and
    Plan Test features;
-7. productionize, harden, externally review, and launch.
+8. productionize, harden, externally review, and launch the combined
+   Trustworthy-style household/life organization + 1Password-style consumer
+   password-manager alternative.
 
 The current Safeory implementation remains available as the tested legacy
 prototype and migration source until the new implementation reaches verified
@@ -45,9 +58,20 @@ tests pass.
   device enrollment, generic attachment transport, or autofill architecture
   except for security fixes, data-loss fixes, migration support, fixtures, or
   tests.
-- Reuse Bitwarden OSS for accounts, sessions, devices, credentials, TOTP,
-  passkeys, password-manager sync, revisions, attachments, imports/exports,
-  trash/history, capture, autofill, and browser-extension fundamentals.
+- Reuse and adapt the cleaned Bitwarden server and Rust SDK/core for accounts,
+  sessions, devices, credentials, TOTP/passkey cryptography and protocols,
+  password-manager sync, revisions, encrypted attachments, imports/exports,
+  trash/history, key management, and other mature non-UI password-manager
+  primitives that survive Safeory's review.
+- Safeory owns the complete product frontend: web UI, browser-extension UI,
+  navigation, design system, product shell, household/life-record workflows,
+  capture/autofill UX, settings, onboarding, and all customer-facing surfaces.
+- Do not import Bitwarden web or browser frontend applications into Safeory.
+  Do not re-skin them and call that the Safeory frontend.
+- If a mature Bitwarden client-side behavior is needed (for example autofill,
+  capture, passkey plumbing, or protocol glue), extract/port only the smallest
+  reviewed non-UI logic required and wrap it behind Safeory-owned interfaces and
+  tests. Do not inherit Bitwarden UI architecture as a shortcut.
 - Safeory-specific work belongs in life records, Household, Spaces, Today,
   Files, Inbox, reminders, relationships, collaboration, Trust Engine,
   continuity, Emergency Card, legacy intent, Plan Test, migration, and product
@@ -67,6 +91,13 @@ tests pass.
 - Preserve negative security tests whenever modifying inherited security
   boundaries.
 - Do not weaken zero-knowledge behavior merely to fit an inherited abstraction.
+- Treat imported Bitwarden code as unadapted until Safeory-specific integration,
+  pruning, security review, compatibility tests, regression tests, and end-to-end
+  tests all pass. Passing an upstream build alone never means the foundation is
+  stable or ready for feature development.
+- Do not start the main Safeory feature-expansion phases on top of a partially
+  adapted foundation. First reach the explicit Foundation Adaptation & Stability
+  Gate in Phase 1.
 
 ---
 
@@ -76,7 +107,7 @@ Keep exact source provenance in `docs/provenance/foundation-seed.json`.
 
 Current pinned foundation:
 
-- Bitwarden clients canonical import baseline:
+- Bitwarden clients reference/proof baseline only (not a frontend import):
   `07ac2aa903459ea8e1c18e3295b765be0bc3585f`
 - Bitwarden server:
   `6fcd3b71f5f2eb0881dd4a3b587fa8afe5957da1`
@@ -152,48 +183,63 @@ corresponding clean build/test evidence and updating the provenance manifest.
 
 Do not import the foundation into production paths until this phase passes.
 
-## 0.1 Produce an OSS-clean clients tree
+## 0.1 Prove the Bitwarden clients reference without adopting its frontend
+
+The clients repository is used only to understand and verify mature
+password-manager behavior and to identify any narrowly reusable non-UI logic.
+Its web app, browser-extension UI, components, routes, product shell, branding,
+and design system are not part of the Safeory import.
 
 - [ ] Create a fresh disposable copy of the pinned Bitwarden clients checkout.
-- [ ] Physically remove the complete `bitwarden_license/` tree.
+- [ ] Physically remove the complete `bitwarden_license/` tree in that proof.
 - [ ] Remove `@bitwarden/commercial-sdk-internal` from package manifests and
-      lockfiles.
+      lockfiles in that proof.
 - [ ] Remove commercial-only project targets/configuration that references
       deleted source.
-- [ ] Remove hosted Bitwarden endpoints/telemetry/update behavior from the proof
-      build where required to make the OSS product self-contained.
 - [ ] Run dependency search proving no restricted package/path remains.
 - [ ] Install dependencies from a clean checkout.
-- [ ] Build OSS web.
-- [ ] Build Chromium MV3.
-- [ ] Build Firefox.
-- [ ] Run relevant client unit/integration tests.
-- [ ] Record exact build commands/toolchain versions in this file if they differ
-      from upstream defaults.
+- [ ] Build/run enough upstream web/browser surfaces in the disposable checkout
+      to prove the OSS behavior we may need to reproduce or port.
+- [ ] Run the relevant client unit/integration tests for any non-UI behavior we
+      intend to depend on or selectively port.
+- [ ] Inventory every client-side behavior Safeory still needs after adopting
+      the Rust SDK/server and classify it as: available from SDK/core, reimplement
+      in Safeory, or selectively port as isolated non-UI logic.
+- [ ] Record exact build commands/toolchain versions and the final list of any
+      client-side non-UI source that is actually selected for porting.
+- [ ] Explicitly prove that no Bitwarden frontend application, UI component
+      tree, route tree, product shell, or design system is selected for import.
 
-**Exit gate:** one disposable clean clients tree builds web + Chromium +
-Firefox with no restricted source or package dependency.
+**Exit gate:** the disposable clients proof has no restricted dependency, the
+required inherited behaviors are understood/tested, and the permanent Safeory
+foundation still contains no Bitwarden frontend.
 
 ## 0.2 Reproduce cleaned foundation on Linux CI
 
-- [ ] Add CI jobs for cleaned client, SDK, and server build proof.
+- [ ] Add CI jobs for cleaned SDK and server build proof plus any explicitly
+      selected isolated non-UI client logic.
 - [ ] Build the cleaned Rust/WASM SDK on Linux.
 - [ ] Build the cleaned server composition on Linux.
-- [ ] Build web/Chromium/Firefox on Linux.
-- [ ] Run non-environment-dependent upstream test suites.
+- [ ] Build the Safeory-owned web and browser-extension clients against the
+      adapted foundation on Linux.
+- [ ] Run non-environment-dependent upstream tests for retained server/SDK/core
+      code and Safeory tests around adapted behavior.
 - [ ] Add Docker-backed integration services for the environment-dependent
       server tests that matter to Safeory.
 - [ ] Ensure PostgreSQL migration tests run against a real PostgreSQL service.
 
-**Exit gate:** all required cleaned foundation surfaces reproduce in clean CI.
+**Exit gate:** the retained cleaned backend/core plus Safeory-owned clients
+reproduce in clean CI without depending on Bitwarden frontend applications.
 
 ## 0.3 Produce legal/provenance artifacts
 
-- [ ] Generate SBOM for clients, SDK, and server.
+- [ ] Generate SBOM for retained SDK, server, and any selectively ported non-UI
+      client code.
 - [ ] Generate license inventory.
 - [ ] Generate required notices bundle.
 - [ ] Record removed restricted paths/packages.
-- [ ] Record all retained upstream source commits.
+- [ ] Record all retained upstream source commits and exact retained source
+      boundaries.
 - [ ] Add a CI failure if restricted paths/dependencies reappear.
 - [ ] Obtain qualified license review before public distribution.
 
@@ -202,7 +248,8 @@ known blocking licensing issue.
 
 ## 0.4 Prove inherited password-manager behavior
 
-Create an automated self-hosted fixture using the cleaned foundation:
+Create an automated self-hosted fixture using the cleaned server/SDK foundation
+through Safeory-owned test clients/harnesses rather than Bitwarden's frontend:
 
 - [ ] Create account A.
 - [ ] Create account B.
@@ -214,16 +261,18 @@ Create an automated self-hosted fixture using the cleaned foundation:
 - [ ] Sync the same account across two devices.
 - [ ] Import representative standard password-manager fixtures.
 - [ ] Import a representative 1Password fixture.
-- [ ] Capture a new login using the extension.
-- [ ] Update an existing login using the extension.
-- [ ] Autofill only the correct origin in Chromium.
-- [ ] Autofill only the correct origin in Firefox.
+- [ ] Capture a new login using the Safeory extension.
+- [ ] Update an existing login using the Safeory extension.
+- [ ] Autofill only the correct origin in Chromium using Safeory-owned extension
+      UI/integration code.
+- [ ] Autofill only the correct origin in Firefox using Safeory-owned extension
+      UI/integration code.
 - [ ] Revoke a session/device.
 - [ ] Prove the revoked context stops receiving/using future authenticated
       operations.
 
-**Exit gate:** Safeory can rely on the inherited password-manager platform rather
-than reproducing those capabilities itself.
+**Exit gate:** Safeory can rely on the adapted backend/core password-manager
+foundation without adopting Bitwarden's frontend.
 
 ## 0.5 Prove the Safeory life-record carrier through foundation sync
 
@@ -294,13 +343,13 @@ backdoor or JavaScript raw-key export.
 
 Phase 0 is complete only when:
 
-- [ ] cleaned web build passes;
-- [ ] cleaned Chromium build passes;
-- [ ] cleaned Firefox build passes;
+- [ ] disposable clients reference proof is complete and no Bitwarden frontend
+      is selected for permanent import;
 - [ ] cleaned SDK build passes;
 - [ ] cleaned server build passes;
 - [ ] cleaned dependency/provenance checks pass;
-- [ ] password-manager e2e fixture passes;
+- [ ] Safeory-owned password-manager integration/e2e harness passes against the
+      cleaned server/SDK foundation;
 - [ ] Safeory envelope round-trip passes;
 - [ ] 32-Space isolation/rotation test passes;
 - [ ] selected-key continuity spike passes;
@@ -314,9 +363,13 @@ Start only after Phase 0 passes.
 
 ## 1.1 Import source
 
-- [ ] Import cleaned clients into `foundation/clients`.
 - [ ] Import cleaned SDK into `foundation/sdk`.
 - [ ] Import cleaned server into `foundation/server`.
+- [ ] Do **not** import Bitwarden web/frontend/browser application trees.
+- [ ] If Phase 0 selected any client-side non-UI implementation, port only that
+      smallest reviewed subset into a clearly isolated Safeory-owned module with
+      provenance and dedicated compatibility tests; do not vendor the surrounding
+      Bitwarden client application.
 - [ ] Preserve required upstream copyright/license notices.
 - [ ] Update provenance with final imported commit/tree hashes.
 - [ ] Ensure no nested upstream `.git` directories remain unless deliberately
@@ -324,52 +377,112 @@ Start only after Phase 0 passes.
 - [ ] Keep the import in reviewable commits: raw import, restricted-code
       removal, Safeory adaptation.
 
-## 1.2 Establish build/test baseline
+## 1.2 Establish the cleaned foundation build/test baseline
 
 - [ ] Add foundation workspaces/build entry points without breaking legacy
       verification.
-- [ ] Add CI for web, Chromium, Firefox, SDK, server, and PostgreSQL migrations.
+- [ ] Add CI for the cleaned SDK, cleaned server, PostgreSQL migrations, and the
+      Safeory-owned web/Chromium/Firefox clients that consume the foundation.
 - [ ] Preserve applicable upstream security tests.
 - [ ] Replace deleted/commercial upstream tests only with equal or stronger
       Safeory tests.
+- [ ] Remove MySQL/SQLite/runtime/database-provider surfaces that Safeory does not
+      support after the PostgreSQL path and migrations are proven equivalent for
+      all retained behavior.
+- [ ] Remove enterprise/business server surfaces Safeory does not need, including
+      unused Admin Console, enterprise billing, SSO/SCIM/PAM/Secrets Manager and
+      organization/business-only behavior, using compile/test-driven deletion
+      rather than blind directory removal.
+- [ ] After every upstream-code removal, run the retained upstream tests plus
+      Safeory compatibility/security tests before considering the deletion safe.
 - [ ] Add secret scanning, dependency audit, source/license checks, SBOM and
       artifact provenance.
 
-## 1.3 Strip upstream product assumptions
+## 1.3 Adapt the retained backend/core to Safeory
 
-- [ ] Remove Bitwarden product branding.
-- [ ] Remove Bitwarden trademarks/assets.
-- [ ] Remove hosted Bitwarden service URLs.
-- [ ] Remove upstream analytics/telemetry not required by Safeory.
-- [ ] Remove upstream update channels.
-- [ ] Remove commercial plan/license UX.
-- [ ] Remove enterprise-only SSO/SCIM/PAM/secrets-manager surfaces that Safeory
-      does not need.
+- [ ] Remove Bitwarden-hosted service assumptions from retained server/SDK/core
+      paths.
+- [ ] Remove upstream analytics/telemetry/update behavior not required by Safeory.
+- [ ] Remove commercial plan/license behavior from retained backend/core paths.
 - [ ] Remove unused CLI/enterprise surfaces unless a concrete Safeory feature
-      requires them.
-- [ ] Replace support/legal/account links with Safeory-owned destinations.
+      requires the underlying non-UI primitive.
+- [ ] Adapt account/session/device/auth flows to Safeory-owned client contracts.
+- [ ] Adapt vault/sync/revision/attachment/import/export behavior to Safeory-owned
+      web and extension clients without exposing raw keys to ordinary UI JS.
+- [ ] Adapt password-manager crypto and protocol APIs behind stable Safeory
+      interfaces so upstream details do not leak throughout the product codebase.
+- [ ] Keep the security-sensitive patch surface small and measured.
+- [ ] Document retained upstream boundaries in provenance rather than copying
+      Bitwarden product UI or branding.
 
-## 1.4 Establish Safeory product shell
+## 1.4 Establish the Safeory-owned password-manager client shell
 
-- [ ] Rebrand account/login/unlock surfaces.
-- [ ] Add Safeory navigation shell.
-- [ ] Add Passwords.
-- [ ] Add Household.
-- [ ] Add Today.
-- [ ] Add Files.
-- [ ] Add Inbox.
-- [ ] Add Reminders.
-- [ ] Add Plan.
-- [ ] Keep password-manager internals functional while hiding upstream
-      organization/business terminology from consumer UX.
+- [ ] Keep/extend the existing Safeory design system and navigation rather than
+      importing/rebranding Bitwarden frontend code.
+- [ ] Implement Safeory-owned account/login/unlock/password-manager surfaces
+      against the adapted SDK/server APIs.
+- [ ] Implement Safeory-owned credential list/detail/edit flows.
+- [ ] Implement Safeory-owned generator, TOTP, passkey, import/export, attachment,
+      trash/history, device/session, capture, and autofill UX required for the
+      consumer password-manager baseline.
+- [ ] Keep browser-extension UI and product behavior Safeory-owned in Chromium
+      and Firefox.
+- [ ] Keep inherited password-manager internals behind Safeory interfaces so
+      upstream organization/business terminology does not leak into consumer UX.
 
-**Phase 1 exit:** a reproducible Safeory-branded cleaned foundation can create an
-account, sign in, manage native credentials, sync two devices, and autofill
-Chromium/Firefox.
+## 1.5 Foundation Adaptation & Stability Gate — mandatory before feature expansion
+
+Do not begin Phase 2 or later product-feature expansion merely because the
+Bitwarden code compiles. The imported foundation is considered **fully adapted
+and stable** only after all of the following pass together on the actual Safeory
+architecture:
+
+- [ ] Clean SDK/server builds pass from a fresh checkout on supported developer
+      platforms and Linux CI.
+- [ ] Safeory web build passes against the adapted foundation.
+- [ ] Safeory Chromium extension build passes.
+- [ ] Safeory Firefox extension build passes.
+- [ ] All retained applicable upstream unit/security/integration tests pass, with
+      environment-dependent suites backed by the required real services.
+- [ ] PostgreSQL schema/migration tests pass against a real PostgreSQL instance.
+- [ ] Safeory unit, contract, browser, API, crypto, storage, sync, and negative
+      security regression suites pass.
+- [ ] Two-device end-to-end tests cover account creation/login, unlock, credential
+      create/edit/delete/restore, TOTP, passkeys where automatable, encrypted
+      attachments, revisions/sync, import/export, offline/reconnect, and
+      device/session revocation.
+- [ ] Safeory-owned Chromium and Firefox tests cover capture/update/autofill with
+      strict origin/sender boundaries and no Bitwarden frontend dependency.
+- [ ] Fresh install, upgrade, restart, lock/unlock, corruption/failure, retry,
+      rollback, and recovery paths relevant to the retained foundation pass.
+- [ ] Restricted/commercial source and dependencies remain absent.
+- [ ] Removed enterprise/database/client surfaces do not reappear through
+      transitive build or runtime dependencies.
+- [ ] Secret scanning, dependency audits, SBOM, notices, license inventory, and
+      artifact provenance pass.
+- [ ] Security review confirms no usable vault/content key reaches server-side
+      services or ordinary UI JavaScript and that zero-knowledge invariants were
+      not weakened during adaptation.
+- [ ] Compatibility tests prove Safeory can safely maintain/update the retained
+      upstream server/SDK boundary without relying on undocumented UI coupling.
+- [ ] Soak/load/reconnect testing shows no known foundation-level data-loss,
+      sync, session, attachment, or key-management blocker.
+- [ ] The adapted foundation has a recorded stable baseline commit before Phase 2
+      feature work begins.
+
+**Phase 1 exit:** a reproducible, Safeory-owned client product runs on the
+cleaned/adapted Bitwarden server + Rust SDK/core foundation, the full adaptation
+and stability gate is green, and no Bitwarden frontend is part of the product.
+Only after this point should the main Trustworthy-style household/life-vault and
+continuity feature expansion proceed.
 
 ---
 
 # PHASE 2 — Safeory life vault on the foundation
+
+Start only after **Phase 1.5 Foundation Adaptation & Stability Gate** is fully
+green. Phase 2 assumes the Bitwarden-derived backend/core has already been
+cleaned, adapted, integrated with Safeory-owned clients, and proven stable.
 
 ## 2.1 Finalize the Safeory life envelope
 
@@ -528,8 +641,10 @@ read-back, and remain safely recoverable.
 
 # PHASE 5 — Finish consumer password-manager parity gaps
 
-Do not rewrite features that are already inherited and working. This phase is
-for Safeory integration gaps only.
+Do not rewrite mature backend/core password-manager capabilities that are already
+inherited, adapted, and proven through the Phase 1 stability gate. Safeory still
+owns the complete customer-facing UX. This phase is for Safeory integration and
+consumer password-manager behavior gaps only, not adoption of Bitwarden UI.
 
 - [ ] Confirm multi-origin login UX.
 - [ ] Confirm TOTP UX.
@@ -712,9 +827,20 @@ restore, revocation, and failure drills.
 - [ ] Metadata-leakage review.
 - [ ] Support/privacy/security wording review against shipped behavior.
 - [ ] Final source/license publication requirements satisfied.
+- [ ] Final release-candidate regression pass covers the complete Safeory-owned
+      frontend plus adapted Bitwarden server/Rust-core foundation as one product.
+- [ ] Final end-to-end acceptance suite proves the combined product delivers the
+      intended Trustworthy-style household/life organization and continuity
+      workflows together with the intended 1Password-style consumer password
+      manager baseline without weakening zero knowledge.
+- [ ] No release blocker remains in password-manager core, household/life-vault,
+      Spaces, migration, Trust Engine, Emergency/continuity, browser extension,
+      backup/recovery, or production operations.
 
 After Phase 9 passes and the final implementation is frozen, create the final
 architecture/security documentation from the actual code and verified behavior.
+Only then should Safeory be considered the fully adapted, tested, stable release
+candidate for the combined product.
 
 ---
 
@@ -822,18 +948,25 @@ When continuing development:
 11. Run the relevant verification gates before stopping.
 12. Report concrete blockers and continue with the next safe task instead of
     stopping after small preparatory work.
+13. Never bypass Phase 1.5: feature expansion must not proceed on an imported but
+    unadapted or partially tested Bitwarden foundation.
+14. Never import or rebrand Bitwarden frontend applications. Safeory frontend
+    and browser UX remain Safeory-owned throughout development.
 
 ---
 
 # Immediate next work
 
-The next agent should begin with **Phase 0.1: Produce an OSS-clean clients
-tree**.
+The next agent should continue **Phase 0.1: Prove the Bitwarden clients reference
+without adopting its frontend**, then move through the cleaned server/Rust SDK
+proof and Foundation Adaptation & Stability Gate in order.
 
 Do not continue the old Safeory generic sync/device-enrollment backlog.
+Do not import Bitwarden web/browser frontend applications.
 
 The next material milestone is:
 
-> Clean Bitwarden clients tree with no `bitwarden_license` source and no
-> `@bitwarden/commercial-sdk-internal`, followed by passing web, Chromium, and
-> Firefox builds/tests from that cleaned tree.
+> Clean and adapt the Bitwarden server + Rust SDK/core behind Safeory-owned web
+> and browser clients; selectively port only reviewed non-UI client logic where
+> necessary; then pass the complete Foundation Adaptation & Stability Gate before
+> starting the main household/life-vault/continuity feature expansion.
