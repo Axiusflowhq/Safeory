@@ -145,6 +145,15 @@ pub enum ObjectScopeV1 {
 }
 
 impl ObjectScopeV1 {
+    #[must_use]
+    pub const fn account_id(self) -> AccountId {
+        match self {
+            Self::Account { account_id }
+            | Self::Household { account_id, .. }
+            | Self::Space { account_id, .. } => account_id,
+        }
+    }
+
     fn validate(self) -> Result<(), ProtocolError> {
         match self {
             Self::Account { account_id } => non_nil("account ID", account_id.0),
@@ -244,6 +253,30 @@ impl OpaqueMutationV1 {
             }
         }
     }
+
+    /// Validates the mutation and binds its caller-controlled routing and
+    /// ciphertext metadata to transport facts established by the service.
+    pub fn validate_upload_binding(
+        &self,
+        authenticated_account_id: AccountId,
+        path_object_id: ObjectId,
+        ciphertext_size_bytes: u64,
+        ciphertext_sha256: [u8; 32],
+    ) -> Result<(), ProtocolError> {
+        self.validate()?;
+        if self.object.scope.account_id() != authenticated_account_id {
+            return Err(ProtocolError::AuthenticatedAccountMismatch);
+        }
+        if self.object.object_id != path_object_id {
+            return Err(ProtocolError::PathObjectMismatch);
+        }
+        if self.object.ciphertext_size_bytes != ciphertext_size_bytes
+            || self.object.ciphertext_sha256 != ciphertext_sha256
+        {
+            return Err(ProtocolError::CiphertextMetadataMismatch);
+        }
+        Ok(())
+    }
 }
 
 fn non_nil(label: &'static str, value: uuid::Uuid) -> Result<(), ProtocolError> {
@@ -290,6 +323,12 @@ pub enum ProtocolError {
     InvalidCiphertextSize,
     #[error("candidate revision must advance the matched revision")]
     RevisionDidNotAdvance,
+    #[error("object scope does not match the authenticated account")]
+    AuthenticatedAccountMismatch,
+    #[error("object header ID does not match the request path")]
+    PathObjectMismatch,
+    #[error("object header ciphertext metadata does not match the uploaded body")]
+    CiphertextMetadataMismatch,
 }
 
 #[cfg(test)]
@@ -430,6 +469,41 @@ mod tests {
         assert_eq!(
             object.validate(),
             Err(ProtocolError::InvalidIdentifier("account ID"))
+        );
+    }
+
+    #[test]
+    fn upload_binding_rejects_scope_path_and_ciphertext_substitution() {
+        let account_id = AccountId::new();
+        let object_id = ObjectId::new();
+        let mut mutation = OpaqueMutationV1 {
+            format_version: OPAQUE_MUTATION_FORMAT_VERSION,
+            operation_id: OperationId::new(),
+            object: header(0),
+            precondition: WritePreconditionV1::CreateOnly,
+        };
+        mutation.object.object_id = object_id;
+        mutation.object.scope = ObjectScopeV1::Account { account_id };
+
+        assert_eq!(
+            mutation.validate_upload_binding(account_id, object_id, 512, [0x5a; 32]),
+            Ok(())
+        );
+        assert_eq!(
+            mutation.validate_upload_binding(AccountId::new(), object_id, 512, [0x5a; 32]),
+            Err(ProtocolError::AuthenticatedAccountMismatch)
+        );
+        assert_eq!(
+            mutation.validate_upload_binding(account_id, ObjectId::new(), 512, [0x5a; 32]),
+            Err(ProtocolError::PathObjectMismatch)
+        );
+        assert_eq!(
+            mutation.validate_upload_binding(account_id, object_id, 511, [0x5a; 32]),
+            Err(ProtocolError::CiphertextMetadataMismatch)
+        );
+        assert_eq!(
+            mutation.validate_upload_binding(account_id, object_id, 512, [0x11; 32]),
+            Err(ProtocolError::CiphertextMetadataMismatch)
         );
     }
 
