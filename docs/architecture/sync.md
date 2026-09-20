@@ -109,7 +109,8 @@ authenticated device.
 ### First device
 
 1. Create/verify the hosted account.
-2. Generate the Account Secret/device cryptographic identities on the client.
+2. Generate the Account Secret, stable device UUID, and device cryptographic
+   identities on the client.
 3. Create the AccountRootKey and initial private household/space locally.
 4. Upload only public device registration, encrypted root/space envelopes, and
    opaque ciphertext objects.

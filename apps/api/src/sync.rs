@@ -22,14 +22,17 @@ use vault_sync::{
 use crate::{
     AppState,
     auth::{
-        bearer_token, constant_time_eq, device_token_hash, generate_device_token,
+        bearer_token, constant_time_eq, device_token_hash, generate_device_token, hex_encode,
         parse_public_key_hex, registration_token_hash,
     },
     model::{
         DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT, ObjectMetadataResponse, OperationOutcome, PolicyError,
         StoredObject, WritePrecondition, strong_etag, validate_write_policy,
     },
-    store::{AuthContext, CommitError, StoreError, TopologyWriteError, TopologyWriteOutcome},
+    store::{
+        AccountCreateError, AuthContext, CommitError, DeviceCreateError, DeviceRevokeError,
+        StoreError, TopologyWriteError, TopologyWriteOutcome,
+    },
 };
 
 pub(crate) const MAX_CIPHERTEXT_OBJECT_BYTES: usize =
@@ -40,8 +43,11 @@ const CHANGE_SEQ_HEADER: &str = "x-safeory-change-seq";
 const MAX_MUTATION_HEADER_BYTES: usize = 8 * 1024;
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RegisterDeviceRequest {
-    device_public_key: String,
+    device_id: Uuid,
+    encryption_public_key: String,
+    signing_public_key: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -51,19 +57,38 @@ struct DeviceCredentialsResponse {
     device_token: String,
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct DeviceInventoryEntry {
+    device_id: Uuid,
+    encryption_public_key: Option<String>,
+    signing_public_key: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct DeviceInventoryResponse {
+    current_device_id: Uuid,
+    devices: Vec<DeviceInventoryEntry>,
+}
+
 pub(crate) async fn create_account(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(request): Json<RegisterDeviceRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     authorize_registration(&state, &headers)?;
-    let public_key = parse_device_public_key(&request.device_public_key)?;
+    let (device_id, encryption_public_key, signing_public_key) =
+        parse_device_registration(&request)?;
     let (device_token, token_hash) = generate_device_token().map_err(|_| ApiError::Internal)?;
     let (account_id, device_id) = state
         .metadata
-        .create_account_with_device(&public_key, &token_hash)
+        .create_account_with_device(
+            device_id,
+            &encryption_public_key,
+            &signing_public_key,
+            &token_hash,
+        )
         .await
-        .map_err(|error| backend_store_error("create account", error))?;
+        .map_err(account_create_error)?;
 
     Ok((
         StatusCode::CREATED,
@@ -81,13 +106,20 @@ pub(crate) async fn create_device(
     Json(request): Json<RegisterDeviceRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     let auth = authenticate_device(&state, &headers).await?;
-    let public_key = parse_device_public_key(&request.device_public_key)?;
+    let (device_id, encryption_public_key, signing_public_key) =
+        parse_device_registration(&request)?;
     let (device_token, token_hash) = generate_device_token().map_err(|_| ApiError::Internal)?;
     let device_id = state
         .metadata
-        .create_device(auth.account_id, &public_key, &token_hash)
+        .create_device(
+            auth.account_id,
+            device_id,
+            &encryption_public_key,
+            &signing_public_key,
+            &token_hash,
+        )
         .await
-        .map_err(|error| backend_store_error("create device", error))?;
+        .map_err(device_create_error)?;
 
     Ok((
         StatusCode::CREATED,
@@ -97,6 +129,29 @@ pub(crate) async fn create_device(
             device_token,
         }),
     ))
+}
+
+pub(crate) async fn list_devices(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<DeviceInventoryResponse>, ApiError> {
+    let auth = authenticate_device(&state, &headers).await?;
+    let devices = state
+        .metadata
+        .list_active_devices(auth.account_id)
+        .await
+        .map_err(|error| backend_store_error("list devices", error))?
+        .into_iter()
+        .map(|device| DeviceInventoryEntry {
+            device_id: device.device_id,
+            encryption_public_key: device.encryption_public_key.map(|key| hex_encode(&key)),
+            signing_public_key: device.signing_public_key.map(|key| hex_encode(&key)),
+        })
+        .collect();
+    Ok(Json(DeviceInventoryResponse {
+        current_device_id: auth.device_id,
+        devices,
+    }))
 }
 
 pub(crate) async fn revoke_device(
@@ -109,7 +164,7 @@ pub(crate) async fn revoke_device(
         .metadata
         .revoke_device(auth.account_id, device_id)
         .await
-        .map_err(|error| backend_store_error("revoke device", error))?;
+        .map_err(device_revoke_error)?;
     if !revoked {
         return Err(ApiError::NotFound);
     }
@@ -496,10 +551,19 @@ fn authorize_registration(state: &AppState, headers: &HeaderMap) -> Result<(), A
     Ok(())
 }
 
-fn parse_device_public_key(value: &str) -> Result<[u8; 32], ApiError> {
-    parse_public_key_hex(value).ok_or(ApiError::BadRequest(
-        "device_public_key must be 32-byte hex",
-    ))
+fn parse_device_registration(
+    request: &RegisterDeviceRequest,
+) -> Result<(Uuid, [u8; 32], [u8; 32]), ApiError> {
+    if request.device_id.is_nil() {
+        return Err(ApiError::BadRequest("device_id must be a non-nil UUID"));
+    }
+    let encryption_public_key = parse_public_key_hex(&request.encryption_public_key).ok_or(
+        ApiError::BadRequest("encryption_public_key must be 32-byte hex"),
+    )?;
+    let signing_public_key = parse_public_key_hex(&request.signing_public_key).ok_or(
+        ApiError::BadRequest("signing_public_key must be 32-byte hex"),
+    )?;
+    Ok((request.device_id, encryption_public_key, signing_public_key))
 }
 
 fn require_octet_stream(headers: &HeaderMap) -> Result<(), ApiError> {
@@ -599,6 +663,34 @@ fn topology_write_error(error: TopologyWriteError) -> ApiError {
     }
 }
 
+fn device_create_error(error: DeviceCreateError) -> ApiError {
+    match error {
+        DeviceCreateError::LimitReached => ApiError::LimitReached,
+        DeviceCreateError::IdentifierConflict => ApiError::IdentifierConflict,
+        DeviceCreateError::Database(error) => {
+            backend_store_error("create device", StoreError::Database(error))
+        }
+    }
+}
+
+fn account_create_error(error: AccountCreateError) -> ApiError {
+    match error {
+        AccountCreateError::IdentifierConflict => ApiError::IdentifierConflict,
+        AccountCreateError::Database(error) => {
+            backend_store_error("create account", StoreError::Database(error))
+        }
+    }
+}
+
+fn device_revoke_error(error: DeviceRevokeError) -> ApiError {
+    match error {
+        DeviceRevokeError::LastActiveDevice => ApiError::LastActiveDevice,
+        DeviceRevokeError::Database(error) => {
+            backend_store_error("revoke device", StoreError::Database(error))
+        }
+    }
+}
+
 fn backend_store_error(operation: &'static str, _error: StoreError) -> ApiError {
     warn!(operation, "PostgreSQL metadata operation failed");
     ApiError::Unavailable
@@ -619,6 +711,9 @@ pub(crate) enum ApiError {
     PayloadTooLarge,
     PreconditionFailed,
     OperationConflict,
+    IdentifierConflict,
+    LimitReached,
+    LastActiveDevice,
     Unavailable,
     Internal,
 }
@@ -643,10 +738,10 @@ impl IntoResponse for ApiError {
             Self::PreconditionFailed => {
                 (StatusCode::PRECONDITION_FAILED, "write_precondition_failed")
             }
-            Self::OperationConflict => (
-                StatusCode::CONFLICT,
-                "operation_id_reused_with_different_mutation",
-            ),
+            Self::OperationConflict => (StatusCode::CONFLICT, "operation_conflict"),
+            Self::IdentifierConflict => (StatusCode::CONFLICT, "device_identifier_conflict"),
+            Self::LimitReached => (StatusCode::UNPROCESSABLE_ENTITY, "device_limit_reached"),
+            Self::LastActiveDevice => (StatusCode::CONFLICT, "last_active_device"),
             Self::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, "backend_unavailable"),
             Self::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
         };
@@ -723,5 +818,28 @@ mod tests {
             HeaderValue::from_static("application/octet-stream; charset=binary"),
         );
         assert!(require_octet_stream(&headers).is_ok());
+    }
+
+    #[test]
+    fn device_registration_binds_a_non_nil_id_and_both_public_keys() {
+        let device_id = Uuid::new_v4();
+        let request: RegisterDeviceRequest = serde_json::from_value(serde_json::json!({
+            "device_id": device_id,
+            "encryption_public_key": "11".repeat(32),
+            "signing_public_key": "22".repeat(32),
+        }))
+        .expect("parse registration");
+        let parsed = parse_device_registration(&request).expect("valid registration");
+        assert_eq!(parsed.0, device_id);
+        assert_eq!(parsed.1, [0x11; 32]);
+        assert_eq!(parsed.2, [0x22; 32]);
+
+        let invalid: RegisterDeviceRequest = serde_json::from_value(serde_json::json!({
+            "device_id": Uuid::nil(),
+            "encryption_public_key": "11".repeat(32),
+            "signing_public_key": "22".repeat(32),
+        }))
+        .expect("parse registration");
+        assert!(parse_device_registration(&invalid).is_err());
     }
 }

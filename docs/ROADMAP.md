@@ -183,6 +183,13 @@ gates are green, including the generated-WASM Node smoke test.**
   The API now persists revision-fenced topologies after verifying every declared
   account/device principal and applies the evaluator to scoped object feeds,
   downloads, and atomic upload commits.
+  Browser enrollment now registers a client-generated device UUID together
+  with its X25519 encryption and Ed25519 signing public keys, validates the
+  one-time bearer response, supports authenticated device revocation, and wraps
+  persisted browser bearer tokens under non-extractable API/account/device-bound
+  AES-GCM keys without placing credentials in the sync outbox or cursor stores.
+  Active-device inventory is bounded to 64, enrollment/revocation is serialized
+  per account, and the server refuses to revoke the final active device.
   The opaque-object endpoint validates and durably persists canonical
   mutation/header metadata with atomic operation-ID idempotency. Binding this
   transport and its durable coordinators to web and extension application flows,

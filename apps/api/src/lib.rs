@@ -133,7 +133,10 @@ pub fn router(state: AppState) -> Router {
         .route("/health/ready", get(health_ready))
         .route("/v1/compatibility", get(compatibility))
         .route("/v1/accounts", post(sync::create_account))
-        .route("/v1/devices", post(sync::create_device))
+        .route(
+            "/v1/devices",
+            get(sync::list_devices).post(sync::create_device),
+        )
         .route(
             "/v1/devices/{device_id}",
             axum::routing::delete(sync::revoke_device),

@@ -13,6 +13,7 @@ import {
   type SyncObjectMetadataV1,
 } from "../src/sync-client"
 import type { HouseholdTopologyV1 } from "../src/sync-domain"
+import type { DeviceRegistrationV1 } from "../src/device-keys"
 
 const ACCOUNT_ID = "11111111-1111-4111-8111-111111111111"
 const OBJECT_ID = "22222222-2222-4222-8222-222222222222"
@@ -22,7 +23,17 @@ const CIPHERTEXT = new TextEncoder().encode("opaque ciphertext")
 const HOUSEHOLD_ID = "44444444-4444-4444-8444-444444444444"
 const MEMBERSHIP_ID = "55555555-5555-4555-8555-555555555555"
 const DEVICE_ID = "66666666-6666-4666-8666-666666666666"
+const SECOND_DEVICE_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 const SPACE_ID = "77777777-7777-4777-8777-777777777777"
+
+function deviceRegistration(deviceId = DEVICE_ID): DeviceRegistrationV1 {
+  return {
+    format_version: 1,
+    device_id: deviceId,
+    encryption_public_key_hex: "11".repeat(32),
+    signing_public_key_hex: "22".repeat(32),
+  }
+}
 
 function topology(): HouseholdTopologyV1 {
   return {
@@ -295,6 +306,210 @@ test("device credentials cannot be sent to insecure remote HTTP origins", async 
     ),
     (error: unknown) =>
       error instanceof SyncClientError && error.code === "invalid_configuration",
+  )
+})
+
+test("client bootstrap binds the client-generated ID and both device public keys", async () => {
+  const requests: Array<{ url: string; init: RequestInit }> = []
+  const fetcher: typeof fetch = async (input, init = {}) => {
+    requests.push({ url: String(input), init })
+    if (String(input).endsWith("/v1/compatibility")) {
+      return Response.json(CURRENT_SYNC_COMPATIBILITY)
+    }
+    return Response.json({
+      account_id: ACCOUNT_ID,
+      device_id: DEVICE_ID,
+      device_token: DEVICE_TOKEN,
+    }, { status: 201 })
+  }
+
+  const credentials = await SyncClient.createAccount(
+    "https://sync.example.test",
+    "r".repeat(32),
+    deviceRegistration(),
+    { fetcher },
+  )
+
+  assert.deepEqual(credentials, {
+    account_id: ACCOUNT_ID,
+    device_id: DEVICE_ID,
+    device_token: DEVICE_TOKEN,
+  })
+  assert.equal(requests[1]?.url, "https://sync.example.test/v1/accounts")
+  assert.equal(
+    new Headers(requests[1]?.init.headers).get("authorization"),
+    `Bearer ${"r".repeat(32)}`,
+  )
+  assert.deepEqual(JSON.parse(String(requests[1]?.init.body)), {
+    device_id: DEVICE_ID,
+    encryption_public_key: "11".repeat(32),
+    signing_public_key: "22".repeat(32),
+  })
+})
+
+test("authenticated client creates and revokes a bound device", async () => {
+  const methods: string[] = []
+  const fetcher: typeof fetch = async (input, init = {}) => {
+    const url = String(input)
+    if (url.endsWith("/v1/compatibility")) {
+      return Response.json(CURRENT_SYNC_COMPATIBILITY)
+    }
+    methods.push(`${init.method} ${new URL(url).pathname}`)
+    if (init.method === "DELETE") return new Response(null, { status: 204 })
+    return Response.json({
+      account_id: ACCOUNT_ID,
+      device_id: SECOND_DEVICE_ID,
+      device_token: `sfo_dev_v1_${"b".repeat(64)}`,
+    }, { status: 201 })
+  }
+  const client = await SyncClient.connect(
+    "https://sync.example.test",
+    ACCOUNT_ID,
+    DEVICE_TOKEN,
+    { fetcher },
+  )
+
+  const credentials = await client.createDevice(deviceRegistration(SECOND_DEVICE_ID))
+  await client.revokeDevice(SECOND_DEVICE_ID)
+
+  assert.equal(credentials.device_id, SECOND_DEVICE_ID)
+  assert.deepEqual(methods, [
+    "POST /v1/devices",
+    `DELETE /v1/devices/${SECOND_DEVICE_ID}`,
+  ])
+})
+
+test("client validates the bounded active-device inventory", async () => {
+  let duplicate = false
+  let currentDeviceId = DEVICE_ID
+  const entry = {
+    device_id: DEVICE_ID,
+    encryption_public_key: "11".repeat(32),
+    signing_public_key: "22".repeat(32),
+  }
+  const fetcher: typeof fetch = async (input) => {
+    if (String(input).endsWith("/v1/compatibility")) {
+      return Response.json(CURRENT_SYNC_COMPATIBILITY)
+    }
+    const currentEntry = { ...entry, device_id: currentDeviceId }
+    return Response.json({
+      current_device_id: currentDeviceId,
+      devices: duplicate ? [currentEntry, currentEntry] : [currentEntry],
+    })
+  }
+  const client = await SyncClient.connect(
+    "https://sync.example.test",
+    ACCOUNT_ID,
+    DEVICE_TOKEN,
+    { fetcher, deviceId: DEVICE_ID },
+  )
+
+  assert.deepEqual(await client.listDevices(), {
+    current_device_id: DEVICE_ID,
+    devices: [entry],
+  })
+  duplicate = true
+  await assert.rejects(
+    client.listDevices(),
+    (error: unknown) =>
+      error instanceof SyncClientError && error.code === "invalid_response",
+  )
+  duplicate = false
+  currentDeviceId = SECOND_DEVICE_ID
+  await assert.rejects(
+    client.listDevices(),
+    (error: unknown) =>
+      error instanceof SyncClientError && error.code === "invalid_response",
+  )
+})
+
+test("device enrollment maps the active-device limit", async () => {
+  const fetcher: typeof fetch = async (input) => {
+    if (String(input).endsWith("/v1/compatibility")) {
+      return Response.json(CURRENT_SYNC_COMPATIBILITY)
+    }
+    return new Response(null, { status: 422 })
+  }
+  const client = await SyncClient.connect(
+    "https://sync.example.test",
+    ACCOUNT_ID,
+    DEVICE_TOKEN,
+    { fetcher },
+  )
+
+  await assert.rejects(
+    client.createDevice(deviceRegistration(SECOND_DEVICE_ID)),
+    (error: unknown) =>
+      error instanceof SyncClientError && error.code === "limit_reached",
+  )
+})
+
+test("device enrollment reports a client-generated identifier collision", async () => {
+  const fetcher: typeof fetch = async (input) => {
+    if (String(input).endsWith("/v1/compatibility")) {
+      return Response.json(CURRENT_SYNC_COMPATIBILITY)
+    }
+    return Response.json(
+      { error: "device_identifier_conflict" },
+      { status: 409 },
+    )
+  }
+  const client = await SyncClient.connect(
+    "https://sync.example.test",
+    ACCOUNT_ID,
+    DEVICE_TOKEN,
+    { fetcher },
+  )
+
+  await assert.rejects(
+    client.createDevice(deviceRegistration(SECOND_DEVICE_ID)),
+    (error: unknown) =>
+      error instanceof SyncClientError && error.code === "identifier_conflict",
+  )
+})
+
+test("device revocation preserves the final active device", async () => {
+  const fetcher: typeof fetch = async (input) => {
+    if (String(input).endsWith("/v1/compatibility")) {
+      return Response.json(CURRENT_SYNC_COMPATIBILITY)
+    }
+    return Response.json({ error: "last_active_device" }, { status: 409 })
+  }
+  const client = await SyncClient.connect(
+    "https://sync.example.test",
+    ACCOUNT_ID,
+    DEVICE_TOKEN,
+    { fetcher },
+  )
+
+  await assert.rejects(
+    client.revokeDevice(DEVICE_ID),
+    (error: unknown) =>
+      error instanceof SyncClientError && error.code === "last_active_device",
+  )
+})
+
+test("device registration rejects substituted server identity", async () => {
+  const fetcher: typeof fetch = async (input) => {
+    if (String(input).endsWith("/v1/compatibility")) {
+      return Response.json(CURRENT_SYNC_COMPATIBILITY)
+    }
+    return Response.json({
+      account_id: ACCOUNT_ID,
+      device_id: SECOND_DEVICE_ID,
+      device_token: DEVICE_TOKEN,
+    })
+  }
+
+  await assert.rejects(
+    SyncClient.createAccount(
+      "https://sync.example.test",
+      "r".repeat(32),
+      deviceRegistration(),
+      { fetcher },
+    ),
+    (error: unknown) =>
+      error instanceof SyncClientError && error.code === "invalid_response",
   )
 })
 

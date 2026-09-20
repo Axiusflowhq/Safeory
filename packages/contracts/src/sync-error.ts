@@ -9,6 +9,9 @@ export class SyncClientError extends Error {
       | "not_found"
       | "precondition_failed"
       | "operation_conflict"
+      | "identifier_conflict"
+      | "limit_reached"
+      | "last_active_device"
       | "invalid_response"
       | "ciphertext_mismatch",
     message: string,

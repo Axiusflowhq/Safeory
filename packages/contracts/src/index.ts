@@ -57,6 +57,7 @@ export {
   OPAQUE_OBJECT_CLASSES,
   SyncClient,
   SyncClientError,
+  normalizeSyncApiBaseUrl,
   parseOpaqueMutation,
   parseOpaqueObjectHeader,
   parseSyncObjectMetadata,
@@ -72,6 +73,19 @@ export type {
   SyncFlushResult,
   SyncOutboxStore,
 } from "./sync-queue";
+export { DurableSyncCoordinator } from "./sync-coordinator";
+export type {
+  SyncCycleOptions,
+  SyncCycleResult,
+} from "./sync-coordinator";
+export {
+  BrowserSyncCredentialStore,
+  IndexedDbSyncCredentialStorage,
+} from "./sync-credentials";
+export type {
+  StoredSyncCredentialV1,
+  SyncCredentialStorageBackend,
+} from "./sync-credentials";
 export {
   DurableSyncPuller,
   IndexedDbSyncCursorStore,
@@ -109,6 +123,9 @@ export type {
 } from "./sync-pull";
 export type {
   OpaqueMutationV1,
+  DeviceCredentialsV1,
+  DeviceInventoryEntryV1,
+  DeviceInventoryV1,
   OpaqueObjectClassV1,
   OpaqueObjectHeaderV1,
   ObjectScopeV1,

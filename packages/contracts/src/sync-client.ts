@@ -7,6 +7,7 @@ import {
   type HouseholdTopologyV1,
 } from "./sync-domain"
 import { SyncClientError } from "./sync-error"
+import type { DeviceRegistrationV1 } from "./device-keys"
 
 export { SyncClientError } from "./sync-error"
 
@@ -19,7 +20,11 @@ const MAX_CIPHERTEXT_BYTES = 128 * 1024 * 1024
 const MAX_MUTATION_HEADER_CHARS = 8 * 1024
 const MAX_METADATA_RESPONSE_CHARS = 2 * 1024 * 1024
 const MAX_TOPOLOGY_BYTES = 1024 * 1024
+const MAX_DEVICE_CREDENTIAL_BYTES = 4 * 1024
+const MAX_DEVICE_INVENTORY_BYTES = 64 * 1024
+const MAX_DEVICES_PER_ACCOUNT = 64
 const DEVICE_TOKEN = /^sfo_dev_v1_[0-9a-f]{64}$/
+const PUBLIC_KEY_HEX = /^[0-9a-f]{64}$/i
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const NIL_UUID = "00000000-0000-0000-0000-000000000000"
 
@@ -90,10 +95,28 @@ export interface SyncObjectPageV1 {
   next_change_seq: number
 }
 
+export interface DeviceCredentialsV1 {
+  account_id: string
+  device_id: string
+  device_token: string
+}
+
+export interface DeviceInventoryEntryV1 {
+  device_id: string
+  encryption_public_key: string | null
+  signing_public_key: string | null
+}
+
+export interface DeviceInventoryV1 {
+  current_device_id: string
+  devices: DeviceInventoryEntryV1[]
+}
+
 export class SyncClient {
   private constructor(
     private readonly baseUrl: URL,
-    private readonly accountId: string,
+    readonly accountId: string,
+    readonly deviceId: string | null,
     private readonly deviceToken: string,
     private readonly fetcher: typeof fetch,
     readonly compatibility: NegotiatedCompatibility,
@@ -103,10 +126,17 @@ export class SyncClient {
     apiBaseUrl: string,
     accountIdValue: string,
     deviceToken: string,
-    options: { fetcher?: typeof fetch; signal?: AbortSignal } = {},
+    options: {
+      fetcher?: typeof fetch
+      signal?: AbortSignal
+      deviceId?: string
+    } = {},
   ): Promise<SyncClient> {
     const baseUrl = syncBaseUrl(apiBaseUrl)
     const accountId = uuid(accountIdValue, "account ID")
+    const deviceId = options.deviceId === undefined
+      ? null
+      : uuid(options.deviceId, "device ID")
     if (!DEVICE_TOKEN.test(deviceToken)) {
       throw new SyncClientError(
         "invalid_configuration",
@@ -118,7 +148,107 @@ export class SyncClient {
       fetcher,
       ...(options.signal === undefined ? {} : { signal: options.signal }),
     })
-    return new SyncClient(baseUrl, accountId, deviceToken, fetcher, compatibility)
+    return new SyncClient(
+      baseUrl,
+      accountId,
+      deviceId,
+      deviceToken,
+      fetcher,
+      compatibility,
+    )
+  }
+
+  static async createAccount(
+    apiBaseUrl: string,
+    registrationToken: string,
+    registration: DeviceRegistrationV1,
+    options: { fetcher?: typeof fetch; signal?: AbortSignal } = {},
+  ): Promise<DeviceCredentialsV1> {
+    const baseUrl = syncBaseUrl(apiBaseUrl)
+    if (
+      new TextEncoder().encode(registrationToken).byteLength < 32 ||
+      /\s/.test(registrationToken)
+    ) {
+      throw new SyncClientError(
+        "invalid_configuration",
+        "The account registration credential is invalid.",
+      )
+    }
+    const fetcher = options.fetcher ?? globalThis.fetch
+    await fetchSyncCompatibility(baseUrl.href, {
+      fetcher,
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    })
+    const payload = deviceRegistrationPayload(registration)
+    const response = await performSyncRequest(fetcher, new URL("v1/accounts", baseUrl), {
+      method: "POST",
+      headers: authenticatedJsonHeaders(registrationToken),
+      body: JSON.stringify(payload),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    })
+    return parseDeviceCredentials(
+      await boundedJson(response, MAX_DEVICE_CREDENTIAL_BYTES),
+      payload.device_id,
+    )
+  }
+
+  async createDevice(
+    registration: DeviceRegistrationV1,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<DeviceCredentialsV1> {
+    const payload = deviceRegistrationPayload(registration)
+    const response = await this.request(this.endpoint("v1/devices"), {
+      method: "POST",
+      headers: this.headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify(payload),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    })
+    const credentials = parseDeviceCredentials(
+      await boundedJson(response, MAX_DEVICE_CREDENTIAL_BYTES),
+      payload.device_id,
+    )
+    if (credentials.account_id !== this.accountId) {
+      throw new SyncClientError(
+        "invalid_response",
+        "The registered device response changed the authenticated account.",
+      )
+    }
+    return credentials
+  }
+
+  async revokeDevice(
+    deviceIdValue: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<void> {
+    const deviceId = uuid(deviceIdValue, "device ID")
+    await this.request(
+      this.endpoint(`v1/devices/${encodeURIComponent(deviceId)}`),
+      {
+        method: "DELETE",
+        headers: this.headers({ Accept: "application/json" }),
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+      },
+    )
+  }
+
+  async listDevices(
+    options: { signal?: AbortSignal } = {},
+  ): Promise<DeviceInventoryV1> {
+    const response = await this.request(this.endpoint("v1/devices"), {
+      method: "GET",
+      headers: this.headers({ Accept: "application/json" }),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    })
+    const inventory = parseDeviceInventory(
+      await boundedJson(response, MAX_DEVICE_INVENTORY_BYTES),
+    )
+    if (this.deviceId !== null && inventory.current_device_id !== this.deviceId) {
+      throw new SyncClientError(
+        "invalid_response",
+        "The device inventory changed the authenticated device identity.",
+      )
+    }
+    return inventory
   }
 
   async listObjects(
@@ -309,41 +439,211 @@ export class SyncClient {
   }
 
   private async request(endpoint: URL, init: RequestInit): Promise<Response> {
-    let response: Response
-    try {
-      response = await this.fetcher(endpoint, {
-        ...init,
-        cache: "no-store",
-        credentials: "omit",
-        redirect: "error",
-      })
-    } catch {
-      throw new SyncClientError("request_failed", "The sync request failed.")
-    }
-    if (response.ok) return response
-    if (response.status === 401) {
-      throw new SyncClientError("unauthorized", "The device credential was rejected.")
-    }
-    if (response.status === 403) {
-      throw new SyncClientError("forbidden", "The device is not authorized for this scope.")
-    }
-    if (response.status === 404) {
-      throw new SyncClientError("not_found", "The opaque object was not found.")
-    }
-    if (response.status === 409) {
-      throw new SyncClientError(
-        "operation_conflict",
-        "The operation ID was already used for different input.",
-      )
-    }
-    if (response.status === 412) {
-      throw new SyncClientError(
-        "precondition_failed",
-        "The opaque object revision precondition failed.",
-      )
-    }
-    throw new SyncClientError("request_failed", "The sync endpoint returned an error.")
+    return performSyncRequest(this.fetcher, endpoint, init)
   }
+}
+
+function authenticatedJsonHeaders(token: string): Headers {
+  return new Headers({
+    Accept: "application/json",
+    Authorization: `Bearer ${token}`,
+    "Content-Type": "application/json",
+  })
+}
+
+function deviceRegistrationPayload(registration: DeviceRegistrationV1): {
+  device_id: string
+  encryption_public_key: string
+  signing_public_key: string
+} {
+  if (
+    registration.format_version !== 1 ||
+    !PUBLIC_KEY_HEX.test(registration.encryption_public_key_hex) ||
+    !PUBLIC_KEY_HEX.test(registration.signing_public_key_hex)
+  ) {
+    throw new SyncClientError(
+      "invalid_contract",
+      "The device registration is invalid.",
+    )
+  }
+  return {
+    device_id: uuid(registration.device_id, "device ID"),
+    encryption_public_key: registration.encryption_public_key_hex.toLowerCase(),
+    signing_public_key: registration.signing_public_key_hex.toLowerCase(),
+  }
+}
+
+function parseDeviceCredentials(
+  value: unknown,
+  expectedDeviceId: string,
+): DeviceCredentialsV1 {
+  let record: Record<string, unknown>
+  try {
+    record = exactRecord(value, ["account_id", "device_id", "device_token"])
+  } catch {
+    throw new SyncClientError(
+      "invalid_response",
+      "The device credentials response is invalid.",
+    )
+  }
+  let accountId: string
+  let deviceId: string
+  try {
+    accountId = uuid(record.account_id, "account ID")
+    deviceId = uuid(record.device_id, "device ID")
+  } catch {
+    throw new SyncClientError(
+      "invalid_response",
+      "The device credentials response is invalid.",
+    )
+  }
+  if (
+    deviceId !== expectedDeviceId ||
+    typeof record.device_token !== "string" ||
+    !DEVICE_TOKEN.test(record.device_token)
+  ) {
+    throw new SyncClientError(
+      "invalid_response",
+      "The device credentials response is invalid.",
+    )
+  }
+  return { account_id: accountId, device_id: deviceId, device_token: record.device_token }
+}
+
+function parseDeviceInventory(value: unknown): DeviceInventoryV1 {
+  const record = responseRecord(value, ["current_device_id", "devices"], "device inventory")
+  let currentDeviceId: string
+  try {
+    currentDeviceId = uuid(record.current_device_id, "current device ID")
+  } catch {
+    return invalidResponse("The device inventory response is invalid.")
+  }
+  if (!Array.isArray(record.devices) || record.devices.length > MAX_DEVICES_PER_ACCOUNT) {
+    return invalidResponse("The device inventory response is invalid.")
+  }
+  const seen = new Set<string>()
+  const devices = record.devices.map((value): DeviceInventoryEntryV1 => {
+    const device = responseRecord(
+      value,
+      ["device_id", "encryption_public_key", "signing_public_key"],
+      "device inventory entry",
+    )
+    let deviceId: string
+    try {
+      deviceId = uuid(device.device_id, "device ID")
+    } catch {
+      return invalidResponse("The device inventory response is invalid.")
+    }
+    if (seen.has(deviceId)) return invalidResponse("The device inventory contains a duplicate.")
+    seen.add(deviceId)
+    return {
+      device_id: deviceId,
+      encryption_public_key: nullablePublicKey(device.encryption_public_key),
+      signing_public_key: nullablePublicKey(device.signing_public_key),
+    }
+  })
+  if (!seen.has(currentDeviceId)) {
+    return invalidResponse("The device inventory omits the authenticated device.")
+  }
+  return { current_device_id: currentDeviceId, devices }
+}
+
+function responseRecord(
+  value: unknown,
+  keys: readonly string[],
+  label: string,
+): Record<string, unknown> {
+  try {
+    return exactRecord(value, keys)
+  } catch {
+    return invalidResponse(`The ${label} response is invalid.`)
+  }
+}
+
+function nullablePublicKey(value: unknown): string | null {
+  if (value === null) return null
+  if (typeof value !== "string" || !PUBLIC_KEY_HEX.test(value)) {
+    return invalidResponse("The device inventory contains an invalid public key.")
+  }
+  return value.toLowerCase()
+}
+
+function invalidResponse(message: string): never {
+  throw new SyncClientError("invalid_response", message)
+}
+
+async function performSyncRequest(
+  fetcher: typeof fetch,
+  endpoint: URL,
+  init: RequestInit,
+): Promise<Response> {
+  let response: Response
+  try {
+    response = await fetcher(endpoint, {
+      ...init,
+      cache: "no-store",
+      credentials: "omit",
+      redirect: "error",
+    })
+  } catch {
+    throw new SyncClientError("request_failed", "The sync request failed.")
+  }
+  if (response.ok) return response
+  if (response.status === 401) {
+    throw new SyncClientError("unauthorized", "The device credential was rejected.")
+  }
+  if (response.status === 403) {
+    throw new SyncClientError("forbidden", "The device is not authorized for this scope.")
+  }
+  if (response.status === 404) {
+    throw new SyncClientError("not_found", "The requested sync resource was not found.")
+  }
+  if (response.status === 409) {
+    const errorCode = await responseErrorCode(response)
+    if (errorCode === "last_active_device") {
+      throw new SyncClientError(
+        "last_active_device",
+        "The account must retain at least one active device.",
+      )
+    }
+    if (errorCode === "device_identifier_conflict") {
+      throw new SyncClientError(
+        "identifier_conflict",
+        "The device identifier is already registered.",
+      )
+    }
+    throw new SyncClientError(
+      "operation_conflict",
+      "The operation ID was already used for different input.",
+    )
+  }
+  if (response.status === 412) {
+    throw new SyncClientError(
+      "precondition_failed",
+      "The sync write precondition failed.",
+    )
+  }
+  if (response.status === 422) {
+    throw new SyncClientError("limit_reached", "The device limit was reached.")
+  }
+  throw new SyncClientError("request_failed", "The sync endpoint returned an error.")
+}
+
+async function responseErrorCode(response: Response): Promise<string | null> {
+  try {
+    const value = await boundedJson(response, 1024)
+    if (
+      typeof value === "object" &&
+      value !== null &&
+      Object.keys(value).length === 1 &&
+      typeof (value as { error?: unknown }).error === "string"
+    ) {
+      return (value as { error: string }).error
+    }
+  } catch {
+    // Status remains authoritative when a legacy error body is absent.
+  }
+  return null
 }
 
 function requireTopologyAccount(topology: HouseholdTopologyV1, accountId: string): void {
@@ -623,6 +923,10 @@ async function readBoundedText(response: Response, maximumBytes: number): Promis
     reader.releaseLock()
   }
   return text
+}
+
+export function normalizeSyncApiBaseUrl(value: string): string {
+  return syncBaseUrl(value).href
 }
 
 function syncBaseUrl(value: string): URL {

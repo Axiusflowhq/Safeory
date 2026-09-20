@@ -1,10 +1,13 @@
+use std::collections::{HashMap, HashSet};
+
 use sqlx::{PgPool, Row};
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::model::{OperationOutcome, StoredObject, WritePrecondition, validate_write_policy};
 use vault_sync::{
-    AccountId, DeviceId, HouseholdTopologyV1, ObjectScopeV1, OpaqueMutationV1, TopologyAction,
+    AccountId, DeviceId, HouseholdTopologyV1, MAX_DEVICES_PER_ACCOUNT, ObjectScopeV1,
+    OpaqueMutationV1, TopologyAction,
 };
 
 #[derive(Clone)]
@@ -23,6 +26,12 @@ pub(crate) struct CommitResult {
     pub previous_storage_key: Option<String>,
     pub created: bool,
     pub replayed: bool,
+}
+
+pub(crate) struct RegisteredDevice {
+    pub device_id: Uuid,
+    pub encryption_public_key: Option<[u8; 32]>,
+    pub signing_public_key: Option<[u8; 32]>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,26 +72,35 @@ impl MetadataStore {
 
     pub(crate) async fn create_account_with_device(
         &self,
-        public_key: &[u8; 32],
+        device_id: Uuid,
+        encryption_public_key: &[u8; 32],
+        signing_public_key: &[u8; 32],
         token_hash: &[u8; 32],
-    ) -> Result<(Uuid, Uuid), StoreError> {
+    ) -> Result<(Uuid, Uuid), AccountCreateError> {
         let account_id = Uuid::new_v4();
-        let device_id = Uuid::new_v4();
         let mut transaction = self.pool.begin().await?;
         sqlx::query("INSERT INTO accounts(account_id) VALUES ($1::uuid)")
             .bind(account_id.to_string())
             .execute(&mut *transaction)
             .await?;
-        sqlx::query(
-            "INSERT INTO devices(device_id, account_id, device_public_key, auth_token_sha256) \
-             VALUES ($1::uuid, $2::uuid, $3, $4)",
+        let insert = sqlx::query(
+            "INSERT INTO devices( \
+                device_id, account_id, device_public_key, signing_public_key, auth_token_sha256 \
+             ) VALUES ($1::uuid, $2::uuid, $3, $4, $5)",
         )
         .bind(device_id.to_string())
         .bind(account_id.to_string())
-        .bind(public_key.as_slice())
+        .bind(encryption_public_key.as_slice())
+        .bind(signing_public_key.as_slice())
         .bind(token_hash.as_slice())
         .execute(&mut *transaction)
-        .await?;
+        .await;
+        if let Err(error) = insert {
+            if is_unique_violation(&error) {
+                return Err(AccountCreateError::IdentifierConflict);
+            }
+            return Err(AccountCreateError::Database(error));
+        }
         transaction.commit().await?;
         Ok((account_id, device_id))
     }
@@ -90,36 +108,104 @@ impl MetadataStore {
     pub(crate) async fn create_device(
         &self,
         account_id: Uuid,
-        public_key: &[u8; 32],
+        device_id: Uuid,
+        encryption_public_key: &[u8; 32],
+        signing_public_key: &[u8; 32],
         token_hash: &[u8; 32],
-    ) -> Result<Uuid, StoreError> {
-        let device_id = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO devices(device_id, account_id, device_public_key, auth_token_sha256) \
-             VALUES ($1::uuid, $2::uuid, $3, $4)",
+    ) -> Result<Uuid, DeviceCreateError> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SELECT account_id FROM accounts WHERE account_id = $1::uuid FOR UPDATE")
+            .bind(account_id.to_string())
+            .fetch_one(&mut *transaction)
+            .await?;
+        let active_devices = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM devices WHERE account_id = $1::uuid AND revoked_at IS NULL",
+        )
+        .bind(account_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if active_devices >= i64::try_from(MAX_DEVICES_PER_ACCOUNT).unwrap_or(i64::MAX) {
+            return Err(DeviceCreateError::LimitReached);
+        }
+        let insert = sqlx::query(
+            "INSERT INTO devices( \
+                device_id, account_id, device_public_key, signing_public_key, auth_token_sha256 \
+             ) VALUES ($1::uuid, $2::uuid, $3, $4, $5)",
         )
         .bind(device_id.to_string())
         .bind(account_id.to_string())
-        .bind(public_key.as_slice())
+        .bind(encryption_public_key.as_slice())
+        .bind(signing_public_key.as_slice())
         .bind(token_hash.as_slice())
-        .execute(&self.pool)
-        .await?;
+        .execute(&mut *transaction)
+        .await;
+        if let Err(error) = insert {
+            if is_unique_violation(&error) {
+                return Err(DeviceCreateError::IdentifierConflict);
+            }
+            return Err(DeviceCreateError::Database(error));
+        }
+        transaction.commit().await?;
         Ok(device_id)
+    }
+
+    pub(crate) async fn list_active_devices(
+        &self,
+        account_id: Uuid,
+    ) -> Result<Vec<RegisteredDevice>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT device_id::text AS device_id, device_public_key, signing_public_key \
+             FROM devices WHERE account_id = $1::uuid AND revoked_at IS NULL \
+             ORDER BY created_at ASC, device_id ASC LIMIT $2",
+        )
+        .bind(account_id.to_string())
+        .bind(i64::try_from(MAX_DEVICES_PER_ACCOUNT).unwrap_or(i64::MAX))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_registered_device).collect()
     }
 
     pub(crate) async fn revoke_device(
         &self,
         account_id: Uuid,
         device_id: Uuid,
-    ) -> Result<bool, StoreError> {
+    ) -> Result<bool, DeviceRevokeError> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SELECT account_id FROM accounts WHERE account_id = $1::uuid FOR UPDATE")
+            .bind(account_id.to_string())
+            .fetch_one(&mut *transaction)
+            .await?;
+        let target_active = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS( \
+                SELECT 1 FROM devices \
+                WHERE account_id = $1::uuid AND device_id = $2::uuid AND revoked_at IS NULL \
+             )",
+        )
+        .bind(account_id.to_string())
+        .bind(device_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if !target_active {
+            return Ok(false);
+        }
+        let active_devices = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM devices WHERE account_id = $1::uuid AND revoked_at IS NULL",
+        )
+        .bind(account_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if active_devices <= 1 {
+            return Err(DeviceRevokeError::LastActiveDevice);
+        }
         let result = sqlx::query(
             "UPDATE devices SET revoked_at = now() \
              WHERE account_id = $1::uuid AND device_id = $2::uuid AND revoked_at IS NULL",
         )
         .bind(account_id.to_string())
         .bind(device_id.to_string())
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
+        transaction.commit().await?;
         Ok(result.rows_affected() == 1)
     }
 
@@ -207,31 +293,62 @@ impl MetadataStore {
             }
         }
 
-        for account in &topology.accounts {
-            let account_exists = sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS(SELECT 1 FROM accounts WHERE account_id = $1::uuid)",
+        let expected_accounts: HashSet<_> = topology
+            .accounts
+            .iter()
+            .map(|account| account.account_id.0.to_string())
+            .collect();
+        let expected_devices: HashMap<_, _> = topology
+            .accounts
+            .iter()
+            .flat_map(|account| {
+                let account_id = account.account_id.0.to_string();
+                account
+                    .device_ids
+                    .iter()
+                    .map(move |device_id| (device_id.0.to_string(), account_id.clone()))
+            })
+            .collect();
+        let account_ids: Vec<_> = expected_accounts.iter().cloned().collect();
+        let actual_accounts = sqlx::query_scalar::<_, String>(
+            "SELECT accounts.account_id::text \
+             FROM unnest($1::text[]) AS requested(account_id) \
+             JOIN accounts ON accounts.account_id = requested.account_id::uuid \
+             ORDER BY accounts.account_id \
+             FOR SHARE OF accounts",
+        )
+        .bind(&account_ids)
+        .fetch_all(&mut *transaction)
+        .await?
+        .into_iter()
+        .collect();
+        let actual_devices = if expected_devices.is_empty() {
+            HashMap::new()
+        } else {
+            let device_ids: Vec<_> = expected_devices.keys().cloned().collect();
+            sqlx::query(
+                "SELECT devices.device_id::text AS device_id, \
+                        devices.account_id::text AS account_id \
+                 FROM unnest($1::text[]) AS requested(device_id) \
+                 JOIN devices ON devices.device_id = requested.device_id::uuid \
+                 WHERE devices.revoked_at IS NULL \
+                 ORDER BY devices.device_id \
+                 FOR SHARE OF devices",
             )
-            .bind(account.account_id.0.to_string())
-            .fetch_one(&mut *transaction)
-            .await?;
-            if !account_exists {
-                return Err(TopologyWriteError::UnknownPrincipal);
-            }
-            for device_id in &account.device_ids {
-                let device_matches = sqlx::query_scalar::<_, bool>(
-                    "SELECT EXISTS( \
-                        SELECT 1 FROM devices \
-                        WHERE device_id = $1::uuid AND account_id = $2::uuid AND revoked_at IS NULL \
-                     )",
-                )
-                .bind(device_id.0.to_string())
-                .bind(account.account_id.0.to_string())
-                .fetch_one(&mut *transaction)
-                .await?;
-                if !device_matches {
-                    return Err(TopologyWriteError::UnknownPrincipal);
-                }
-            }
+            .bind(&device_ids)
+            .fetch_all(&mut *transaction)
+            .await?
+            .into_iter()
+            .map(|row| (row.get("device_id"), row.get("account_id")))
+            .collect()
+        };
+        if !principal_sets_match(
+            &expected_accounts,
+            &expected_devices,
+            &actual_accounts,
+            &actual_devices,
+        ) {
+            return Err(TopologyWriteError::UnknownPrincipal);
         }
 
         if current.is_some() {
@@ -585,6 +702,45 @@ fn row_to_topology(row: sqlx::postgres::PgRow) -> Result<HouseholdTopologyV1, St
     Ok(topology)
 }
 
+fn row_to_registered_device(row: sqlx::postgres::PgRow) -> Result<RegisteredDevice, StoreError> {
+    Ok(RegisteredDevice {
+        device_id: parse_uuid_column(&row, "device_id")?,
+        encryption_public_key: parse_optional_32_bytes(&row, "device_public_key")?,
+        signing_public_key: parse_optional_32_bytes(&row, "signing_public_key")?,
+    })
+}
+
+fn principal_sets_match(
+    expected_accounts: &HashSet<String>,
+    expected_devices: &HashMap<String, String>,
+    actual_accounts: &HashSet<String>,
+    actual_devices: &HashMap<String, String>,
+) -> bool {
+    expected_accounts == actual_accounts && expected_devices == actual_devices
+}
+
+fn is_unique_violation(error: &sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .and_then(|database| database.code())
+        .as_deref()
+        == Some("23505")
+}
+
+fn parse_optional_32_bytes(
+    row: &sqlx::postgres::PgRow,
+    column: &'static str,
+) -> Result<Option<[u8; 32]>, StoreError> {
+    let value: Option<Vec<u8>> = row.get(column);
+    value
+        .map(|bytes| {
+            bytes
+                .try_into()
+                .map_err(|_| StoreError::InvalidDevicePublicKey)
+        })
+        .transpose()
+}
+
 fn parse_header(value: String) -> Result<vault_sync::OpaqueObjectHeaderV1, StoreError> {
     let header = serde_json::from_str(&value).map_err(|_| StoreError::InvalidObjectHeader)?;
     vault_sync::OpaqueObjectHeaderV1::validate(&header)
@@ -612,6 +768,34 @@ pub(crate) enum StoreError {
     InvalidObjectHeader,
     #[error("stored household topology is invalid")]
     InvalidHouseholdTopology,
+    #[error("stored device public key is invalid")]
+    InvalidDevicePublicKey,
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum AccountCreateError {
+    #[error("PostgreSQL operation failed")]
+    Database(#[from] sqlx::Error),
+    #[error("the device identifier is already registered")]
+    IdentifierConflict,
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum DeviceCreateError {
+    #[error("PostgreSQL operation failed")]
+    Database(#[from] sqlx::Error),
+    #[error("the active device limit was reached")]
+    LimitReached,
+    #[error("the device identifier is already registered")]
+    IdentifierConflict,
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum DeviceRevokeError {
+    #[error("PostgreSQL operation failed")]
+    Database(#[from] sqlx::Error),
+    #[error("the account must retain an active device")]
+    LastActiveDevice,
 }
 
 #[derive(Debug, Error)]
@@ -688,6 +872,41 @@ mod tests {
         assert!(matches!(
             topology_update_outcome(&current, &skipped),
             Err(TopologyWriteError::PreconditionFailed)
+        ));
+    }
+
+    #[test]
+    fn topology_principal_comparison_requires_exact_account_and_device_ownership() {
+        let expected_accounts = HashSet::from(["account-a".to_owned(), "account-b".to_owned()]);
+        let expected_devices = HashMap::from([
+            ("device-a".to_owned(), "account-a".to_owned()),
+            ("device-b".to_owned(), "account-b".to_owned()),
+        ]);
+
+        assert!(principal_sets_match(
+            &expected_accounts,
+            &expected_devices,
+            &expected_accounts,
+            &expected_devices,
+        ));
+
+        let missing_account = HashSet::from(["account-a".to_owned()]);
+        assert!(!principal_sets_match(
+            &expected_accounts,
+            &expected_devices,
+            &missing_account,
+            &expected_devices,
+        ));
+
+        let wrong_owner = HashMap::from([
+            ("device-a".to_owned(), "account-b".to_owned()),
+            ("device-b".to_owned(), "account-b".to_owned()),
+        ]);
+        assert!(!principal_sets_match(
+            &expected_accounts,
+            &expected_devices,
+            &expected_accounts,
+            &wrong_owner,
         ));
     }
 }

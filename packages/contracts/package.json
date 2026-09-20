@@ -10,6 +10,8 @@
     "./session": "./src/session.ts",
     "./sync-compatibility": "./src/sync-compatibility.ts",
     "./sync-client": "./src/sync-client.ts",
+    "./sync-coordinator": "./src/sync-coordinator.ts",
+    "./sync-credentials": "./src/sync-credentials.ts",
     "./sync-queue": "./src/sync-queue.ts",
     "./sync-pull": "./src/sync-pull.ts",
     "./sync-domain": "./src/sync-domain.ts"
