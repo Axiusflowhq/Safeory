@@ -82,8 +82,10 @@ Rule: cloud integration starts only after the local platform below is stable.
    binds local encrypted records to revision/hash-fenced opaque mutations and
    verifies pulled record/header identity before acceptance. Fail-closed three-way
    reconciliation now separates safe fast-forwards, replays, local-ahead state,
-   and concurrent edits; atomic local enqueue, durable baseline/conflict state,
-   and acceptance wiring remain. Then complete bootstrap,
+   and concurrent edits. A CAS-fenced IndexedDB acceptor durably retains the
+   accepted baseline or encrypted conflict candidate, with crash-safe ordering
+   around an application-supplied snapshot callback; atomic local enqueue and
+   live web/extension snapshot wiring remain. Then complete bootstrap,
    household membership, attachment transport, offline queues, exact-revision conflicts,
    tombstones, revocation, key rotation, pagination, and web/extension
    convergence.

@@ -25,6 +25,14 @@ and compare-and-swap checkpoints each change cursor only after acceptance.
 `DurableSyncCoordinator` serializes bounded pull-then-push cycles so remote
 revisions reach durable application acceptance before queued local writes are
 attempted, while a failed cycle cannot poison later retries.
+Encrypted vault items use a strict transport adapter that binds their opaque
+record bytes to object ID, revision, payload version, and SHA-256 metadata. The
+`DurableVaultItemAcceptor` performs three-way reconciliation against a CAS-fenced
+IndexedDB baseline, applies safe remote fast-forwards through a caller-provided
+durable snapshot callback, and retains concurrent remote ciphertext as a bounded
+conflict candidate without overwriting the local record. Remote application is
+ordered before baseline advancement so an interrupted state write is repaired by
+idempotent pull replay.
 Canonical browser parsers for the account, household, membership, space, and
 single-owner migration contracts mirror `vault-sync` bounds and fail closed on
 unknown fields, inconsistent routing references, or invalid access topology.

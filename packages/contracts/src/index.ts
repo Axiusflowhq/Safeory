@@ -70,6 +70,18 @@ export {
   prepareVaultItemMutation,
   reconcilePulledVaultItem,
 } from "./sync-vault-item";
+export {
+  DurableVaultItemAcceptor,
+  IndexedDbVaultItemSyncStateStore,
+} from "./sync-vault-acceptance";
+export type {
+  ApplyRemoteEncryptedItem,
+  LoadLocalEncryptedItem,
+  VaultItemAcceptanceResult,
+  VaultItemConflictCandidate,
+  VaultItemSyncState,
+  VaultItemSyncStateStore,
+} from "./sync-vault-acceptance";
 export type {
   DecodedPulledVaultItem,
   EncryptedVaultItemV1,

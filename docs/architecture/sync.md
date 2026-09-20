@@ -16,13 +16,16 @@ list/download/upload transport. Encrypted vault item records now have a strict
 browser transport adapter that creates create-only or exact-revision/hash-fenced
 opaque mutations and rejects pulled bodies whose encrypted item identity,
 revision, payload version, digest, or object class differs from the authenticated
-header. Durable conflict resolution and local acceptance remain intentionally
-outside that codec. The item adapter also implements fail-closed three-way
+header. The item adapter also implements fail-closed three-way
 reconciliation against the last durably accepted server header: it distinguishes
 safe remote fast-forwards, exact replays, local-ahead ciphertext, and concurrent
-edits without decrypting or falling back to last-writer-wins. Persisting those
-baselines/conflict candidates and applying accepted records to the live browser
-snapshot remain application-wiring work. A bounded credential-free IndexedDB push outbox
+edits without decrypting or falling back to last-writer-wins. A CAS-fenced
+IndexedDB acceptance coordinator durably persists those baselines and encrypted
+conflict candidates. It applies remote ciphertext through an application-supplied
+durable callback before advancing the baseline, so an interrupted baseline write
+is repaired by replay rather than misclassified as a local edit. Supplying the
+live browser-snapshot callback and wiring the acceptor into web/extension remain
+application work. A bounded credential-free IndexedDB push outbox
 retains canonical mutation/ciphertext pairs until a matching upload response is
 durably acknowledged, so interrupted acknowledgements replay by operation ID.
 A pull coordinator verifies each downloaded body, waits for an idempotent
