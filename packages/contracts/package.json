@@ -15,6 +15,7 @@
     "./sync-queue": "./src/sync-queue.ts",
     "./sync-pull": "./src/sync-pull.ts",
     "./sync-domain": "./src/sync-domain.ts",
+    "./sync-account-bootstrap": "./src/sync-account-bootstrap.ts",
     "./sync-vault-item": "./src/sync-vault-item.ts",
     "./sync-vault-acceptance": "./src/sync-vault-acceptance.ts",
     "./sync-bootstrap": "./src/sync-bootstrap.ts",

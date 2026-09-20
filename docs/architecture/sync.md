@@ -162,8 +162,13 @@ authenticated device.
 
 ADR 0006 defines the Account Secret construction and root-wrap migration. The
 Rust/WASM core implements the account-bound remote envelope and fresh-device
-root import; revision-fenced publication, confirmation UX, and the server
-enrollment/recovery coordinator remain.
+root import. The opaque transport reserves one non-tombstonable, 4 KiB
+`account_bootstrap` object per account: its object UUID equals the account UUID,
+its account scope and V1 payload/envelope versions are validated in both Rust
+and TypeScript, and updates use the ordinary hash-and-revision CAS. An
+authenticated device can fetch its canonical metadata directly before the
+ciphertext body, avoiding a scan of unrelated items. Setup/publication UX and
+the server enrollment/recovery coordinator remain.
 
 ### Additional device
 

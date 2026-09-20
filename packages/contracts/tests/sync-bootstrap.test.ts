@@ -156,6 +156,10 @@ test("bootstrap rejects duplicate objects, identifier exhaustion, and publisher 
     /duplicate/,
   )
   assert.throws(
+    () => createSingleOwnerMigration(ACCOUNT_ID, DEVICE_ID, [ACCOUNT_ID]),
+    /reserved account bootstrap/,
+  )
+  assert.throws(
     () => createSingleOwnerMigration(ACCOUNT_ID, DEVICE_ID, [], () => ACCOUNT_ID),
     /Unable to generate/,
   )

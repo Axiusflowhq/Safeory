@@ -16,8 +16,8 @@ server does not provide Caddy's API proxy.
 The registration token is held only long enough to submit account creation; it
 is not written to browser storage. Local storage contains only the normalized
 API URL plus account and device UUIDs. Production account enrollment still
-requires the reviewed Account Secret and identity design described in the
-architecture roadmap.
+requires confirmed Account Secret setup/publication UX and the reviewed identity
+and device-approval flow described in the architecture roadmap.
 
 While the vault is unlocked, sync runs after durable local changes, when the
 browser comes online or returns to the foreground, on manual request, and every

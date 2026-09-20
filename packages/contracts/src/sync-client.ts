@@ -17,6 +17,7 @@ const OPAQUE_MUTATION_FORMAT_VERSION = 1
 const MAX_VERSION = 65_535
 const MAX_WIRE_INTEGER = Number.MAX_SAFE_INTEGER
 const MAX_CIPHERTEXT_BYTES = 128 * 1024 * 1024
+const MAX_ACCOUNT_BOOTSTRAP_CIPHERTEXT_BYTES = 4 * 1024
 const MAX_MUTATION_HEADER_CHARS = 8 * 1024
 const MAX_METADATA_RESPONSE_CHARS = 2 * 1024 * 1024
 const MAX_TOPOLOGY_BYTES = 1024 * 1024
@@ -316,6 +317,32 @@ export class SyncClient {
     const bytes = await readExactBody(response, header.ciphertext_size_bytes)
     await verifyOpaqueCiphertext(header, bytes)
     return bytes
+  }
+
+  async getObjectMetadata(
+    objectIdValue: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SyncObjectMetadataV1> {
+    const objectId = uuid(objectIdValue, "object ID")
+    const response = await this.request(
+      this.endpoint(`v1/objects/${encodeURIComponent(objectId)}/metadata`),
+      {
+        method: "GET",
+        headers: this.headers({ Accept: "application/json" }),
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+      },
+    )
+    const metadata = parseSyncObjectMetadata(
+      await boundedJson(response, MAX_MUTATION_HEADER_CHARS),
+    )
+    this.requireAccount(metadata.object)
+    if (metadata.object.object_id !== objectId) {
+      throw new SyncClientError(
+        "invalid_response",
+        "The sync metadata response changed the requested object ID.",
+      )
+    }
+    return metadata
   }
 
   async putObject(
@@ -688,7 +715,7 @@ export function parseOpaqueObjectHeader(value: unknown): OpaqueObjectHeaderV1 {
   if (typeof record.tombstone !== "boolean") {
     invalid("The opaque tombstone flag is invalid.")
   }
-  return {
+  const header: OpaqueObjectHeaderV1 = {
     format_version: OBJECT_HEADER_FORMAT_VERSION,
     protocol_version: SYNC_PROTOCOL_VERSION,
     object_id: uuid(record.object_id, "object ID"),
@@ -701,6 +728,25 @@ export function parseOpaqueObjectHeader(value: unknown): OpaqueObjectHeaderV1 {
     ciphertext_sha256: sha256(record.ciphertext_sha256),
     tombstone: record.tombstone,
   }
+  const usesAccountBootstrapId = header.object_id === header.scope.account_id
+  if (
+    (
+      header.class === "account_bootstrap" &&
+      (
+        header.scope.scope !== "account" ||
+        !usesAccountBootstrapId ||
+        header.revision < 1 ||
+        header.payload_version !== 1 ||
+        header.envelope_version !== 1 ||
+        header.ciphertext_size_bytes > MAX_ACCOUNT_BOOTSTRAP_CIPHERTEXT_BYTES ||
+        header.tombstone
+      )
+    ) ||
+    (header.class !== "account_bootstrap" && usesAccountBootstrapId)
+  ) {
+    invalid("The account bootstrap header is invalid or non-canonical.")
+  }
+  return header
 }
 
 export function parseOpaqueMutation(value: unknown): OpaqueMutationV1 {

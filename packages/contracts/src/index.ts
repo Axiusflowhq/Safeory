@@ -72,6 +72,17 @@ export {
   encryptedVaultItemMatchesHeader,
   reconcilePulledVaultItem,
 } from "./sync-vault-item";
+export {
+  decodePulledAccountBootstrap,
+  fetchAccountBootstrap,
+  parseRemoteAccountRootWrap,
+  prepareAccountBootstrapMutation,
+} from "./sync-account-bootstrap";
+export type {
+  DecodedAccountBootstrap,
+  PreparedAccountBootstrapMutation,
+  RemoteAccountRootWrapV1,
+} from "./sync-account-bootstrap";
 export { DurableVaultItemHarvester } from "./sync-harvest";
 export type {
   EncryptedVaultInventory,

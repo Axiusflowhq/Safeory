@@ -8,6 +8,7 @@ pub const OBJECT_HEADER_FORMAT_VERSION: u16 = 1;
 pub const OPAQUE_MUTATION_FORMAT_VERSION: u16 = 1;
 pub const COMPATIBILITY_FORMAT_VERSION: u16 = 1;
 pub const MAX_SYNC_CIPHERTEXT_BYTES: u64 = 128 * 1024 * 1024;
+pub const MAX_ACCOUNT_BOOTSTRAP_CIPHERTEXT_BYTES: u64 = 4 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -211,6 +212,22 @@ impl OpaqueObjectHeaderV1 {
         {
             return Err(ProtocolError::InvalidCiphertextSize);
         }
+        let uses_account_bootstrap_id = self.object_id.0 == self.scope.account_id().0;
+        if (self.class == ObjectClassV1::AccountBootstrap
+            && !matches!(
+                self.scope,
+                ObjectScopeV1::Account { account_id }
+                    if account_id.0 == self.object_id.0
+                        && self.revision > 0
+                        && self.payload_version == 1
+                        && self.envelope_version == 1
+                        && self.ciphertext_size_bytes <= MAX_ACCOUNT_BOOTSTRAP_CIPHERTEXT_BYTES
+                        && !self.tombstone
+            ))
+            || (self.class != ObjectClassV1::AccountBootstrap && uses_account_bootstrap_id)
+        {
+            return Err(ProtocolError::InvalidObjectClassContract);
+        }
         Ok(())
     }
 }
@@ -321,6 +338,8 @@ pub enum ProtocolError {
     InvalidVersion,
     #[error("ciphertext size is empty or exceeds the protocol bound")]
     InvalidCiphertextSize,
+    #[error("opaque object class metadata violates its canonical contract")]
+    InvalidObjectClassContract,
     #[error("candidate revision must advance the matched revision")]
     RevisionDidNotAdvance,
     #[error("object scope does not match the authenticated account")]
@@ -469,6 +488,48 @@ mod tests {
         assert_eq!(
             object.validate(),
             Err(ProtocolError::InvalidIdentifier("account ID"))
+        );
+    }
+
+    #[test]
+    fn account_bootstrap_is_a_bounded_account_singleton() {
+        let account_id = AccountId::new();
+        let mut object = header(1);
+        object.object_id = ObjectId(account_id.0);
+        object.class = ObjectClassV1::AccountBootstrap;
+        object.scope = ObjectScopeV1::Account { account_id };
+        object.payload_version = 1;
+        object.ciphertext_size_bytes = MAX_ACCOUNT_BOOTSTRAP_CIPHERTEXT_BYTES;
+        assert_eq!(object.validate(), Ok(()));
+
+        object.object_id = ObjectId::new();
+        assert_eq!(
+            object.validate(),
+            Err(ProtocolError::InvalidObjectClassContract)
+        );
+        object.object_id = ObjectId(account_id.0);
+        object.ciphertext_size_bytes = MAX_ACCOUNT_BOOTSTRAP_CIPHERTEXT_BYTES + 1;
+        assert_eq!(
+            object.validate(),
+            Err(ProtocolError::InvalidObjectClassContract)
+        );
+        object.ciphertext_size_bytes = 1;
+        object.revision = 0;
+        assert_eq!(
+            object.validate(),
+            Err(ProtocolError::InvalidObjectClassContract)
+        );
+        object.revision = 1;
+        object.tombstone = true;
+        assert_eq!(
+            object.validate(),
+            Err(ProtocolError::InvalidObjectClassContract)
+        );
+        object.tombstone = false;
+        object.class = ObjectClassV1::Item;
+        assert_eq!(
+            object.validate(),
+            Err(ProtocolError::InvalidObjectClassContract)
         );
     }
 

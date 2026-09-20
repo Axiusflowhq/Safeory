@@ -21,9 +21,9 @@ pub use space_keys::{
 };
 pub use sync_protocol::{
     COMPATIBILITY_FORMAT_VERSION, CompatibilityAdvertisementV1, CompatibilityError,
-    MAX_SYNC_CIPHERTEXT_BYTES, NegotiatedCompatibility, OBJECT_HEADER_FORMAT_VERSION,
-    OPAQUE_MUTATION_FORMAT_VERSION, ObjectClassV1, ObjectScopeV1, OpaqueMutationV1,
-    OpaqueObjectHeaderV1, ProtocolError, SYNC_PROTOCOL_VERSION, VersionRangeV1,
+    MAX_ACCOUNT_BOOTSTRAP_CIPHERTEXT_BYTES, MAX_SYNC_CIPHERTEXT_BYTES, NegotiatedCompatibility,
+    OBJECT_HEADER_FORMAT_VERSION, OPAQUE_MUTATION_FORMAT_VERSION, ObjectClassV1, ObjectScopeV1,
+    OpaqueMutationV1, OpaqueObjectHeaderV1, ProtocolError, SYNC_PROTOCOL_VERSION, VersionRangeV1,
     WritePreconditionV1, negotiate_compatibility,
 };
 

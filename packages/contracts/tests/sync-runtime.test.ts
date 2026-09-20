@@ -12,6 +12,7 @@ import {
   type SyncObjectMetadataV1,
 } from "../src/sync-client"
 import {
+  DurableVaultSyncRuntime,
   connectSingleOwnerVaultSync,
   type VaultSyncSession,
 } from "../src/sync-runtime"
@@ -27,6 +28,7 @@ import {
   type VaultItemSyncStateStore,
 } from "../src/sync-vault-acceptance"
 import type { EncryptedVaultItemV1 } from "../src/sync-vault-item"
+import { prepareAccountBootstrapMutation } from "../src/sync-account-bootstrap"
 
 const ACCOUNT_ID = "11111111-1111-4111-8111-111111111111"
 const DEVICE_ID = "22222222-2222-4222-8222-222222222222"
@@ -147,6 +149,24 @@ class MemorySession implements VaultSyncSession {
   }
 }
 
+class EmptySession implements VaultSyncSession {
+  async listEncryptedItemIdsForSync(): Promise<string[]> {
+    return []
+  }
+
+  async loadEncryptedItemForSync(): Promise<null> {
+    return null
+  }
+
+  async encryptedItemIsTombstoneForSync(): Promise<boolean> {
+    assert.fail("an empty vault has no encrypted items")
+  }
+
+  async applyRemoteEncryptedItemForSync(): Promise<void> {
+    assert.fail("account bootstrap must not enter the item acceptor")
+  }
+}
+
 test("runtime harvests after pull and converges the uploaded item on the next cycle", async () => {
   let committed: { metadata: SyncObjectMetadataV1; ciphertext: Uint8Array } | null = null
   const events: string[] = []
@@ -236,4 +256,72 @@ test("runtime harvests after pull and converges the uploaded item on the next cy
   assert.equal(second.push.uploaded.length, 0)
   assert.deepEqual(events, ["list", "download"])
   assert.equal(stateStore.stateValue.baseline?.object_id, ITEM_ID)
+})
+
+test("item runtime verifies and checkpoints the account bootstrap control object", async () => {
+  const wrappedJson = JSON.stringify({
+    format_version: 1,
+    algorithm: "argon2id-v19+hkdf-sha256+xchacha20poly1305",
+    account_id: ACCOUNT_ID,
+    argon2_memory_kib: 65_536,
+    argon2_iterations: 3,
+    argon2_parallelism: 1,
+    passphrase_salt: Array(16).fill(1),
+    nonce: Array(24).fill(2),
+    ciphertext: Array(48).fill(3),
+  })
+  const prepared = await prepareAccountBootstrapMutation(
+    wrappedJson,
+    ACCOUNT_ID,
+    "77777777-7777-4777-8777-777777777777",
+    null,
+  )
+  const metadata = {
+    object: prepared.mutation.object,
+    change_seq: 1,
+    etag: '"bootstrap-1"',
+  }
+  const fetcher: typeof fetch = async (input) => {
+    const url = new URL(String(input))
+    if (url.pathname.endsWith("/v1/compatibility")) {
+      return Response.json(CURRENT_SYNC_COMPATIBILITY)
+    }
+    if (url.pathname.endsWith("/v1/objects")) {
+      return Response.json({ objects: [metadata], next_change_seq: 1 })
+    }
+    if (url.pathname.endsWith(`/${ACCOUNT_ID}`)) {
+      return new Response(prepared.ciphertext.slice().buffer, {
+        headers: { "content-length": String(prepared.ciphertext.byteLength) },
+      })
+    }
+    return new Response(null, { status: 404 })
+  }
+  const client = await SyncClient.connect(
+    "https://sync.example.test",
+    ACCOUNT_ID,
+    DEVICE_TOKEN,
+    { fetcher, deviceId: DEVICE_ID },
+  )
+  const cursor = new MemoryCursorStore()
+  const runtime = new DurableVaultSyncRuntime(
+    client,
+    { scope: "account", account_id: ACCOUNT_ID },
+    new EmptySession(),
+    {
+      outbox: new DurableSyncOutbox(ACCOUNT_ID, new MemoryOutboxStore()),
+      puller: new DurableSyncPuller(ACCOUNT_ID, cursor),
+      acceptor: new DurableVaultItemAcceptor(ACCOUNT_ID, new MemoryItemStateStore()),
+    },
+  )
+
+  const result = await runtime.syncOnce()
+  assert.deepEqual(result.pull, { accepted: 1, cursor: 1 })
+  assert.equal(cursor.cursor, 1)
+  assert.deepEqual(result.harvest, {
+    scanned: 0,
+    enqueued: 0,
+    alreadyQueued: 0,
+    current: 0,
+    blockedObjectIds: [],
+  })
 })

@@ -63,6 +63,12 @@ export function createSingleOwnerMigration(
   if (new Set(existingObjectIds).size !== existingObjectIds.length) {
     throw new SyncClientError("invalid_contract", "The existing vault object IDs contain a duplicate.")
   }
+  if (existingObjectIds.includes(accountId)) {
+    throw new SyncClientError(
+      "invalid_contract",
+      "An existing vault object uses the reserved account bootstrap identifier.",
+    )
+  }
   const used = new Set([accountId, deviceId, ...existingObjectIds])
   const nextId = (): string => {
     for (let attempt = 0; attempt < MAX_GENERATION_ATTEMPTS; attempt += 1) {

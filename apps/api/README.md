@@ -79,7 +79,9 @@ tombstone meaning remain encrypted/client-side.
 
 List responses expose the persisted canonical opaque-object header plus change
 cursor and ETag; they do not reconstruct version or routing metadata from
-parallel API-specific fields.
+parallel API-specific fields. `GET /v1/objects/{object_id}/metadata` returns the
+same authenticated canonical metadata for direct discovery of stable bootstrap
+objects without downloading or scanning unrelated ciphertext.
 
 `GET/PUT /v1/households/{household_id}/topology` retrieves or publishes the
 bounded canonical server-visible authorization topology. Initial publication is

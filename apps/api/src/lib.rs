@@ -154,6 +154,10 @@ pub fn router(state: AppState) -> Router {
                 .put(sync::put_object)
                 .layer(DefaultBodyLimit::max(MAX_CIPHERTEXT_OBJECT_BYTES)),
         )
+        .route(
+            "/v1/objects/{object_id}/metadata",
+            get(sync::get_object_metadata),
+        )
         .with_state(state)
 }
 

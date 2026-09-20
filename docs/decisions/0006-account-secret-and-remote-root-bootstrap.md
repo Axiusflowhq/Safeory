@@ -111,7 +111,11 @@ Secret.
 - `vault-wasm` can export an account-bound remote envelope from an unlocked,
   passphrase-reauthenticated vault and initialize a fresh local vault from it
   without exposing the root key to JavaScript.
-- The API still needs a revision-fenced opaque account-bootstrap object and a
-  pending-device approval state machine before production enrollment ships.
+- The shared sync contract carries the envelope as a non-tombstonable, 4 KiB
+  `account_bootstrap` singleton whose object UUID equals its account UUID. The
+  API exposes authenticated direct metadata discovery and applies its existing
+  hash-and-revision CAS before storing a replacement body.
+- Application setup/publication wiring and a pending-device approval state
+  machine are still required before production enrollment ships.
 - The printable-kit UX, confirmation flow, secure existing-device transfer,
   server recovery workflow, and external cryptographic review remain required.

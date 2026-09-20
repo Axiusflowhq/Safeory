@@ -103,10 +103,11 @@ Rules:
 1. Existing `lifevault:v1:item-wrap` domain is immutable wire format. Do not
    rename. New compartments use `safeory:v1:*`.
 2. ADR 0006 defines the high-entropy Account Secret, remote root envelope,
-   local-format migration, and recovery invariants. The Rust/WASM foundation is
-   implemented; server publication, enrollment/recovery coordination, signed
-   device transfer, and external review remain. Cognito authentication does not
-   replace client-side key protection.
+   local-format migration, and recovery invariants. The Rust/WASM foundation and
+   bounded revision-fenced sync object are implemented; application publication
+   UX, enrollment/recovery coordination, signed device transfer, and external
+   review remain. Cognito authentication does not replace client-side key
+   protection.
 3. All Ownership kinds reuse the existing per-item envelope. Item payload schema
    v4 introduced the required per-item legacy-planning disposition. Readers
    explicitly decode v1-v3 as `Unspecified`; older builds that only understand

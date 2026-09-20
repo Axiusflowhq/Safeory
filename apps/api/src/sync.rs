@@ -461,6 +461,24 @@ pub(crate) async fn get_object(
         .map_err(|_| ApiError::Internal)
 }
 
+pub(crate) async fn get_object_metadata(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(object_id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    let auth = authenticate_device(&state, &headers).await?;
+    let object = state
+        .metadata
+        .get_object(auth.account_id, object_id)
+        .await
+        .map_err(|error| backend_store_error("read object metadata", error))?
+        .ok_or(ApiError::NotFound)?;
+    if !scope_authorized(&state, auth, object.header.scope, TopologyAction::Read).await? {
+        return Err(ApiError::Forbidden);
+    }
+    object_metadata_response(StatusCode::OK, &object)
+}
+
 async fn scope_authorized(
     state: &AppState,
     auth: AuthContext,

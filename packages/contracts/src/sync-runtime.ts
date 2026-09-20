@@ -20,6 +20,7 @@ import { DurableSyncPuller } from "./sync-pull"
 import { DurableSyncOutbox } from "./sync-queue"
 import { DurableVaultItemAcceptor } from "./sync-vault-acceptance"
 import type { EncryptedVaultItemV1 } from "./sync-vault-item"
+import { decodePulledAccountBootstrap } from "./sync-account-bootstrap"
 
 export interface VaultSyncSession extends EncryptedVaultInventory {
   applyRemoteEncryptedItemForSync(
@@ -75,11 +76,24 @@ export class DurableVaultSyncRuntime {
     options: VaultSyncRuntimeCycleOptions = {},
   ): Promise<VaultSyncRuntimeCycleResult> {
     let harvest: VaultItemHarvestResult | null = null
+    const acceptItem = this.acceptor.callback(
+      (objectId) => this.session.loadEncryptedItemForSync(objectId),
+      (item, expected) => this.session.applyRemoteEncryptedItemForSync(item, expected),
+    )
     const cycle = await this.coordinator.syncOnce(
-      this.acceptor.callback(
-        (objectId) => this.session.loadEncryptedItemForSync(objectId),
-        (item, expected) => this.session.applyRemoteEncryptedItemForSync(item, expected),
-      ),
+      async (pulled) => {
+        if (pulled.metadata.object.class === "account_bootstrap") {
+          await decodePulledAccountBootstrap(pulled.metadata, pulled.ciphertext)
+          return
+        }
+        if (pulled.metadata.object.class !== "item") {
+          throw new SyncClientError(
+            "invalid_response",
+            "The encrypted-item runtime received an unsupported opaque object class.",
+          )
+        }
+        await acceptItem(pulled)
+      },
       {
         ...options,
         beforePush: async () => {
