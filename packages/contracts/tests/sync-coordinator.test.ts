@@ -146,9 +146,13 @@ test("coordinator pulls durably before flushing the local outbox", async () => {
   const result = await coordinator.syncOnce(async ({ metadata, ciphertext }) => {
     accepted.push(metadata.object.object_id)
     assert.deepEqual(ciphertext, REMOTE_CIPHERTEXT)
+  }, {
+    beforePush: async () => {
+      events.push("harvest")
+    },
   })
 
-  assert.deepEqual(events, ["list", "download", "upload"])
+  assert.deepEqual(events, ["list", "download", "harvest", "upload"])
   assert.deepEqual(accepted, [REMOTE_OBJECT_ID])
   assert.deepEqual(result.pull, { accepted: 1, cursor: 1 })
   assert.equal(result.push.uploaded.length, 1)

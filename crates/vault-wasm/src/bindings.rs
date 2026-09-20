@@ -262,6 +262,14 @@ impl WasmVault {
             .map_err(|_| ser_err())
     }
 
+    /// Return the authenticated opaque-routing tombstone bit for one item.
+    #[wasm_bindgen(js_name = encryptedItemIsTombstone)]
+    pub fn encrypted_item_is_tombstone(&self, id: &str) -> Result<bool, JsValue> {
+        self.inner
+            .encrypted_item_is_tombstone(parse_uuid(id)?)
+            .map_err(js_err)
+    }
+
     /// Compare-and-swap an already-encrypted item accepted by the sync layer.
     #[wasm_bindgen(js_name = applyEncryptedItemJson)]
     pub fn apply_encrypted_item_json(

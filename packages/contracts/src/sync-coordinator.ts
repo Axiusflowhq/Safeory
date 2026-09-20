@@ -14,6 +14,8 @@ export interface SyncCycleOptions {
   pullLimit?: number
   pushLimit?: number
   signal?: AbortSignal
+  /** Runs after remote acceptance and before any queued upload is attempted. */
+  beforePush?: () => Promise<void>
 }
 
 export interface SyncCycleResult {
@@ -68,6 +70,7 @@ export class DurableSyncCoordinator {
       ...(options.pullLimit === undefined ? {} : { limit: options.pullLimit }),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
     })
+    await options.beforePush?.()
     const push = await this.outbox.flush(this.client, {
       ...(options.pushLimit === undefined ? {} : { limit: options.pushLimit }),
       ...(options.signal === undefined ? {} : { signal: options.signal }),

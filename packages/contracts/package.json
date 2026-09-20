@@ -17,7 +17,9 @@
     "./sync-domain": "./src/sync-domain.ts",
     "./sync-vault-item": "./src/sync-vault-item.ts",
     "./sync-vault-acceptance": "./src/sync-vault-acceptance.ts",
-    "./sync-bootstrap": "./src/sync-bootstrap.ts"
+    "./sync-bootstrap": "./src/sync-bootstrap.ts",
+    "./sync-harvest": "./src/sync-harvest.ts",
+    "./sync-runtime": "./src/sync-runtime.ts"
   },
   "scripts": {
     "test": "node scripts/test-durability.mjs",

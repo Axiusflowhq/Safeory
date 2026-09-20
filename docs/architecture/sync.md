@@ -33,7 +33,12 @@ work. The initial single-owner topology bootstrap is now crash-safe: generated
 household, membership, private-space, and metadata-object IDs are persisted in
 IndexedDB before publication, exact publication retries reuse that draft, and
 the migration inventory includes every encrypted vault record except the
-device-local reload marker. A bounded credential-free IndexedDB push outbox
+device-local reload marker. The composed browser runtime pulls and durably
+accepts remote records before scanning that inventory for local-ahead
+ciphertext. It reconstructs missing outbox writes with content-derived stable
+operation IDs, chains multiple queued local revisions, and obtains the
+authenticated permanent-deletion bit inside WASM for opaque tombstone routing.
+A bounded credential-free IndexedDB push outbox
 retains canonical mutation/ciphertext pairs until a matching upload response is
 durably acknowledged, so interrupted acknowledgements replay by operation ID.
 A pull coordinator verifies each downloaded body, waits for an idempotent

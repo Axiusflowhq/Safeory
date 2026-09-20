@@ -68,8 +68,31 @@ export {
   decodePulledVaultItem,
   parseEncryptedVaultItem,
   prepareVaultItemMutation,
+  prepareVaultItemMutationFromBaseline,
+  encryptedVaultItemMatchesHeader,
   reconcilePulledVaultItem,
 } from "./sync-vault-item";
+export { DurableVaultItemHarvester } from "./sync-harvest";
+export type {
+  EncryptedVaultInventory,
+  VaultItemHarvestResult,
+  VaultItemSyncStateReader,
+} from "./sync-harvest";
+export {
+  DurableVaultSyncRuntime,
+  connectSingleOwnerVaultSync,
+  resumeSingleOwnerVaultSync,
+} from "./sync-runtime";
+export type {
+  ConnectedSingleOwnerVaultSync,
+  PersistedSyncCredentialConnector,
+  ResumeSingleOwnerVaultSyncOptions,
+  SingleOwnerVaultSyncConnectOptions,
+  VaultSyncRuntimeCycleOptions,
+  VaultSyncRuntimeCycleResult,
+  VaultSyncRuntimeDependencies,
+  VaultSyncSession,
+} from "./sync-runtime";
 export {
   DurableVaultItemAcceptor,
   IndexedDbVaultItemSyncStateStore,

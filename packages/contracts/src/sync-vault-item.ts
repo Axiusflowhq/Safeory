@@ -90,8 +90,6 @@ export async function prepareVaultItemMutation(
     }
   }
 
-  const ciphertext = encodeEncryptedVaultItem(next)
-  const digest = await sha256(ciphertext)
   const precondition: WritePreconditionV1 = previous === null
     ? { condition: "create_only" }
     : {
@@ -99,6 +97,75 @@ export async function prepareVaultItemMutation(
         revision: previous.revision,
         ciphertext_sha256: await sha256(encodeEncryptedVaultItem(previous)),
       }
+  return buildPreparedMutation(next, scope, operationId, precondition, options)
+}
+
+/**
+ * Prepares a local-ahead mutation from the last durably accepted server header.
+ * This lets restart-time inventory harvesting close the snapshot-to-outbox crash
+ * window without retaining a second copy of the previous encrypted item.
+ */
+export async function prepareVaultItemMutationFromBaseline(
+  nextValue: unknown,
+  baselineValue: OpaqueObjectHeaderV1 | null,
+  scope: ObjectScopeV1,
+  operationIdValue: string,
+  options: { tombstone?: boolean } = {},
+): Promise<PreparedVaultItemMutation> {
+  const next = parseEncryptedVaultItem(nextValue)
+  const operationId = uuid(operationIdValue, "operation ID")
+  if (baselineValue === null) {
+    return buildPreparedMutation(
+      next,
+      scope,
+      operationId,
+      { condition: "create_only" },
+      options,
+    )
+  }
+
+  const baseline = parseOpaqueObjectHeader(baselineValue)
+  if (baseline.class !== "item" || baseline.object_id !== next.object_id) {
+    invalid("The vault item sync baseline belongs to a different object.")
+  }
+  if (!sameScope(baseline.scope, scope)) {
+    invalid("A vault item mutation cannot change its sync scope.")
+  }
+  if (next.revision <= baseline.revision) {
+    invalid("A vault item mutation must advance its accepted server revision.")
+  }
+  return buildPreparedMutation(
+    next,
+    scope,
+    operationId,
+    {
+      condition: "match",
+      revision: baseline.revision,
+      ciphertext_sha256: baseline.ciphertext_sha256,
+    },
+    options,
+  )
+}
+
+/** True only when an encrypted local item is exactly the accepted server body. */
+export async function encryptedVaultItemMatchesHeader(
+  itemValue: unknown,
+  headerValue: OpaqueObjectHeaderV1,
+): Promise<boolean> {
+  const item = parseEncryptedVaultItem(itemValue)
+  const header = parseOpaqueObjectHeader(headerValue)
+  return itemMatchesHeader(item, await sha256(encodeEncryptedVaultItem(item)), header)
+}
+
+async function buildPreparedMutation(
+  next: EncryptedVaultItemV1,
+  scope: ObjectScopeV1,
+  operationId: string,
+  precondition: WritePreconditionV1,
+  options: { tombstone?: boolean },
+): Promise<PreparedVaultItemMutation> {
+  const ciphertext = encodeEncryptedVaultItem(next)
+  const digest = await sha256(ciphertext)
   const object: OpaqueObjectHeaderV1 = parseOpaqueObjectHeader({
     format_version: 1,
     protocol_version: 1,

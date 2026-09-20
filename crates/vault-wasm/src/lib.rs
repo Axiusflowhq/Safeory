@@ -443,6 +443,19 @@ impl BrowserVault {
             .collect())
     }
 
+    /// Reveal only the routing tombstone bit needed by opaque sync metadata.
+    pub fn encrypted_item_is_tombstone(&self, id: Uuid) -> Result<bool, WasmVaultError> {
+        ensure_user_item_id(id)?;
+        let encrypted = self.store.load_item(id).map_err(|error| match error {
+            StorageError::ItemNotFound => WasmVaultError::ItemNotFound,
+            other => WasmVaultError::Storage(other),
+        })?;
+        Ok(matches!(
+            decrypt_item_state(self.root_key()?, &encrypted)?,
+            VaultItemState::Tombstone { .. }
+        ))
+    }
+
     /// Compare-and-swap one already-encrypted sync record. This operation
     /// authenticates the candidate inside WASM without exposing plaintext or
     /// re-encrypting it, and preserves the unlocked root key. Exact expected
@@ -2408,6 +2421,11 @@ mod tests {
             vault.restore_item(item_id, 5),
             Err(WasmVaultError::ItemNotTrashed)
         ));
+        assert!(
+            vault
+                .encrypted_item_is_tombstone(item_id)
+                .expect("sync tombstone bit")
+        );
     }
 
     #[test]

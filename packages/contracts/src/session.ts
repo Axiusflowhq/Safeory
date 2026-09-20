@@ -248,6 +248,7 @@ export interface WasmVaultLike {
   getItemJson(id: string): string;
   getEncryptedItemJson(id: string): string | null;
   listEncryptedItemIdsJson(): string;
+  encryptedItemIsTombstone(id: string): boolean;
   applyEncryptedItemJson(nextJson: string, expectedJson?: string): void;
   listItemsJson(): string;
   exportReadableJson(): string;
@@ -570,6 +571,14 @@ export class VaultSession {
     return this.mutationTail.then(() => {
       this.assertHealthy();
       return JSON.parse(this.vault.listEncryptedItemIdsJson()) as string[];
+    });
+  }
+
+  /** Read the authenticated permanent-deletion bit without exposing plaintext. */
+  encryptedItemIsTombstoneForSync(id: string): Promise<boolean> {
+    return this.mutationTail.then(() => {
+      this.assertHealthy();
+      return this.vault.encryptedItemIsTombstone(id);
     });
   }
 

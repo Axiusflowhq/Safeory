@@ -40,6 +40,8 @@ try {
     "src/sync-vault-item.ts",
     "src/sync-vault-acceptance.ts",
     "src/sync-bootstrap.ts",
+    "src/sync-harvest.ts",
+    "src/sync-runtime.ts",
     "tests/device-keys.test.ts",
     "tests/session-durability.test.ts",
     "tests/sync-compatibility.test.ts",
@@ -52,6 +54,8 @@ try {
     "tests/sync-vault-item.test.ts",
     "tests/sync-vault-acceptance.test.ts",
     "tests/sync-bootstrap.test.ts",
+    "tests/sync-harvest.test.ts",
+    "tests/sync-runtime.test.ts",
     "--outDir",
     output,
     "--module",
@@ -82,6 +86,8 @@ try {
       join(output, "tests", "sync-vault-item.test.js"),
       join(output, "tests", "sync-vault-acceptance.test.js"),
       join(output, "tests", "sync-bootstrap.test.js"),
+      join(output, "tests", "sync-harvest.test.js"),
+      join(output, "tests", "sync-runtime.test.js"),
     ])
   }
 } finally {

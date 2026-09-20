@@ -120,6 +120,10 @@ class FakeVault implements WasmVaultLike {
     ]);
   }
 
+  encryptedItemIsTombstone(): boolean {
+    return false;
+  }
+
   applyEncryptedItemJson(nextJson: string, expectedJson?: string): void {
     if (expectedJson === undefined) {
       if (this.encryptedSyncItemJson !== null) throw new Error("encrypted sync precondition failed");
@@ -879,6 +883,7 @@ test("encrypted sync acceptance compare-and-swaps through the session durability
 
   assert.deepEqual(await session.loadEncryptedItemForSync(local.object_id), local);
   assert.deepEqual(await session.listEncryptedItemIdsForSync(), [local.object_id]);
+  assert.equal(await session.encryptedItemIsTombstoneForSync(local.object_id), false);
   await session.applyRemoteEncryptedItemForSync(remote, local);
 
   assert.deepEqual(await session.loadEncryptedItemForSync(local.object_id), remote);

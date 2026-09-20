@@ -6,6 +6,7 @@ import {
   decodePulledVaultItem,
   parseEncryptedVaultItem,
   prepareVaultItemMutation,
+  prepareVaultItemMutationFromBaseline,
   reconcilePulledVaultItem,
   type EncryptedVaultItemV1,
 } from "../src/sync-vault-item"
@@ -59,6 +60,26 @@ test("prepares create and revision-fenced update mutations from encrypted items"
     assert.equal(updated.mutation.precondition.revision, 1)
     assert.equal(updated.mutation.precondition.ciphertext_sha256.length, 32)
   }
+})
+
+test("prepares restart-time updates directly from an accepted baseline", async () => {
+  const baseline = (await prepareVaultItemMutation(item(), null, scope, OPERATION_ID))
+    .mutation.object
+  const updated = await prepareVaultItemMutationFromBaseline(
+    item(2),
+    baseline,
+    scope,
+    "77777777-7777-4777-8777-777777777777",
+  )
+  assert.deepEqual(updated.mutation.precondition, {
+    condition: "match",
+    revision: baseline.revision,
+    ciphertext_sha256: baseline.ciphertext_sha256,
+  })
+  await assert.rejects(
+    prepareVaultItemMutationFromBaseline(item(), baseline, scope, OPERATION_ID),
+    /must advance/,
+  )
 })
 
 test("pulled items are bound to the verified opaque header", async () => {

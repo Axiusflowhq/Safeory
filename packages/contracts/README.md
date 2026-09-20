@@ -42,6 +42,11 @@ cross-tab version fence as local mutations.
 account/household/private-space migration. It persists random identifiers before
 topology publication, so network or local-state interruptions retry the
 identical topology rather than orphaning a second household or space.
+`DurableVaultSyncRuntime` composes pull acceptance, restart-time local change
+harvesting, and ordered upload. The harvester derives stable operation IDs from
+encrypted content, continues already queued revision chains, and carries only
+the WASM-authenticated tombstone bit alongside ciphertext. This closes the
+snapshot-to-outbox interruption window without exposing item plaintext.
 Canonical browser parsers for the account, household, membership, space, and
 single-owner migration contracts mirror `vault-sync` bounds and fail closed on
 unknown fields, inconsistent routing references, or invalid access topology.

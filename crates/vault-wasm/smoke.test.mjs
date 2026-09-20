@@ -42,6 +42,9 @@ const encryptedItemIds = JSON.parse(vault.listEncryptedItemIdsJson());
 if (encryptedItemIds.length !== 1 || encryptedItemIds[0] !== item.id) {
   throw new Error("encrypted sync inventory did not include the stored item");
 }
+if (vault.encryptedItemIsTombstone(item.id)) {
+  throw new Error("an active encrypted sync item must not be marked as a tombstone");
+}
 
 // 3. List + get back.
 const listed = JSON.parse(vault.listItemsJson());

@@ -119,10 +119,10 @@ export class DurableSyncOutbox {
   }
 
   pending(limit = MAX_FLUSH_ENTRIES): Promise<QueuedOpaqueMutation[]> {
-    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_FLUSH_ENTRIES) {
+    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_OUTBOX_ENTRIES) {
       throw new SyncClientError(
         "invalid_contract",
-        `The sync queue read limit must be between 1 and ${MAX_FLUSH_ENTRIES}.`,
+        `The sync queue read limit must be between 1 and ${MAX_OUTBOX_ENTRIES}.`,
       )
     }
     return this.store.list(this.accountId, limit)
