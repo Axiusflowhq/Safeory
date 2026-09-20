@@ -39,8 +39,22 @@ export function Popup() {
   });
   const [syncApiBaseUrl, setSyncApiBaseUrl] = useState(DEFAULT_EXTENSION_SYNC_API_URL);
   const [registrationToken, setRegistrationToken] = useState("");
+  const [syncMasterPassphrase, setSyncMasterPassphrase] = useState("");
+  const [accountSecret, setAccountSecret] = useState("");
+  const [accountSecretConfirmation, setAccountSecretConfirmation] = useState("");
+  const [recoveryCopyConfirmed, setRecoveryCopyConfirmed] = useState(false);
+  const [secretCopied, setSecretCopied] = useState(false);
+  const [syncEnrollmentBusy, setSyncEnrollmentBusy] = useState(false);
   const passphraseRef = useRef<HTMLInputElement>(null);
   const titleRef = useRef<HTMLInputElement>(null);
+  const accountSecretConfirmed =
+    accountSecret.length > 0 && accountSecretConfirmation === accountSecret;
+  const syncEnrollmentReady =
+    registrationToken.length >= 32 &&
+    !/\s/.test(registrationToken) &&
+    syncMasterPassphrase.length >= 12 &&
+    accountSecretConfirmed &&
+    recoveryCopyConfirmed;
 
   const refresh = useCallback(async () => {
     const res = await send<Extract<PopupResponse, { type: "state" }>>({
@@ -155,9 +169,31 @@ export function Popup() {
     else if (res.type === "error") setError(res.error);
   }
 
+  async function generateAccountSecret() {
+    setError(null);
+    const res = await send<PopupResponse>({ type: "generateAccountSecret" });
+    if (res.type === "accountSecret") {
+      setAccountSecret(res.accountSecret);
+      setAccountSecretConfirmation("");
+      setRecoveryCopyConfirmed(false);
+      setSecretCopied(false);
+    } else if (res.type === "error") {
+      setError(res.error);
+    }
+  }
+
+  async function copyAccountSecret() {
+    try {
+      await navigator.clipboard.writeText(accountSecret);
+      setSecretCopied(true);
+      setError(null);
+    } catch {
+      setSecretCopied(false);
+      setError("Clipboard access was unavailable. Select and copy the Account Secret manually.");
+    }
+  }
+
   async function enableSync() {
-    const token = registrationToken;
-    setRegistrationToken("");
     let apiUrl: URL;
     try {
       apiUrl = new URL(syncApiBaseUrl);
@@ -165,20 +201,38 @@ export function Popup() {
       setError("Enter a valid development API URL.");
       return;
     }
-    if (apiUrl.protocol === "https:") {
-      const originPermission = `${apiUrl.origin}/*`;
-      const granted = await chrome.permissions.request({ origins: [originPermission] });
-      if (!granted) {
-        setError("Safeory needs permission to connect to that sync API origin.");
-        return;
+    setSyncEnrollmentBusy(true);
+    setError(null);
+    try {
+      if (apiUrl.protocol === "https:") {
+        const originPermission = `${apiUrl.origin}/*`;
+        const granted = await chrome.permissions.request({ origins: [originPermission] });
+        if (!granted) {
+          setError("Safeory needs permission to connect to that sync API origin.");
+          return;
+        }
       }
+      const res = await send<PopupResponse>({
+        type: "enrollSync",
+        apiBaseUrl: syncApiBaseUrl,
+        registrationToken,
+        masterPassphrase: syncMasterPassphrase,
+        accountSecretCode: accountSecret,
+      });
+      if (res.type === "error") {
+        setError(res.error);
+      } else {
+        setRegistrationToken("");
+      }
+      await refresh();
+    } finally {
+      setSyncMasterPassphrase("");
+      setAccountSecret("");
+      setAccountSecretConfirmation("");
+      setRecoveryCopyConfirmed(false);
+      setSecretCopied(false);
+      setSyncEnrollmentBusy(false);
     }
-    await doAction({
-      type: "enrollSync",
-      apiBaseUrl: syncApiBaseUrl,
-      registrationToken: token,
-    });
-    await refresh();
   }
 
   if (state.phase === "loading") {
@@ -440,8 +494,8 @@ export function Popup() {
               className="mt-2 space-y-2"
               onSubmit={(event) => {
                 event.preventDefault();
-                if (registrationToken.length === 0) {
-                  setError("Enter the development registration token.");
+                if (!syncEnrollmentReady) {
+                  setError("Complete and confirm every encrypted sync setup field.");
                   return;
                 }
                 void enableSync();
@@ -455,6 +509,7 @@ export function Popup() {
                 type="url"
                 value={syncApiBaseUrl}
                 onChange={(event) => setSyncApiBaseUrl(event.target.value)}
+                disabled={syncEnrollmentBusy}
                 className="w-full rounded-[var(--radius-default)] border-[var(--input-border)] bg-[var(--surface)] px-2 py-1.5 text-xs [border-width:var(--border-width)]"
               />
               <label htmlFor="safeory-extension-sync-token" className="block text-xs font-medium">
@@ -465,14 +520,127 @@ export function Popup() {
                 type="password"
                 autoComplete="off"
                 value={registrationToken}
-                onChange={(event) => setRegistrationToken(event.target.value)}
+                onChange={(event) => {
+                  setRegistrationToken(event.target.value);
+                  if (error) setError(null);
+                }}
+                disabled={syncEnrollmentBusy}
                 className="w-full rounded-[var(--radius-default)] border-[var(--input-border)] bg-[var(--surface)] px-2 py-1.5 text-xs [border-width:var(--border-width)]"
               />
+              <p className="text-[11px] leading-4 text-[var(--text-secondary)]">
+                Used once for development account creation and never stored.
+              </p>
+              <label
+                htmlFor="safeory-extension-sync-passphrase"
+                className="block text-xs font-medium"
+              >
+                Master passphrase
+              </label>
+              <input
+                id="safeory-extension-sync-passphrase"
+                type="password"
+                autoComplete="current-password"
+                value={syncMasterPassphrase}
+                onChange={(event) => {
+                  setSyncMasterPassphrase(event.target.value);
+                  if (error) setError(null);
+                }}
+                disabled={syncEnrollmentBusy}
+                placeholder="Re-enter your master passphrase"
+                className="w-full rounded-[var(--radius-default)] border-[var(--input-border)] bg-[var(--surface)] px-2 py-1.5 text-xs [border-width:var(--border-width)]"
+              />
+              <p className="text-[11px] leading-4 text-[var(--text-secondary)]">
+                Re-authenticates the local root before an account is created.
+              </p>
+              {accountSecret === "" ? (
+                <div className="rounded-[var(--radius-default)] border-[var(--border)] bg-[var(--surface)] p-2 [border-width:var(--border-width)]">
+                  <p className="text-xs font-medium">Create your Account Secret</p>
+                  <p className="mt-1 text-[11px] leading-4 text-[var(--text-secondary)]">
+                    This code protects the remote root envelope. Save it separately from
+                    your master passphrase; Safeory cannot recover it.
+                  </p>
+                  <button
+                    type="button"
+                    disabled={syncEnrollmentBusy}
+                    onClick={() => void generateAccountSecret()}
+                    className="mt-2 min-h-7 rounded-[var(--radius-default)] border-[var(--border-secondary)] bg-[var(--surface-secondary)] px-2 py-1 text-xs [border-width:var(--border-width)] disabled:opacity-50"
+                  >
+                    Generate Account Secret
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-2 rounded-[var(--radius-default)] border-[var(--border)] bg-[var(--surface)] p-2 [border-width:var(--border-width)]">
+                  <label
+                    htmlFor="safeory-extension-account-secret"
+                    className="block text-xs font-medium"
+                  >
+                    Account Secret
+                  </label>
+                  <textarea
+                    id="safeory-extension-account-secret"
+                    readOnly
+                    rows={3}
+                    value={accountSecret}
+                    spellCheck={false}
+                    className="w-full resize-none rounded-[var(--radius-default)] border-[var(--input-border)] bg-[var(--surface-secondary)] px-2 py-1.5 font-mono text-[10px] [border-width:var(--border-width)]"
+                  />
+                  <button
+                    type="button"
+                    disabled={syncEnrollmentBusy}
+                    onClick={() => void copyAccountSecret()}
+                    className="min-h-7 rounded-[var(--radius-default)] border-[var(--border-secondary)] bg-[var(--surface-secondary)] px-2 py-1 text-xs [border-width:var(--border-width)] disabled:opacity-50"
+                  >
+                    {secretCopied ? "Copied" : "Copy Account Secret"}
+                  </button>
+                  <label
+                    htmlFor="safeory-extension-account-secret-confirmation"
+                    className="block text-xs font-medium"
+                  >
+                    Confirm Account Secret
+                  </label>
+                  <input
+                    id="safeory-extension-account-secret-confirmation"
+                    type="password"
+                    autoComplete="off"
+                    spellCheck={false}
+                    value={accountSecretConfirmation}
+                    onChange={(event) => {
+                      setAccountSecretConfirmation(event.target.value.trim());
+                      if (error) setError(null);
+                    }}
+                    disabled={syncEnrollmentBusy}
+                    placeholder="Paste the saved code"
+                    className="w-full rounded-[var(--radius-default)] border-[var(--input-border)] bg-[var(--surface-secondary)] px-2 py-1.5 text-xs [border-width:var(--border-width)]"
+                  />
+                  <label className="flex items-start gap-2 text-[11px] leading-4">
+                    <input
+                      type="checkbox"
+                      checked={recoveryCopyConfirmed}
+                      onChange={(event) => setRecoveryCopyConfirmed(event.target.checked)}
+                      disabled={syncEnrollmentBusy}
+                      className="mt-0.5 size-3.5"
+                    />
+                    <span>
+                      I saved this code separately and understand it is not stored by the
+                      extension or sent to the API.
+                    </span>
+                  </label>
+                  <button
+                    type="button"
+                    disabled={syncEnrollmentBusy}
+                    onClick={() => void generateAccountSecret()}
+                    className="min-h-7 text-[11px] text-[var(--text-secondary)] underline disabled:opacity-50"
+                  >
+                    Replace with a new Account Secret
+                  </button>
+                </div>
+              )}
               <button
                 type="submit"
-                className="h-8 w-full rounded-[var(--radius-default)] bg-[var(--primary)] px-2 text-xs text-[var(--primary-foreground)]"
+                disabled={syncEnrollmentBusy || !syncEnrollmentReady}
+                className="h-8 w-full rounded-[var(--radius-default)] bg-[var(--primary)] px-2 text-xs text-[var(--primary-foreground)] disabled:opacity-50"
               >
-                Enable encrypted sync
+                {syncEnrollmentBusy ? "Enabling…" : "Enable encrypted sync"}
               </button>
             </form>
           ) : null}

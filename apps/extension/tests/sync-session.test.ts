@@ -22,6 +22,8 @@ test("remote acceptance uses exact ciphertext CAS and persists before resolving"
   const calls: Array<{ next: string; expected?: string }> = [];
   let persisted = false;
   const state = {
+    verifyMasterPassphrase: (_passphrase: string) => undefined,
+    exportRemoteAccountRootWrapJson: () => "{}",
     getEncryptedItemJson: () => JSON.stringify(item),
     listEncryptedItemIdsJson: () => JSON.stringify([item.object_id]),
     encryptedItemIsTombstone: () => false,
@@ -49,6 +51,8 @@ test("remote acceptance uses exact ciphertext CAS and persists before resolving"
 test("remote creation passes no expected ciphertext", async () => {
   let expectedArgument: string | undefined = "unexpected";
   const state = {
+    verifyMasterPassphrase: (_passphrase: string) => undefined,
+    exportRemoteAccountRootWrapJson: () => "{}",
     getEncryptedItemJson: () => null,
     listEncryptedItemIdsJson: () => "[]",
     encryptedItemIsTombstone: () => false,
@@ -63,4 +67,47 @@ test("remote creation passes no expected ciphertext", async () => {
   }));
   await session.applyRemoteEncryptedItemForSync(item, null);
   assert.equal(expectedArgument, undefined);
+});
+
+test("enrollment re-authentication and root export are read-only serialized access", async () => {
+  const calls: string[] = [];
+  let persistCount = 0;
+  const state = {
+    verifyMasterPassphrase: (passphrase: string) => {
+      calls.push(`verify:${passphrase}`);
+    },
+    exportRemoteAccountRootWrapJson: (
+      passphrase: string,
+      accountSecretCode: string,
+      accountId: string,
+    ) => {
+      calls.push(`export:${passphrase}:${accountSecretCode}:${accountId}`);
+      return "{\"format_version\":1}";
+    },
+    getEncryptedItemJson: () => null,
+    listEncryptedItemIdsJson: () => "[]",
+    encryptedItemIsTombstone: () => false,
+    applyEncryptedItemJson: () => undefined,
+  };
+  const session = createExtensionVaultSyncSession(createSerializedMutationRunner({
+    acquire: async () => state,
+    persist: async () => {
+      persistCount += 1;
+    },
+    discard: () => assert.fail("read-only access does not persist"),
+  }));
+
+  await session.verifyMasterPassphrase("correct horse battery");
+  const wrapped = await session.exportRemoteAccountRootWrap(
+    "correct horse battery",
+    "SFO-A1-secret",
+    "11111111-1111-4111-8111-111111111111",
+  );
+
+  assert.equal(wrapped, "{\"format_version\":1}");
+  assert.deepEqual(calls, [
+    "verify:correct horse battery",
+    "export:correct horse battery:SFO-A1-secret:11111111-1111-4111-8111-111111111111",
+  ]);
+  assert.equal(persistCount, 0);
 });

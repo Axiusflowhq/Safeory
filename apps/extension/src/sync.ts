@@ -1,9 +1,11 @@
-import { WasmDeviceIdentity } from "vault-wasm";
+import { WasmDeviceIdentity, WasmVault } from "vault-wasm";
 import {
   BrowserDeviceKeyStore,
   BrowserSyncCredentialStore,
+  DurableSyncOutbox,
   SyncClient,
   connectSingleOwnerVaultSync,
+  prepareAccountBootstrapMutation,
   resumeSingleOwnerVaultSync,
   type ConnectedSingleOwnerVaultSync,
   type VaultSyncSession,
@@ -15,6 +17,7 @@ import {
   normalizeExtensionSyncApiBaseUrl,
   saveExtensionSyncConfiguration,
 } from "./sync-configuration";
+import type { ExtensionVaultSyncSession } from "./sync-session";
 
 const SYNC_CONFIG_FORMAT = 1;
 
@@ -29,30 +32,32 @@ const deviceKeyStore = new BrowserDeviceKeyStore({
 });
 
 export async function enrollExtensionVaultSync(
-  session: VaultSyncSession,
-  registrationToken: string,
+  session: ExtensionVaultSyncSession,
+  enrollment: {
+    registrationToken: string;
+    masterPassphrase: string;
+    accountSecretCode: string;
+  },
   apiBaseUrlValue: string,
   signal?: AbortSignal,
 ): Promise<ConnectedSingleOwnerVaultSync> {
+  await session.verifyMasterPassphrase(enrollment.masterPassphrase);
+  if (!WasmVault.validateAccountSecret(enrollment.accountSecretCode)) {
+    throw new Error("The Account Secret is invalid.");
+  }
   const apiBaseUrl = normalizeExtensionSyncApiBaseUrl(apiBaseUrlValue);
   const registration = await deviceKeyStore.createIdentity(crypto.randomUUID());
-  let accountCreated = false;
+  const credentialStore = new BrowserSyncCredentialStore();
+  let createdAccountId: string | null = null;
+  let configurationSaved = false;
   try {
     const credentials = await SyncClient.createAccount(
       apiBaseUrl,
-      registrationToken,
+      enrollment.registrationToken,
       registration,
       signal === undefined ? {} : { signal },
     );
-    accountCreated = true;
-    await saveExtensionSyncConfiguration({
-      format: SYNC_CONFIG_FORMAT,
-      apiBaseUrl,
-      accountId: credentials.account_id,
-      deviceId: credentials.device_id,
-    });
-    const credentialStore = new BrowserSyncCredentialStore();
-    await credentialStore.save(apiBaseUrl, credentials);
+    createdAccountId = credentials.account_id;
     const client = await SyncClient.connect(
       apiBaseUrl,
       credentials.account_id,
@@ -62,14 +67,47 @@ export async function enrollExtensionVaultSync(
         ...(signal === undefined ? {} : { signal }),
       },
     );
+    const wrappedRoot = await session.exportRemoteAccountRootWrap(
+      enrollment.masterPassphrase,
+      enrollment.accountSecretCode,
+      credentials.account_id,
+    );
+    const prepared = await prepareAccountBootstrapMutation(
+      wrappedRoot,
+      credentials.account_id,
+      crypto.randomUUID(),
+      null,
+    );
+    const outbox = new DurableSyncOutbox(credentials.account_id);
+    if (!(await outbox.enqueue(prepared.mutation, prepared.ciphertext))) {
+      throw new Error("The account bootstrap publication operation already exists.");
+    }
+    await credentialStore.save(apiBaseUrl, credentials);
+    await saveExtensionSyncConfiguration({
+      format: SYNC_CONFIG_FORMAT,
+      apiBaseUrl,
+      accountId: credentials.account_id,
+      deviceId: credentials.device_id,
+    });
+    configurationSaved = true;
+    await outbox.flush(
+      client,
+      signal === undefined ? {} : { signal },
+    );
     return await connectSingleOwnerVaultSync(
       client,
       apiBaseUrl,
       session,
-      signal === undefined ? {} : { signal },
+      {
+        runtimeDependencies: { outbox },
+        ...(signal === undefined ? {} : { signal }),
+      },
     );
   } catch (error) {
-    if (!accountCreated) {
+    if (!configurationSaved) {
+      if (createdAccountId !== null) {
+        await credentialStore.delete(apiBaseUrl, createdAccountId).catch(() => undefined);
+      }
       await deviceKeyStore.deleteIdentity(registration.device_id).catch(() => undefined);
     }
     throw error;

@@ -51,12 +51,13 @@ queues and flushes the account-bound remote-root envelope before topology
 publication. Once unlocked, the web runtime resumes that credential and runs
 serialized sync after durable local mutations, browser reconnect/foreground
 events, manual requests, and a 30-second bounded interval. The MV3 extension now
-performs equivalent explicit development
-enrollment, stores only non-secret routing metadata in extension storage, resumes
-its wrapped credential after unlock, and coalesces mutation, manual, unlock, and
-one-minute alarm triggers. Its remote accepts share the local mutation durability
-queue, and locking aborts active network work. MV3 worker reclamation deliberately
-requires another unlock because usable vault keys are not persisted. Reviewed
+performs equivalent explicit development enrollment, including Account Secret
+confirmation, root re-authentication, and durable root-envelope publication. It
+stores only non-secret routing metadata in extension storage, resumes its wrapped
+credential after unlock, and coalesces mutation, manual, unlock, and one-minute
+alarm triggers. Its remote accepts share the local mutation durability queue, and
+locking aborts active network work. MV3 worker reclamation deliberately requires
+another unlock because usable vault keys are not persisted. Reviewed
 production identity, new-device approval, and recovery enrollment remain to be
 integrated, so the development web and extension controls create independent
 accounts rather than claiming same-account convergence.
@@ -170,9 +171,10 @@ root import. The opaque transport reserves one non-tombstonable, 4 KiB
 its account scope and V1 payload/envelope versions are validated in both Rust
 and TypeScript, and updates use the ordinary hash-and-revision CAS. An
 authenticated device can fetch its canonical metadata directly before the
-ciphertext body, avoiding a scan of unrelated items. The web development setup
-now implements the first-device confirmation and publication path. Production
-identity plus the server enrollment/recovery coordinator remain.
+ciphertext body, avoiding a scan of unrelated items. The web and extension
+development setup flows now implement the first-device confirmation and
+publication path. Production identity plus the server enrollment/recovery
+coordinator remain.
 
 ### Additional device
 

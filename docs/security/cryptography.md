@@ -56,8 +56,8 @@ bearer or server input.
 This prevents a copied remote envelope from becoming a password-only offline
 verifier. Cognito authentication, email verification, MFA, or a bearer session
 does not provide this cryptographic property. The shared sync contract enforces
-a bounded account-scoped singleton and revision-fenced publication. Web
-development enrollment now performs explicit Account Secret
+a bounded account-scoped singleton and revision-fenced publication. Web and
+extension development enrollment now perform explicit Account Secret
 generation/confirmation, local-root re-authentication, and durable publication
 without storing or transmitting the secret itself. Production identity,
 approved-device and recovery UX, signed existing-device transfer, server-dump

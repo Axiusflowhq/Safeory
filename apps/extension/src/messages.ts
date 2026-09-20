@@ -70,7 +70,14 @@ export type PopupRequest =
     }
   | { type: "copyPassword"; id: string }
   | { type: "generatePassword"; length: number }
-  | { type: "enrollSync"; apiBaseUrl: string; registrationToken: string }
+  | { type: "generateAccountSecret" }
+  | {
+      type: "enrollSync";
+      apiBaseUrl: string;
+      registrationToken: string;
+      masterPassphrase: string;
+      accountSecretCode: string;
+    }
   | { type: "syncNow" }
   | { type: "retrySync" }
   | { type: "resetSyncConfiguration" };
@@ -85,6 +92,7 @@ export type PopupResponse =
     }
   | { type: "credentials"; items: CredentialSummary[] }
   | { type: "password"; password: string }
+  | { type: "accountSecret"; accountSecret: string }
   | { type: "copiedPassword"; password: string; clearToken: string }
   | { type: "ok" }
   | { type: "error"; error: string };

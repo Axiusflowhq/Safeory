@@ -212,7 +212,12 @@ async function startSync(): Promise<void> {
   }
 }
 
-async function enrollSync(apiBaseUrl: string, registrationToken: string): Promise<void> {
+async function enrollSync(
+  apiBaseUrl: string,
+  registrationToken: string,
+  masterPassphrase: string,
+  accountSecretCode: string,
+): Promise<void> {
   const unlocked = await mutateAndPersist.access((current) => current.isUnlocked());
   if (!unlocked) throw new Error("locked");
   syncAbortController?.abort();
@@ -226,7 +231,7 @@ async function enrollSync(apiBaseUrl: string, registrationToken: string): Promis
   try {
     const connected = await enrollExtensionVaultSync(
       syncSession,
-      registrationToken,
+      { registrationToken, masterPassphrase, accountSecretCode },
       apiBaseUrl,
       abortController.signal,
     );
@@ -242,7 +247,13 @@ async function enrollSync(apiBaseUrl: string, registrationToken: string): Promis
     await syncRequests.request();
   } catch (error) {
     if (generation === syncGeneration) {
-      syncStatus = { ...syncStatus, phase: "error", error: errorMessage(error) };
+      const configuration = await loadExtensionSyncConfiguration().catch(() => null);
+      syncStatus = {
+        ...syncStatus,
+        phase: configuration === null ? "not_configured" : "error",
+        accountId: configuration?.accountId ?? null,
+        error: errorMessage(error),
+      };
     }
     throw error;
   }
@@ -595,11 +606,24 @@ chrome.runtime.onMessage.addListener((raw: unknown, sender, sendResponse) => {
           return { type: "error", error: "unauthorized sender" } satisfies PopupResponse;
         }
         return { type: "password", password: WasmVault.generatePassword(msg.length) } satisfies PopupResponse;
+      case "generateAccountSecret":
+        if (!isExtensionPageSender(sender)) {
+          return { type: "error", error: "unauthorized sender" } satisfies PopupResponse;
+        }
+        return {
+          type: "accountSecret",
+          accountSecret: WasmVault.generateAccountSecret(),
+        } satisfies PopupResponse;
       case "enrollSync": {
         if (!isExtensionPageSender(sender)) {
           return { type: "error", error: "unauthorized sender" } satisfies PopupResponse;
         }
-        await enrollSync(msg.apiBaseUrl, msg.registrationToken);
+        await enrollSync(
+          msg.apiBaseUrl,
+          msg.registrationToken,
+          msg.masterPassphrase,
+          msg.accountSecretCode,
+        );
         return { type: "ok" } satisfies PopupResponse;
       }
       case "syncNow": {

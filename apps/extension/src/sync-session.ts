@@ -6,17 +6,42 @@ import type {
 import type { SerializedMutationRunner } from "./mutation";
 
 export interface ExtensionWasmSyncVault {
+  verifyMasterPassphrase(passphrase: string): void;
+  exportRemoteAccountRootWrapJson(
+    passphrase: string,
+    accountSecretCode: string,
+    accountId: string,
+  ): string;
   getEncryptedItemJson(id: string): string | null;
   listEncryptedItemIdsJson(): string;
   encryptedItemIsTombstone(id: string): boolean;
   applyEncryptedItemJson(nextJson: string, expectedJson?: string): void;
 }
 
+export interface ExtensionVaultSyncSession extends VaultSyncSession {
+  verifyMasterPassphrase(passphrase: string): Promise<void>;
+  exportRemoteAccountRootWrap(
+    passphrase: string,
+    accountSecretCode: string,
+    accountId: string,
+  ): Promise<string>;
+}
+
 /** Bind opaque sync reads and remote CAS writes to extension snapshot durability. */
 export function createExtensionVaultSyncSession<State extends ExtensionWasmSyncVault>(
   mutations: SerializedMutationRunner<State>,
-): VaultSyncSession {
+): ExtensionVaultSyncSession {
   return {
+    verifyMasterPassphrase: (passphrase) =>
+      mutations.access((current) => current.verifyMasterPassphrase(passphrase)),
+    exportRemoteAccountRootWrap: (passphrase, accountSecretCode, accountId) =>
+      mutations.access((current) =>
+        current.exportRemoteAccountRootWrapJson(
+          passphrase,
+          accountSecretCode,
+          accountId,
+        ),
+      ),
     listEncryptedItemIdsForSync: () =>
       mutations.access((current) =>
         JSON.parse(current.listEncryptedItemIdsJson()) as string[],

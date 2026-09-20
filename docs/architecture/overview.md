@@ -120,9 +120,9 @@ This is the implemented local unlock path. Before remotely stored wraps become a
 production dependency, ADR 0006's high-entropy Account Secret protects the
 account-bound remote root envelope from password-only offline attacks after a
 server-data compromise. Its Rust/WASM construction and fresh-device root import
-are implemented, and web development enrollment now publishes it after explicit
-secret confirmation and passphrase re-authentication. Reviewed production
-identity, new-device approval, and recovery UX are not implemented.
+are implemented, and web and extension development enrollment now publish it
+after explicit secret confirmation and passphrase re-authentication. Reviewed
+production identity, new-device approval, and recovery UX are not implemented.
 Cognito proves account identity; it does not replace client-side key protection.
 
 ## Platform boundaries

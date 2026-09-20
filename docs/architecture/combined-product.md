@@ -157,9 +157,9 @@ Master passphrase + production Account Secret/device enrollment secret
 The implemented passphrase-only root wrap remains the device-local format.
 ADR 0006 defines and the Rust/WASM core implements the separate high-entropy
 Account Secret envelope for remotely stored root bootstrap, protecting it from
-password-only offline guessing. Web development enrollment now publishes this
-envelope after explicit confirmation; production identity, approved-device and
-recovery UX, and external review remain cloud-launch gates. Cognito
+password-only offline guessing. Web and extension development enrollment now
+publish this envelope after explicit confirmation; production identity,
+approved-device and recovery UX, and external review remain cloud-launch gates. Cognito
 authentication is not a replacement for this cryptographic factor.
 
 Spaces require independently rotatable keys. Removing a member rotates the
