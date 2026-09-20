@@ -44,7 +44,15 @@ bodies live in the S3-compatible store.
 
 The first sync surface is intentionally narrow: bootstrap an account/first
 device, add or revoke same-account devices, list changed opaque objects, and
-revision-fenced PUT/GET of ciphertext bytes. Device bearer credentials contain
+revision-fenced PUT/GET of ciphertext bytes. A PUT carries the canonical
+`OpaqueMutationV1` as compact JSON in the bounded `x-safeory-mutation` header
+and the ciphertext as its `application/octet-stream` body. The service binds
+the authenticated account, path object ID, body size, and body SHA-256 to that
+mutation before upload. Accepted operation IDs and their exact canonical input
+hashes are persisted atomically with publication: an identical retry returns
+the original result, while reuse for different input returns HTTP 409.
+
+Device bearer credentials contain
 256 bits of random material and are returned once; PostgreSQL stores only a
 domain-separated SHA-256 hash. X25519 device public keys are key-agreement
 metadata and are not HTTP authentication credentials.
@@ -54,6 +62,10 @@ comes only from the authenticated device, never from a client-supplied account
 ID. Object IDs, revisions, sizes, hashes, and change cursors are server-visible;
 titles, kinds, fields, notes, vault keys, passphrases, recovery secrets, and
 tombstone meaning remain encrypted/client-side.
+
+List responses expose the persisted canonical opaque-object header plus change
+cursor and ETag; they do not reconstruct version or routing metadata from
+parallel API-specific fields.
 
 This endpoint set is not yet the complete combined-product protocol. The target
 account/household/space authorization, key-envelope distribution, conflict,

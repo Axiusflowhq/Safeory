@@ -1,8 +1,11 @@
 use serde::Serialize;
 use thiserror::Error;
 use uuid::Uuid;
+use vault_sync::{OpaqueObjectHeaderV1, WritePreconditionV1};
 
-use crate::auth::{hex_encode, parse_public_key_hex};
+use crate::auth::hex_encode;
+#[cfg(test)]
+use crate::auth::parse_public_key_hex;
 
 pub(crate) const MAX_LIST_LIMIT: u16 = 256;
 pub(crate) const DEFAULT_LIST_LIMIT: u16 = 100;
@@ -25,6 +28,16 @@ pub(crate) struct StoredObject {
     pub ciphertext_sha256: [u8; 32],
     pub change_seq: i64,
     pub storage_key: String,
+    pub header: OpaqueObjectHeaderV1,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct OperationOutcome {
+    pub request_sha256: [u8; 32],
+    pub header: OpaqueObjectHeaderV1,
+    pub change_seq: i64,
+    pub created: bool,
+    pub storage_key: String,
 }
 
 impl StoredObject {
@@ -40,6 +53,23 @@ impl StoredObject {
 pub(crate) enum WritePrecondition {
     CreateOnly,
     Match(ObjectVersion),
+}
+
+impl TryFrom<&WritePreconditionV1> for WritePrecondition {
+    type Error = ();
+
+    fn try_from(value: &WritePreconditionV1) -> Result<Self, Self::Error> {
+        Ok(match value {
+            WritePreconditionV1::CreateOnly => Self::CreateOnly,
+            WritePreconditionV1::Match {
+                revision,
+                ciphertext_sha256,
+            } => Self::Match(ObjectVersion {
+                revision: i64::try_from(*revision).map_err(|_| ())?,
+                ciphertext_sha256: *ciphertext_sha256,
+            }),
+        })
+    }
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -87,6 +117,7 @@ pub(crate) fn strong_etag(version: &ObjectVersion) -> String {
     )
 }
 
+#[cfg(test)]
 pub(crate) fn parse_strong_etag(value: &str) -> Option<ObjectVersion> {
     if value.starts_with("W/") || !value.starts_with('"') || !value.ends_with('"') {
         return None;
@@ -107,9 +138,7 @@ pub(crate) fn parse_strong_etag(value: &str) -> Option<ObjectVersion> {
 
 #[derive(Debug, Serialize)]
 pub(crate) struct ObjectMetadataResponse {
-    pub object_id: Uuid,
-    pub revision: u64,
-    pub ciphertext_size_bytes: u64,
+    pub object: OpaqueObjectHeaderV1,
     pub change_seq: u64,
     pub etag: String,
 }
@@ -121,10 +150,16 @@ impl TryFrom<&StoredObject> for ObjectMetadataResponse {
         if !(0..=MAX_WIRE_REVISION).contains(&value.revision) {
             return Err(());
         }
+        if value.object_id != value.header.object_id.0
+            || u64::try_from(value.revision).map_err(|_| ())? != value.header.revision
+            || u64::try_from(value.ciphertext_size_bytes).map_err(|_| ())?
+                != value.header.ciphertext_size_bytes
+            || value.ciphertext_sha256 != value.header.ciphertext_sha256
+        {
+            return Err(());
+        }
         Ok(Self {
-            object_id: value.object_id,
-            revision: u64::try_from(value.revision).map_err(|_| ())?,
-            ciphertext_size_bytes: u64::try_from(value.ciphertext_size_bytes).map_err(|_| ())?,
+            object: value.header.clone(),
             change_seq: u64::try_from(value.change_seq).map_err(|_| ())?,
             etag: strong_etag(&value.version()),
         })
@@ -143,6 +178,30 @@ mod tests {
             ciphertext_sha256: [hash_byte; 32],
             change_seq: 1,
             storage_key: "opaque".into(),
+            header: test_header(revision, hash_byte),
+        }
+    }
+
+    fn test_header(revision: i64, hash_byte: u8) -> OpaqueObjectHeaderV1 {
+        use vault_sync::{
+            AccountId, OBJECT_HEADER_FORMAT_VERSION, ObjectClassV1, ObjectId, ObjectScopeV1,
+            SYNC_PROTOCOL_VERSION,
+        };
+
+        OpaqueObjectHeaderV1 {
+            format_version: OBJECT_HEADER_FORMAT_VERSION,
+            protocol_version: SYNC_PROTOCOL_VERSION,
+            object_id: ObjectId(Uuid::nil()),
+            class: ObjectClassV1::Item,
+            scope: ObjectScopeV1::Account {
+                account_id: AccountId(Uuid::nil()),
+            },
+            revision: u64::try_from(revision).unwrap_or(u64::MAX),
+            payload_version: 1,
+            envelope_version: 1,
+            ciphertext_size_bytes: 10,
+            ciphertext_sha256: [hash_byte; 32],
+            tombstone: false,
         }
     }
 

@@ -4,7 +4,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{
         HeaderMap, HeaderValue, StatusCode,
-        header::{CACHE_CONTROL, CONTENT_TYPE, ETAG, IF_MATCH, IF_NONE_MATCH},
+        header::{CACHE_CONTROL, CONTENT_TYPE, ETAG},
     },
     response::{IntoResponse, Response},
 };
@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::warn;
 use uuid::Uuid;
+use vault_sync::{AccountId, ObjectId, OpaqueMutationV1};
 
 use crate::{
     AppState,
@@ -20,16 +21,17 @@ use crate::{
         parse_public_key_hex, registration_token_hash,
     },
     model::{
-        DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT, MAX_WIRE_REVISION, ObjectMetadataResponse, PolicyError,
-        StoredObject, WritePrecondition, parse_strong_etag, strong_etag, validate_write_policy,
+        DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT, ObjectMetadataResponse, OperationOutcome, PolicyError,
+        StoredObject, WritePrecondition, strong_etag, validate_write_policy,
     },
     store::{AuthContext, CommitError, StoreError},
 };
 
 pub(crate) const MAX_CIPHERTEXT_OBJECT_BYTES: usize =
     vault_sync::MAX_SYNC_CIPHERTEXT_BYTES as usize;
-const REVISION_HEADER: &str = "x-safeory-revision";
+const MUTATION_HEADER: &str = "x-safeory-mutation";
 const CHANGE_SEQ_HEADER: &str = "x-safeory-change-seq";
+const MAX_MUTATION_HEADER_BYTES: usize = 8 * 1024;
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct RegisterDeviceRequest {
@@ -164,8 +166,37 @@ pub(crate) async fn put_object(
     if body.is_empty() {
         return Err(ApiError::BadRequest("ciphertext body must not be empty"));
     }
-    let candidate_revision = parse_candidate_revision(&headers)?;
-    let precondition = parse_write_precondition(&headers)?;
+    let mutation = parse_mutation(&headers)?;
+    let ciphertext_size = u64::try_from(body.len()).map_err(|_| ApiError::PayloadTooLarge)?;
+    let ciphertext_sha256: [u8; 32] = Sha256::digest(&body).into();
+    mutation
+        .validate_upload_binding(
+            AccountId(auth.account_id),
+            ObjectId(object_id),
+            ciphertext_size,
+            ciphertext_sha256,
+        )
+        .map_err(|_| ApiError::BadRequest("invalid opaque mutation binding"))?;
+    let canonical_mutation = serde_json::to_vec(&mutation).map_err(|_| ApiError::Internal)?;
+    let request_sha256: [u8; 32] = Sha256::digest(&canonical_mutation).into();
+
+    if let Some(outcome) = state
+        .metadata
+        .get_operation(auth.account_id, mutation.operation_id.0)
+        .await
+        .map_err(|error| backend_store_error("read mutation operation", error))?
+    {
+        if outcome.request_sha256 != request_sha256 {
+            return Err(ApiError::OperationConflict);
+        }
+        return operation_outcome_response(&outcome);
+    }
+
+    let candidate_revision = i64::try_from(mutation.object.revision)
+        .map_err(|_| ApiError::BadRequest("revision is outside the supported range"))?;
+    let precondition = WritePrecondition::try_from(&mutation.precondition).map_err(|_| {
+        ApiError::BadRequest("precondition revision is outside the supported range")
+    })?;
 
     let current = state
         .metadata
@@ -175,8 +206,8 @@ pub(crate) async fn put_object(
     validate_write_policy(current.as_ref(), candidate_revision, &precondition)
         .map_err(policy_error)?;
 
-    let ciphertext_size_bytes = i64::try_from(body.len()).map_err(|_| ApiError::PayloadTooLarge)?;
-    let ciphertext_sha256: [u8; 32] = Sha256::digest(&body).into();
+    let ciphertext_size_bytes =
+        i64::try_from(ciphertext_size).map_err(|_| ApiError::PayloadTooLarge)?;
     let storage_key = candidate_storage_key(auth.account_id, object_id, Uuid::new_v4());
 
     state
@@ -189,12 +220,12 @@ pub(crate) async fn put_object(
         .metadata
         .commit_object(
             auth.account_id,
-            object_id,
-            candidate_revision,
+            &mutation,
             &precondition,
             ciphertext_size_bytes,
             ciphertext_sha256,
             &storage_key,
+            request_sha256,
         )
         .await
     {
@@ -203,23 +234,16 @@ pub(crate) async fn put_object(
             warn!(
                 "PostgreSQL commit acknowledgement failed; reconciling ciphertext metadata before cleanup"
             );
-            match state.metadata.get_object(auth.account_id, object_id).await {
-                Ok(Some(object))
-                    if object_matches_candidate(
-                        &object,
-                        candidate_revision,
-                        ciphertext_size_bytes,
-                        ciphertext_sha256,
-                        &storage_key,
-                    ) =>
-                {
-                    crate::store::CommitResult {
-                        object,
-                        previous_storage_key: current
-                            .as_ref()
-                            .map(|object| object.storage_key.clone()),
-                        created: current.is_none(),
+            match state
+                .metadata
+                .get_operation(auth.account_id, mutation.operation_id.0)
+                .await
+            {
+                Ok(Some(outcome)) if outcome.request_sha256 == request_sha256 => {
+                    if outcome.storage_key != storage_key {
+                        best_effort_delete(&state, &storage_key, "discard duplicate upload").await;
                     }
+                    return operation_outcome_response(&outcome);
                 }
                 Ok(_) => {
                     warn!(
@@ -240,6 +264,8 @@ pub(crate) async fn put_object(
             return Err(match error {
                 CommitError::PreconditionFailed => ApiError::PreconditionFailed,
                 CommitError::AccountMissing => ApiError::Unauthorized,
+                CommitError::OperationConflict => ApiError::OperationConflict,
+                CommitError::InvalidContract => ApiError::Internal,
                 CommitError::Database(error) => {
                     backend_store_error("commit object", StoreError::Database(error))
                 }
@@ -249,7 +275,12 @@ pub(crate) async fn put_object(
         }
     };
 
-    if let Some(previous_key) = &committed.previous_storage_key {
+    if committed.replayed {
+        best_effort_delete(&state, &storage_key, "discard replay upload").await;
+    }
+    if !committed.replayed
+        && let Some(previous_key) = &committed.previous_storage_key
+    {
         best_effort_delete(&state, previous_key, "retire replaced object").await;
     }
 
@@ -294,7 +325,6 @@ pub(crate) async fn get_object(
         .header(CONTENT_TYPE, "application/octet-stream")
         .header(CACHE_CONTROL, "no-store")
         .header(ETAG, etag)
-        .header(REVISION_HEADER, object.revision.to_string())
         .header(CHANGE_SEQ_HEADER, object.change_seq.to_string())
         .body(Body::from(body))
         .map_err(|_| ApiError::Internal)
@@ -341,48 +371,16 @@ fn require_octet_stream(headers: &HeaderMap) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn parse_candidate_revision(headers: &HeaderMap) -> Result<i64, ApiError> {
+fn parse_mutation(headers: &HeaderMap) -> Result<OpaqueMutationV1, ApiError> {
     let value = headers
-        .get(REVISION_HEADER)
-        .ok_or(ApiError::BadRequest("x-safeory-revision is required"))?
+        .get(MUTATION_HEADER)
+        .ok_or(ApiError::BadRequest("x-safeory-mutation is required"))?
         .to_str()
-        .map_err(|_| ApiError::BadRequest("x-safeory-revision is invalid"))?;
-    let revision = value
-        .parse::<i64>()
-        .map_err(|_| ApiError::BadRequest("x-safeory-revision is invalid"))?;
-    if !(0..=MAX_WIRE_REVISION).contains(&revision) {
-        return Err(ApiError::BadRequest(
-            "x-safeory-revision is outside the supported range",
-        ));
+        .map_err(|_| ApiError::BadRequest("x-safeory-mutation must be UTF-8 JSON"))?;
+    if value.len() > MAX_MUTATION_HEADER_BYTES {
+        return Err(ApiError::BadRequest("x-safeory-mutation is too large"));
     }
-    Ok(revision)
-}
-
-fn parse_write_precondition(headers: &HeaderMap) -> Result<WritePrecondition, ApiError> {
-    let if_match = headers.get(IF_MATCH);
-    let if_none_match = headers.get(IF_NONE_MATCH);
-    match (if_match, if_none_match) {
-        (Some(_), Some(_)) => Err(ApiError::BadRequest(
-            "send exactly one of If-Match or If-None-Match",
-        )),
-        (None, None) => Err(ApiError::PreconditionRequired),
-        (None, Some(value)) => {
-            if value.to_str().ok() == Some("*") {
-                Ok(WritePrecondition::CreateOnly)
-            } else {
-                Err(ApiError::BadRequest("If-None-Match must be *"))
-            }
-        }
-        (Some(value), None) => {
-            let value = value
-                .to_str()
-                .map_err(|_| ApiError::BadRequest("If-Match is invalid"))?;
-            let version = parse_strong_etag(value).ok_or(ApiError::BadRequest(
-                "If-Match must be one Safeory strong ETag",
-            ))?;
-            Ok(WritePrecondition::Match(version))
-        }
-    }
+    serde_json::from_str(value).map_err(|_| ApiError::BadRequest("x-safeory-mutation is invalid"))
 }
 
 fn candidate_storage_key(account_id: Uuid, object_id: Uuid, upload_id: Uuid) -> String {
@@ -395,18 +393,36 @@ fn object_metadata_response(
 ) -> Result<Response, ApiError> {
     let metadata = ObjectMetadataResponse::try_from(object).map_err(|_| ApiError::Internal)?;
     let etag = HeaderValue::from_str(&metadata.etag).map_err(|_| ApiError::Internal)?;
-    let revision =
-        HeaderValue::from_str(&metadata.revision.to_string()).map_err(|_| ApiError::Internal)?;
     let change_seq =
         HeaderValue::from_str(&metadata.change_seq.to_string()).map_err(|_| ApiError::Internal)?;
     let mut response = (status, Json(metadata)).into_response();
     response.headers_mut().insert(ETAG, etag);
-    response.headers_mut().insert(REVISION_HEADER, revision);
     response.headers_mut().insert(CHANGE_SEQ_HEADER, change_seq);
     response
         .headers_mut()
         .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
     Ok(response)
+}
+
+fn operation_outcome_response(outcome: &OperationOutcome) -> Result<Response, ApiError> {
+    let stored = StoredObject {
+        object_id: outcome.header.object_id.0,
+        revision: i64::try_from(outcome.header.revision).map_err(|_| ApiError::Internal)?,
+        ciphertext_size_bytes: i64::try_from(outcome.header.ciphertext_size_bytes)
+            .map_err(|_| ApiError::Internal)?,
+        ciphertext_sha256: outcome.header.ciphertext_sha256,
+        change_seq: outcome.change_seq,
+        storage_key: String::new(),
+        header: outcome.header.clone(),
+    };
+    object_metadata_response(
+        if outcome.created {
+            StatusCode::CREATED
+        } else {
+            StatusCode::OK
+        },
+        &stored,
+    )
 }
 
 async fn best_effort_delete(state: &AppState, key: &str, operation: &'static str) {
@@ -416,19 +432,6 @@ async fn best_effort_delete(state: &AppState, key: &str, operation: &'static str
             "object-store cleanup failed; ciphertext blob is unreachable"
         );
     }
-}
-
-fn object_matches_candidate(
-    object: &StoredObject,
-    revision: i64,
-    ciphertext_size_bytes: i64,
-    ciphertext_sha256: [u8; 32],
-    storage_key: &str,
-) -> bool {
-    object.revision == revision
-        && object.ciphertext_size_bytes == ciphertext_size_bytes
-        && object.ciphertext_sha256 == ciphertext_sha256
-        && object.storage_key == storage_key
 }
 
 fn policy_error(error: PolicyError) -> ApiError {
@@ -455,8 +458,8 @@ pub(crate) enum ApiError {
     BadRequest(&'static str),
     UnsupportedMediaType,
     PayloadTooLarge,
-    PreconditionRequired,
     PreconditionFailed,
+    OperationConflict,
     Unavailable,
     Internal,
 }
@@ -477,13 +480,13 @@ impl IntoResponse for ApiError {
                 "application/octet-stream is required",
             ),
             Self::PayloadTooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large"),
-            Self::PreconditionRequired => (
-                StatusCode::PRECONDITION_REQUIRED,
-                "write_precondition_required",
-            ),
             Self::PreconditionFailed => {
                 (StatusCode::PRECONDITION_FAILED, "write_precondition_failed")
             }
+            Self::OperationConflict => (
+                StatusCode::CONFLICT,
+                "operation_id_reused_with_different_mutation",
+            ),
             Self::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, "backend_unavailable"),
             Self::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
         };
@@ -494,7 +497,33 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::{HeaderName, HeaderValue};
+    use axum::http::HeaderValue;
+    use vault_sync::{
+        OBJECT_HEADER_FORMAT_VERSION, OPAQUE_MUTATION_FORMAT_VERSION, ObjectClassV1, ObjectScopeV1,
+        OperationId, SYNC_PROTOCOL_VERSION, WritePreconditionV1,
+    };
+
+    fn mutation() -> OpaqueMutationV1 {
+        let account_id = AccountId::new();
+        OpaqueMutationV1 {
+            format_version: OPAQUE_MUTATION_FORMAT_VERSION,
+            operation_id: OperationId::new(),
+            object: vault_sync::OpaqueObjectHeaderV1 {
+                format_version: OBJECT_HEADER_FORMAT_VERSION,
+                protocol_version: SYNC_PROTOCOL_VERSION,
+                object_id: ObjectId::new(),
+                class: ObjectClassV1::Item,
+                scope: ObjectScopeV1::Account { account_id },
+                revision: 0,
+                payload_version: 1,
+                envelope_version: 1,
+                ciphertext_size_bytes: 3,
+                ciphertext_sha256: Sha256::digest(b"abc").into(),
+                tombstone: false,
+            },
+            precondition: WritePreconditionV1::CreateOnly,
+        }
+    }
 
     #[test]
     fn storage_keys_are_opaque_unique_versions_under_the_authenticated_account() {
@@ -507,47 +536,20 @@ mod tests {
     }
 
     #[test]
-    fn write_precondition_requires_exactly_one_supported_header() {
+    fn mutation_header_is_required_and_decodes_canonical_contract() {
         let mut headers = HeaderMap::new();
-        assert!(matches!(
-            parse_write_precondition(&headers),
-            Err(ApiError::PreconditionRequired)
-        ));
+        assert!(parse_mutation(&headers).is_err());
 
-        headers.insert(IF_NONE_MATCH, HeaderValue::from_static("*"));
-        assert_eq!(
-            parse_write_precondition(&headers).ok(),
-            Some(WritePrecondition::CreateOnly)
+        let expected = mutation();
+        let json = serde_json::to_string(&expected).expect("serialize mutation");
+        headers.insert(
+            MUTATION_HEADER,
+            HeaderValue::from_str(&json).expect("mutation header"),
         );
+        assert_eq!(parse_mutation(&headers).ok(), Some(expected));
 
-        headers.insert(
-            IF_MATCH,
-            HeaderValue::from_static(
-                "\"safeory-r0-0000000000000000000000000000000000000000000000000000000000000000\"",
-            ),
-        );
-        assert!(parse_write_precondition(&headers).is_err());
-    }
-
-    #[test]
-    fn candidate_revision_rejects_missing_negative_or_non_numeric_values() {
-        let mut headers = HeaderMap::new();
-        assert!(parse_candidate_revision(&headers).is_err());
-        headers.insert(
-            HeaderName::from_static(REVISION_HEADER),
-            HeaderValue::from_static("-1"),
-        );
-        assert!(parse_candidate_revision(&headers).is_err());
-        headers.insert(
-            HeaderName::from_static(REVISION_HEADER),
-            HeaderValue::from_static("7"),
-        );
-        assert_eq!(parse_candidate_revision(&headers).ok(), Some(7));
-        headers.insert(
-            HeaderName::from_static(REVISION_HEADER),
-            HeaderValue::from_static("9007199254740992"),
-        );
-        assert!(parse_candidate_revision(&headers).is_err());
+        headers.insert(MUTATION_HEADER, HeaderValue::from_static("{}"));
+        assert!(parse_mutation(&headers).is_err());
     }
 
     #[test]
@@ -561,45 +563,5 @@ mod tests {
             HeaderValue::from_static("application/octet-stream; charset=binary"),
         );
         assert!(require_octet_stream(&headers).is_ok());
-    }
-
-    #[test]
-    fn commit_reconciliation_requires_the_exact_uploaded_candidate() {
-        let candidate = StoredObject {
-            object_id: Uuid::new_v4(),
-            revision: 7,
-            ciphertext_size_bytes: 123,
-            ciphertext_sha256: [0x5a; 32],
-            change_seq: 9,
-            storage_key: "opaque-candidate".to_owned(),
-        };
-
-        assert!(object_matches_candidate(
-            &candidate,
-            7,
-            123,
-            [0x5a; 32],
-            "opaque-candidate"
-        ));
-
-        let mut different = candidate.clone();
-        different.storage_key = "newer-object".to_owned();
-        assert!(!object_matches_candidate(
-            &different,
-            7,
-            123,
-            [0x5a; 32],
-            "opaque-candidate"
-        ));
-
-        different = candidate.clone();
-        different.ciphertext_sha256[0] ^= 1;
-        assert!(!object_matches_candidate(
-            &different,
-            7,
-            123,
-            [0x5a; 32],
-            "opaque-candidate"
-        ));
     }
 }

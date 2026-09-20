@@ -2,7 +2,8 @@ use sqlx::{PgPool, Row};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::model::{StoredObject, WritePrecondition, validate_write_policy};
+use crate::model::{OperationOutcome, StoredObject, WritePrecondition, validate_write_policy};
+use vault_sync::OpaqueMutationV1;
 
 #[derive(Clone)]
 pub(crate) struct MetadataStore {
@@ -19,6 +20,7 @@ pub(crate) struct CommitResult {
     pub object: StoredObject,
     pub previous_storage_key: Option<String>,
     pub created: bool,
+    pub replayed: bool,
 }
 
 impl MetadataStore {
@@ -118,8 +120,8 @@ impl MetadataStore {
         object_id: Uuid,
     ) -> Result<Option<StoredObject>, StoreError> {
         let row = sqlx::query(
-            "SELECT object_id::text AS object_id, revision, ciphertext_size_bytes, ciphertext_sha256, \
-                    change_seq, storage_key \
+            "SELECT account_id::text AS account_id, object_id::text AS object_id, revision, ciphertext_size_bytes, ciphertext_sha256, \
+                    change_seq, storage_key, object_header_json \
              FROM ciphertext_objects WHERE account_id = $1::uuid AND object_id = $2::uuid",
         )
         .bind(account_id.to_string())
@@ -136,8 +138,8 @@ impl MetadataStore {
         limit: i64,
     ) -> Result<Vec<StoredObject>, StoreError> {
         let rows = sqlx::query(
-            "SELECT object_id::text AS object_id, revision, ciphertext_size_bytes, ciphertext_sha256, \
-                    change_seq, storage_key \
+            "SELECT account_id::text AS account_id, object_id::text AS object_id, revision, ciphertext_size_bytes, ciphertext_sha256, \
+                    change_seq, storage_key, object_header_json \
              FROM ciphertext_objects \
              WHERE account_id = $1::uuid AND change_seq > $2 \
              ORDER BY change_seq ASC LIMIT $3",
@@ -150,17 +152,39 @@ impl MetadataStore {
         rows.into_iter().map(row_to_object).collect()
     }
 
+    pub(crate) async fn get_operation(
+        &self,
+        account_id: Uuid,
+        operation_id: Uuid,
+    ) -> Result<Option<OperationOutcome>, StoreError> {
+        let row = sqlx::query(
+            "SELECT account_id::text AS account_id, object_id::text AS object_id, request_sha256, object_header_json, storage_key, change_seq, created \
+             FROM sync_operations \
+             WHERE account_id = $1::uuid AND operation_id = $2::uuid",
+        )
+        .bind(account_id.to_string())
+        .bind(operation_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(row_to_operation).transpose()
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn commit_object(
         &self,
         account_id: Uuid,
-        object_id: Uuid,
-        candidate_revision: i64,
+        mutation: &OpaqueMutationV1,
         precondition: &WritePrecondition,
         ciphertext_size_bytes: i64,
         ciphertext_sha256: [u8; 32],
         storage_key: &str,
+        request_sha256: [u8; 32],
     ) -> Result<CommitResult, CommitError> {
+        let object_id = mutation.object.object_id.0;
+        let candidate_revision =
+            i64::try_from(mutation.object.revision).map_err(|_| CommitError::PreconditionFailed)?;
+        let header_json =
+            serde_json::to_string(&mutation.object).map_err(|_| CommitError::InvalidContract)?;
         let mut transaction = self.pool.begin().await?;
 
         let account_exists = sqlx::query_scalar::<_, i64>(
@@ -173,9 +197,41 @@ impl MetadataStore {
             return Err(CommitError::AccountMissing);
         }
 
+        let operation_row = sqlx::query(
+            "SELECT account_id::text AS account_id, object_id::text AS object_id, request_sha256, object_header_json, storage_key, change_seq, created \
+             FROM sync_operations \
+             WHERE account_id = $1::uuid AND operation_id = $2::uuid FOR UPDATE",
+        )
+        .bind(account_id.to_string())
+        .bind(mutation.operation_id.0.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if let Some(row) = operation_row {
+            let outcome = row_to_operation(row)?;
+            if outcome.request_sha256 != request_sha256 {
+                return Err(CommitError::OperationConflict);
+            }
+            return Ok(CommitResult {
+                object: StoredObject {
+                    object_id: outcome.header.object_id.0,
+                    revision: i64::try_from(outcome.header.revision)
+                        .map_err(|_| CommitError::InvalidContract)?,
+                    ciphertext_size_bytes: i64::try_from(outcome.header.ciphertext_size_bytes)
+                        .map_err(|_| CommitError::InvalidContract)?,
+                    ciphertext_sha256: outcome.header.ciphertext_sha256,
+                    change_seq: outcome.change_seq,
+                    storage_key: outcome.storage_key,
+                    header: outcome.header,
+                },
+                previous_storage_key: None,
+                created: outcome.created,
+                replayed: true,
+            });
+        }
+
         let current_row = sqlx::query(
-            "SELECT object_id::text AS object_id, revision, ciphertext_size_bytes, ciphertext_sha256, \
-                    change_seq, storage_key \
+            "SELECT account_id::text AS account_id, object_id::text AS object_id, revision, ciphertext_size_bytes, ciphertext_sha256, \
+                    change_seq, storage_key, object_header_json \
              FROM ciphertext_objects \
              WHERE account_id = $1::uuid AND object_id = $2::uuid FOR UPDATE",
         )
@@ -199,7 +255,7 @@ impl MetadataStore {
             sqlx::query(
                 "UPDATE ciphertext_objects \
                  SET revision = $3, ciphertext_size_bytes = $4, ciphertext_sha256 = $5, \
-                     change_seq = $6, storage_key = $7, updated_at = now() \
+                     change_seq = $6, storage_key = $7, object_header_json = $8, updated_at = now() \
                  WHERE account_id = $1::uuid AND object_id = $2::uuid",
             )
             .bind(account_id.to_string())
@@ -209,14 +265,15 @@ impl MetadataStore {
             .bind(ciphertext_sha256.as_slice())
             .bind(change_seq)
             .bind(storage_key)
+            .bind(&header_json)
             .execute(&mut *transaction)
             .await?;
         } else {
             sqlx::query(
                 "INSERT INTO ciphertext_objects( \
                     account_id, object_id, revision, ciphertext_size_bytes, ciphertext_sha256, \
-                    change_seq, storage_key \
-                 ) VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7)",
+                    change_seq, storage_key, object_header_json \
+                 ) VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8)",
             )
             .bind(account_id.to_string())
             .bind(object_id.to_string())
@@ -225,9 +282,26 @@ impl MetadataStore {
             .bind(ciphertext_sha256.as_slice())
             .bind(change_seq)
             .bind(storage_key)
+            .bind(&header_json)
             .execute(&mut *transaction)
             .await?;
         }
+
+        sqlx::query(
+            "INSERT INTO sync_operations( \
+                account_id, operation_id, request_sha256, object_id, object_header_json, storage_key, change_seq, created \
+             ) VALUES ($1::uuid, $2::uuid, $3, $4::uuid, $5, $6, $7, $8)",
+        )
+        .bind(account_id.to_string())
+        .bind(mutation.operation_id.0.to_string())
+        .bind(request_sha256.as_slice())
+        .bind(object_id.to_string())
+        .bind(&header_json)
+        .bind(storage_key)
+        .bind(change_seq)
+        .bind(current.is_none())
+        .execute(&mut *transaction)
+        .await?;
 
         transaction
             .commit()
@@ -242,9 +316,11 @@ impl MetadataStore {
                 ciphertext_sha256,
                 change_seq,
                 storage_key: storage_key.to_owned(),
+                header: mutation.object.clone(),
             },
             previous_storage_key,
             created: current.is_none(),
+            replayed: false,
         })
     }
 }
@@ -254,14 +330,54 @@ fn row_to_object(row: sqlx::postgres::PgRow) -> Result<StoredObject, StoreError>
     let ciphertext_sha256 = hash
         .try_into()
         .map_err(|_| StoreError::InvalidCiphertextHash)?;
+    let account_id = parse_uuid_column(&row, "account_id")?;
+    let object_id = parse_uuid_column(&row, "object_id")?;
+    let revision = row.get("revision");
+    let ciphertext_size_bytes = row.get("ciphertext_size_bytes");
+    let header = parse_header(row.get("object_header_json"))?;
+    if header.scope.account_id().0 != account_id
+        || header.object_id.0 != object_id
+        || i64::try_from(header.revision).ok() != Some(revision)
+        || i64::try_from(header.ciphertext_size_bytes).ok() != Some(ciphertext_size_bytes)
+        || header.ciphertext_sha256 != ciphertext_sha256
+    {
+        return Err(StoreError::InvalidObjectHeader);
+    }
     Ok(StoredObject {
-        object_id: parse_uuid_column(&row, "object_id")?,
-        revision: row.get("revision"),
-        ciphertext_size_bytes: row.get("ciphertext_size_bytes"),
+        object_id,
+        revision,
+        ciphertext_size_bytes,
         ciphertext_sha256,
         change_seq: row.get("change_seq"),
         storage_key: row.get("storage_key"),
+        header,
     })
+}
+
+fn row_to_operation(row: sqlx::postgres::PgRow) -> Result<OperationOutcome, StoreError> {
+    let hash: Vec<u8> = row.get("request_sha256");
+    let account_id = parse_uuid_column(&row, "account_id")?;
+    let object_id = parse_uuid_column(&row, "object_id")?;
+    let header = parse_header(row.get("object_header_json"))?;
+    if header.scope.account_id().0 != account_id || header.object_id.0 != object_id {
+        return Err(StoreError::InvalidObjectHeader);
+    }
+    Ok(OperationOutcome {
+        request_sha256: hash
+            .try_into()
+            .map_err(|_| StoreError::InvalidCiphertextHash)?,
+        header,
+        change_seq: row.get("change_seq"),
+        created: row.get("created"),
+        storage_key: row.get("storage_key"),
+    })
+}
+
+fn parse_header(value: String) -> Result<vault_sync::OpaqueObjectHeaderV1, StoreError> {
+    let header = serde_json::from_str(&value).map_err(|_| StoreError::InvalidObjectHeader)?;
+    vault_sync::OpaqueObjectHeaderV1::validate(&header)
+        .map_err(|_| StoreError::InvalidObjectHeader)?;
+    Ok(header)
 }
 
 fn parse_uuid_column(
@@ -280,6 +396,8 @@ pub(crate) enum StoreError {
     InvalidCiphertextHash,
     #[error("stored UUID metadata is invalid")]
     InvalidUuid,
+    #[error("stored opaque object header is invalid")]
+    InvalidObjectHeader,
 }
 
 #[derive(Debug, Error)]
@@ -294,4 +412,8 @@ pub(crate) enum CommitError {
     PreconditionFailed,
     #[error("authenticated account no longer exists")]
     AccountMissing,
+    #[error("operation ID was already used for a different mutation")]
+    OperationConflict,
+    #[error("mutation contract could not be persisted")]
+    InvalidContract,
 }

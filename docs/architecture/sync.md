@@ -5,13 +5,13 @@ Status: target protocol architecture; not implemented end-to-end. The existing
 `crates/vault-sync` now implements the bounded versioned account/household/
 membership/space domain contracts and a ciphertext-preserving single-owner
 migration plan. It also prepares and opens device-specific, generation-bound
-space-key envelopes; atomic server rotation fencing, mutation/pull protocol,
-and client persistence remain incomplete. The API exposes the canonical
-`vault-sync` compatibility advertisement and consumes its wire bounds. The
+space-key envelopes; atomic server rotation fencing and full client sync remain
+incomplete. The API exposes the canonical `vault-sync` compatibility
+advertisement, consumes its wire bounds, validates mutation/upload binding, and
+atomically persists exact-input operation-ID outcomes with opaque headers. The
 browser contracts package validates that bounded advertisement and negotiates
-protocol, object-header, and envelope versions before sync. Application wiring
-and migration of the API object endpoints to the complete header/mutation
-format remain incomplete.
+protocol, object-header, and envelope versions before sync. Browser application
+wiring and household/space authorization remain incomplete.
 
 ## Goals
 
