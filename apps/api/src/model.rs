@@ -9,7 +9,7 @@ pub(crate) const DEFAULT_LIST_LIMIT: u16 = 100;
 /// Browser clients represent revisions as JSON/TypeScript numbers. Keep the
 /// wire value within JavaScript's exact integer range so round-trips cannot
 /// silently change a revision and so no client can exhaust an object at i64::MAX.
-pub(crate) const MAX_WIRE_REVISION: i64 = 9_007_199_254_740_991;
+pub(crate) const MAX_WIRE_REVISION: i64 = vault_sync::MAX_WIRE_INTEGER as i64;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ObjectVersion {

@@ -6,7 +6,9 @@ Status: target protocol architecture; not implemented end-to-end. The existing
 membership/space domain contracts and a ciphertext-preserving single-owner
 migration plan. It also prepares and opens device-specific, generation-bound
 space-key envelopes; atomic server rotation fencing, mutation/pull protocol,
-and client persistence remain incomplete.
+and client persistence remain incomplete. The API exposes the canonical
+`vault-sync` compatibility advertisement and consumes its wire bounds, but its
+object endpoints have not yet migrated to the complete header/mutation format.
 
 ## Goals
 

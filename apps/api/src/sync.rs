@@ -26,7 +26,8 @@ use crate::{
     store::{AuthContext, CommitError, StoreError},
 };
 
-pub(crate) const MAX_CIPHERTEXT_OBJECT_BYTES: usize = 128 * 1024 * 1024;
+pub(crate) const MAX_CIPHERTEXT_OBJECT_BYTES: usize =
+    vault_sync::MAX_SYNC_CIPHERTEXT_BYTES as usize;
 const REVISION_HEADER: &str = "x-safeory-revision";
 const CHANGE_SEQ_HEADER: &str = "x-safeory-change-seq";
 

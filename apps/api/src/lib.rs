@@ -18,6 +18,7 @@ use sqlx::postgres::PgPoolOptions;
 use thiserror::Error;
 use tokio::time::timeout;
 use tracing::warn;
+use vault_sync::CompatibilityAdvertisementV1;
 
 use crate::{
     auth::registration_token_hash, blob::S3BlobStore, store::MetadataStore,
@@ -130,6 +131,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health/live", get(health_live))
         .route("/health/ready", get(health_ready))
+        .route("/v1/compatibility", get(compatibility))
         .route("/v1/accounts", post(sync::create_account))
         .route("/v1/devices", post(sync::create_device))
         .route(
@@ -153,6 +155,10 @@ struct LiveResponse {
 
 async fn health_live() -> Json<LiveResponse> {
     Json(LiveResponse { status: "live" })
+}
+
+async fn compatibility() -> Json<CompatibilityAdvertisementV1> {
+    Json(CompatibilityAdvertisementV1::current())
 }
 
 #[derive(Debug, Serialize)]
@@ -251,5 +257,16 @@ mod tests {
     async fn liveness_does_not_depend_on_external_state() {
         let Json(response) = health_live().await;
         assert_eq!(response.status, "live");
+    }
+
+    #[tokio::test]
+    async fn compatibility_reports_the_canonical_sync_contract() {
+        let Json(response) = compatibility().await;
+        assert_eq!(response, CompatibilityAdvertisementV1::current());
+        assert!(
+            response
+                .protocol_versions
+                .contains(vault_sync::SYNC_PROTOCOL_VERSION)
+        );
     }
 }

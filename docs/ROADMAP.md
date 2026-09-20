@@ -168,7 +168,8 @@ gates are green, including the generated-WASM Node smoke test.**
 - ✅ DONE (contract): the sync protocol specification and initial compatibility
   matrix define independent protocol/mutation/header/envelope/payload versions.
   `vault-sync` implements negotiation plus bounded opaque object and mutation
-  contracts; API and browser adoption remains.
+  contracts. The API now exposes the canonical compatibility advertisement and
+  shares wire bounds; object-endpoint and browser adoption remain.
 - Decide the high-entropy Account Secret/device-enrollment construction in an
   ADR, implement recovery/new-device enrollment, and test server-dump offline
   attack resistance. Cognito authentication alone is insufficient.

@@ -26,6 +26,13 @@ The service reads configuration only from environment variables:
   and the S3-compatible object store. It returns HTTP 503 until all required
   dependencies respond.
 
+## Protocol compatibility
+
+- `GET /v1/compatibility` returns the canonical `vault-sync` compatibility
+  advertisement. Protocol, opaque-object header, and key-envelope versions are
+  negotiated independently; clients must fail before sync when no supported
+  intersection exists.
+
 ## Database
 
 Migrations live in `apps/api/migrations`. Compose applies them in filename order

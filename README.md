@@ -25,7 +25,7 @@ Implemented now:
 - `apps/extension`, an MV3 browser extension with an isolated background vault, exact-origin credential matching, trusted-click discovery, bounded request throttling, one-shot fill authorization, and a compact credential surface;
 - ciphertext-only browser snapshot validation, IndexedDB CAS persistence, and fail-closed durability poisoning when an in-memory mutation cannot be saved;
 - portable emergency/recovery primitives, encrypted legacy/account-closure planning metadata, bounded history and attachment formats in the native core, browser encrypted attachment persistence with authenticated chunked add/download/delete and backup/restore, browser readable export, plus Trust Engine policy/threshold foundations and local dual-key trusted-device pairing with durable wrapped recipient keys and a browser pairing responder;
-- `apps/api` plus a local Docker integration stack for account/device coordination and opaque encrypted-object sync using PostgreSQL, Valkey, S3-compatible object storage, and SMTP; the production target is AWS as documented in `docs/architecture/aws.md`;
+- `apps/api` plus a local Docker integration stack for account/device coordination and opaque encrypted-object sync using PostgreSQL, Valkey, S3-compatible object storage, and SMTP, including a canonical sync-compatibility endpoint; the production target is AWS as documented in `docs/architecture/aws.md`;
 - `vault-sync` versioned account/household/membership/private-and-shared-space
   contracts, including fail-closed topology validation and a local single-owner
   ciphertext-preserving migration plan, plus independently rotatable
