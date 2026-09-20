@@ -7,6 +7,7 @@ import {
   type VaultFactory,
   type WasmVaultLike,
 } from "../src/session";
+import type { EncryptedVaultItemV1 } from "../src/sync-vault-item";
 
 class FakeVault implements WasmVaultLike {
   unlocked: boolean;
@@ -17,6 +18,7 @@ class FakeVault implements WasmVaultLike {
   passphraseChangeCount = 0;
   snapshotCount = 0;
   deadlineJson = "[]";
+  encryptedSyncItemJson: string | null = null;
   failMutation = false;
   trashedAttachmentIds: string[] = [];
   purgeCommitJson = JSON.stringify({ item_revision: 3, attachments: [] });
@@ -105,6 +107,19 @@ class FakeVault implements WasmVaultLike {
       return JSON.stringify({ attachments: this.attachmentIds });
     }
     return "{}";
+  }
+
+  getEncryptedItemJson(): string | null {
+    return this.encryptedSyncItemJson;
+  }
+
+  applyEncryptedItemJson(nextJson: string, expectedJson?: string): void {
+    if (expectedJson === undefined) {
+      if (this.encryptedSyncItemJson !== null) throw new Error("encrypted sync precondition failed");
+    } else if (this.encryptedSyncItemJson !== expectedJson) {
+      throw new Error("encrypted sync precondition failed");
+    }
+    this.encryptedSyncItemJson = nextJson;
   }
 
   listItemsJson(): string {
@@ -830,4 +845,42 @@ test("deadline reads are parsed without persistence or mutation", () => {
   ]);
   assert.equal(liveVault.snapshotCount, 0);
   assert.equal(liveVault.putCount, 0);
+});
+
+test("encrypted sync acceptance compare-and-swaps through the session durability fence", async () => {
+  const indexedDb = installWritableIndexedDb({
+    format: 1,
+    version: 0,
+    snapshotJson: JSON.stringify({ encrypted: true }),
+  });
+  const liveVault = new FakeVault(true, false);
+  const local: EncryptedVaultItemV1 = {
+    format_version: 1,
+    payload_schema_version: 8,
+    algorithm: "xchacha20poly1305",
+    object_id: "00000000-0000-4000-8000-0000000000cc",
+    key_id: "00000000-0000-4000-8000-0000000000dd",
+    revision: 1,
+    key_nonce: Array(24).fill(1),
+    wrapped_item_key: [2, 3, 4],
+    payload_nonce: Array(24).fill(5),
+    ciphertext: [6, 7, 8],
+  };
+  const remote = { ...local, revision: 2, ciphertext: [9, 10, 11] };
+  liveVault.encryptedSyncItemJson = JSON.stringify(local);
+  const session = newSession(() => new FakeVault(false, false), liveVault);
+
+  assert.deepEqual(await session.loadEncryptedItemForSync(local.object_id), local);
+  await session.applyRemoteEncryptedItemForSync(remote, local);
+
+  assert.deepEqual(await session.loadEncryptedItemForSync(local.object_id), remote);
+  assert.equal(session.isUnlocked(), true, "opaque sync must preserve the in-WASM root key");
+  assert.equal(indexedDb.getVaultRecord().version, 1);
+
+  await assert.rejects(
+    session.applyRemoteEncryptedItemForSync({ ...remote, revision: 3 }, local),
+    /encrypted sync precondition failed/,
+  );
+  assert.equal(session.isUnlocked(), true, "a stale sync precondition is recoverable");
+  assert.equal(indexedDb.getVaultRecord().version, 1);
 });

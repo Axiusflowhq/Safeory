@@ -21,6 +21,7 @@ import {
   saveSnapshot,
   type PersistedAttachmentState,
 } from "./persistence";
+import type { EncryptedVaultItemV1 } from "./sync-vault-item";
 
 const ATTACHMENT_CHUNK_SIZE = 1024 * 1024;
 const ATTACHMENT_MAX_PLAINTEXT_BYTES = 64 * 1024 * 1024;
@@ -245,6 +246,8 @@ export interface WasmVaultLike {
   snapshotJson(): string;
   putItemJson(itemJson: string): void;
   getItemJson(id: string): string;
+  getEncryptedItemJson(id: string): string | null;
+  applyEncryptedItemJson(nextJson: string, expectedJson?: string): void;
   listItemsJson(): string;
   exportReadableJson(): string;
   listDeadlinesJson(todayYmd: string): string;
@@ -550,6 +553,32 @@ export class VaultSession {
   getItem(id: string): string {
     this.assertHealthy();
     return this.vault.getItemJson(id);
+  }
+
+  /** Read one opaque encrypted record after earlier local mutations settle. */
+  loadEncryptedItemForSync(id: string): Promise<EncryptedVaultItemV1 | null> {
+    return this.mutationTail.then(() => {
+      this.assertHealthy();
+      const encoded = this.vault.getEncryptedItemJson(id);
+      return encoded === null ? null : JSON.parse(encoded) as EncryptedVaultItemV1;
+    });
+  }
+
+  /**
+   * Durably compare-and-swap a pulled encrypted item while preserving any
+   * unlocked root key inside WASM. The exact expected ciphertext protects the
+   * reconciliation decision from intervening local edits.
+   */
+  async applyRemoteEncryptedItemForSync(
+    next: EncryptedVaultItemV1,
+    expectedLocal: EncryptedVaultItemV1 | null,
+  ): Promise<void> {
+    await this.mutateAndPersist(() =>
+      this.vault.applyEncryptedItemJson(
+        JSON.stringify(next),
+        expectedLocal === null ? undefined : JSON.stringify(expectedLocal),
+      ),
+    );
   }
 
   listItems(): ListedItem[] {

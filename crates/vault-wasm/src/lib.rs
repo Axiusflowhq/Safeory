@@ -115,6 +115,8 @@ pub enum WasmVaultError {
     ItemNotTrashed,
     #[error("session resume credential is unavailable or stale")]
     InvalidSessionResume,
+    #[error("encrypted sync item precondition failed")]
+    EncryptedItemPreconditionFailed,
 }
 
 #[derive(serde::Serialize)]
@@ -416,6 +418,55 @@ impl BrowserVault {
         ensure_user_item_id(id)?;
         let encrypted = self.store.load_item(id)?;
         Ok(decrypt_item(self.root_key()?, &encrypted)?)
+    }
+
+    /// Return one encrypted record for browser sync without decrypting it or
+    /// requiring an unlocked root key. The device-local session-resume marker
+    /// is deliberately excluded from synchronization.
+    pub fn get_encrypted_item(&self, id: Uuid) -> Result<Option<EncryptedItemV1>, WasmVaultError> {
+        ensure_user_item_id(id)?;
+        match self.store.load_item(id) {
+            Ok(item) => Ok(Some(item)),
+            Err(StorageError::ItemNotFound) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Compare-and-swap one already-encrypted sync record. This operation
+    /// authenticates the candidate inside WASM without exposing plaintext or
+    /// re-encrypting it, and preserves the unlocked root key. Exact expected
+    /// ciphertext, not revision alone, binds the caller's three-way
+    /// reconciliation decision to the current store.
+    pub fn apply_encrypted_item(
+        &self,
+        next: &EncryptedItemV1,
+        expected: Option<&EncryptedItemV1>,
+    ) -> Result<(), WasmVaultError> {
+        ensure_user_item_id(next.object_id)?;
+        // Structural transport validation is not enough: authenticate the
+        // envelope and payload under this vault's root before it becomes the
+        // durable current record. Plaintext remains inside WASM.
+        decrypt_item_state(self.root_key()?, next)?;
+        match expected {
+            None => match self.store.load_item(next.object_id) {
+                Ok(_) => return Err(WasmVaultError::EncryptedItemPreconditionFailed),
+                Err(StorageError::ItemNotFound) => self.store.insert_item(next)?,
+                Err(error) => return Err(error.into()),
+            },
+            Some(expected) => {
+                ensure_user_item_id(expected.object_id)?;
+                if expected.object_id != next.object_id {
+                    return Err(WasmVaultError::EncryptedItemPreconditionFailed);
+                }
+                let current = self.store.load_item(next.object_id)?;
+                if !same_encrypted_item(&current, expected)? {
+                    return Err(WasmVaultError::EncryptedItemPreconditionFailed);
+                }
+                self.store
+                    .update_item_if_revision(next, expected.revision)?;
+            }
+        }
+        Ok(())
     }
 
     /// List all active items (decrypted) with their revisions.
@@ -1185,6 +1236,14 @@ fn ensure_mutable_user_item_id(id: Uuid) -> Result<(), WasmVaultError> {
     Ok(())
 }
 
+fn same_encrypted_item(
+    left: &EncryptedItemV1,
+    right: &EncryptedItemV1,
+) -> Result<bool, WasmVaultError> {
+    Ok(serde_json::to_vec(left).map_err(StorageError::from)?
+        == serde_json::to_vec(right).map_err(StorageError::from)?)
+}
+
 fn decode_hex_32(value: &str) -> Option<[u8; 32]> {
     if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return None;
@@ -1338,6 +1397,54 @@ mod tests {
         vault.lock();
         assert!(!vault.is_unlocked());
         assert!(vault.get_item(id).is_err());
+    }
+
+    #[test]
+    fn encrypted_sync_item_compare_and_swap_preserves_unlocked_root() {
+        let passphrase = "correct horse battery";
+        let mut origin = BrowserVault::new_empty();
+        origin.create(passphrase).expect("create origin");
+        let item = sample_item("Original");
+        let id = item.id;
+        origin.put_item(&item).expect("put base item");
+        let base = origin
+            .get_encrypted_item(id)
+            .expect("read base")
+            .expect("base exists");
+        let snapshot_json = serde_json::to_vec(&origin.to_snapshot()).expect("serialize base");
+
+        let remote_snapshot = serde_json::from_slice(&snapshot_json).expect("decode remote");
+        let mut remote = BrowserVault::from_snapshot(remote_snapshot).expect("remote vault");
+        remote.unlock(passphrase).expect("unlock remote");
+        let mut edited = item.clone();
+        edited.title = "Remote edit".to_owned();
+        remote.update_item(&edited, 0).expect("remote update");
+        let remote_record = remote
+            .get_encrypted_item(id)
+            .expect("read remote")
+            .expect("remote exists");
+
+        let target_snapshot = serde_json::from_slice(&snapshot_json).expect("decode target");
+        let mut target = BrowserVault::from_snapshot(target_snapshot).expect("target vault");
+        assert!(matches!(
+            target.apply_encrypted_item(&remote_record, Some(&base)),
+            Err(WasmVaultError::Locked)
+        ));
+        target.unlock(passphrase).expect("unlock target");
+        target
+            .apply_encrypted_item(&remote_record, Some(&base))
+            .expect("apply remote");
+        assert!(target.is_unlocked());
+        assert_eq!(
+            target.get_item(id).expect("decrypt accepted").title,
+            "Remote edit"
+        );
+
+        assert!(matches!(
+            target.apply_encrypted_item(&remote_record, Some(&base)),
+            Err(WasmVaultError::EncryptedItemPreconditionFailed)
+        ));
+        assert!(target.is_unlocked());
     }
 
     #[test]

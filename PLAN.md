@@ -84,8 +84,10 @@ Rule: cloud integration starts only after the local platform below is stable.
    reconciliation now separates safe fast-forwards, replays, local-ahead state,
    and concurrent edits. A CAS-fenced IndexedDB acceptor durably retains the
    accepted baseline or encrypted conflict candidate, with crash-safe ordering
-   around an application-supplied snapshot callback; atomic local enqueue and
-   live web/extension snapshot wiring remain. Then complete bootstrap,
+   around a snapshot callback. `VaultSession` now implements that callback with
+   exact-ciphertext WASM compare-and-swap plus the existing snapshot durability
+   fence, without locking an active root key; atomic local enqueue and the live
+   web/extension account/topology sync lifecycle remain. Then complete bootstrap,
    household membership, attachment transport, offline queues, exact-revision conflicts,
    tombstones, revocation, key rotation, pagination, and web/extension
    convergence.

@@ -2,6 +2,7 @@
 //! types cross cleanly. Only ciphertext snapshots and explicitly
 //! decrypted-on-request plaintext cross to JS; the root key never does.
 
+use vault_storage::ITEM_MAX_ENCRYPTED_RECORD_BYTES;
 use wasm_bindgen::prelude::*;
 
 use vault_crypto::{
@@ -240,6 +241,45 @@ impl WasmVault {
         let id = parse_uuid(id)?;
         let item = self.inner.get_item(id).map_err(js_err)?;
         serde_json::to_string(&item).map_err(|_| ser_err())
+    }
+
+    /// Return an encrypted item record for sync, or null when it is absent.
+    #[wasm_bindgen(js_name = getEncryptedItemJson)]
+    pub fn get_encrypted_item_json(&self, id: &str) -> Result<JsValue, JsValue> {
+        let id = parse_uuid(id)?;
+        match self.inner.get_encrypted_item(id).map_err(js_err)? {
+            Some(item) => Ok(JsValue::from_str(
+                &serde_json::to_string(&item).map_err(|_| ser_err())?,
+            )),
+            None => Ok(JsValue::NULL),
+        }
+    }
+
+    /// Compare-and-swap an already-encrypted item accepted by the sync layer.
+    #[wasm_bindgen(js_name = applyEncryptedItemJson)]
+    pub fn apply_encrypted_item_json(
+        &self,
+        next_json: &str,
+        expected_json: Option<String>,
+    ) -> Result<(), JsValue> {
+        if next_json.len() > ITEM_MAX_ENCRYPTED_RECORD_BYTES
+            || expected_json
+                .as_ref()
+                .is_some_and(|value| value.len() > ITEM_MAX_ENCRYPTED_RECORD_BYTES)
+        {
+            return Err(JsValue::from_str(
+                "encrypted sync item exceeds supported bounds",
+            ));
+        }
+        let next = serde_json::from_str(next_json).map_err(|_| ser_err())?;
+        let expected = expected_json
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|_| ser_err())?;
+        self.inner
+            .apply_encrypted_item(&next, expected.as_ref())
+            .map_err(js_err)
     }
 
     /// List active items as redacted JSON summaries.

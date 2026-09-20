@@ -77,6 +77,30 @@ if (readableExport.items.length !== 1 || readableExport.items[0].item.id !== ite
   throw new Error("readable export item mismatch");
 }
 
+// Encrypted sync records cross the boundary without plaintext or key export.
+// Exact ciphertext CAS must preserve an unlocked target and reject stale input.
+const syncTarget = WasmVault.fromSnapshotJson(snapshotJson);
+syncTarget.unlock(pass);
+const syncBase = syncTarget.getEncryptedItemJson(item.id);
+if (typeof syncBase !== "string") throw new Error("encrypted sync base should exist");
+if (syncTarget.getEncryptedItemJson("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa") !== null) {
+  throw new Error("missing encrypted sync item should return null");
+}
+const syncRemote = WasmVault.fromSnapshotJson(snapshotJson);
+syncRemote.unlock(pass);
+const remoteItem = JSON.parse(syncRemote.getItemJson(item.id));
+remoteItem.title = "Remote bank record";
+syncRemote.updateItemJson(JSON.stringify(remoteItem), 0n);
+const syncNext = syncRemote.getEncryptedItemJson(item.id);
+syncTarget.applyEncryptedItemJson(syncNext, syncBase);
+if (!syncTarget.isUnlocked()) throw new Error("encrypted sync apply should preserve unlock");
+if (JSON.parse(syncTarget.getItemJson(item.id)).title !== "Remote bank record") {
+  throw new Error("encrypted sync apply did not replace the record");
+}
+let staleSyncFailed = false;
+try { syncTarget.applyEncryptedItemJson(syncNext, syncBase); } catch { staleSyncFailed = true; }
+if (!staleSyncFailed) throw new Error("stale encrypted sync precondition should fail");
+
 // 7. Wrong passphrase fails closed.
 const restored2 = WasmVault.fromSnapshotJson(snapshotJson);
 let wrongFailed = false;

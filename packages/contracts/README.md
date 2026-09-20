@@ -32,7 +32,11 @@ IndexedDB baseline, applies safe remote fast-forwards through a caller-provided
 durable snapshot callback, and retains concurrent remote ciphertext as a bounded
 conflict candidate without overwriting the local record. Remote application is
 ordered before baseline advancement so an interrupted state write is repaired by
-idempotent pull replay.
+idempotent pull replay. `VaultSession` exposes the corresponding durable callback:
+WASM authenticates the candidate and compare-and-swaps the exact expected
+encrypted record without exposing plaintext, retains the unlocked root key, and
+persists the resulting ciphertext snapshot behind the same
+cross-tab version fence as local mutations.
 Canonical browser parsers for the account, household, membership, space, and
 single-owner migration contracts mirror `vault-sync` bounds and fail closed on
 unknown fields, inconsistent routing references, or invalid access topology.

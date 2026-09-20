@@ -23,9 +23,14 @@ edits without decrypting or falling back to last-writer-wins. A CAS-fenced
 IndexedDB acceptance coordinator durably persists those baselines and encrypted
 conflict candidates. It applies remote ciphertext through an application-supplied
 durable callback before advancing the baseline, so an interrupted baseline write
-is repaired by replay rather than misclassified as a local edit. Supplying the
-live browser-snapshot callback and wiring the acceptor into web/extension remain
-application work. A bounded credential-free IndexedDB push outbox
+is repaired by replay rather than misclassified as a local edit. `VaultSession`
+now supplies that callback through an exact-ciphertext WASM compare-and-swap,
+authenticating the candidate under the in-WASM root key before persisting the
+resulting snapshot with its existing cross-tab durability fence. Plaintext stays
+inside WASM and the unlocked root key is preserved. Wiring account enrollment,
+topology, and the acceptor lifecycle into web/extension remains application
+work. A bounded
+credential-free IndexedDB push outbox
 retains canonical mutation/ciphertext pairs until a matching upload response is
 durably acknowledged, so interrupted acknowledgements replay by operation ID.
 A pull coordinator verifies each downloaded body, waits for an idempotent

@@ -149,10 +149,12 @@ impl VaultStore for MemStore {
     }
 
     fn insert_item(&self, item: &EncryptedItemV1) -> Result<(), StorageError> {
+        validate_encrypted_item(item)?;
         let mut state = self.state.lock().expect("memstore poisoned");
         if state.items.contains_key(&item.object_id) {
             return Err(StorageError::StaleRevision);
         }
+        validate_item_count(state.items.len().saturating_add(1))?;
         state.items.insert(item.object_id, item.clone());
         Ok(())
     }
@@ -162,6 +164,7 @@ impl VaultStore for MemStore {
         item: &EncryptedItemV1,
         expected_revision: u64,
     ) -> Result<(), StorageError> {
+        validate_encrypted_item(item)?;
         let mut state = self.state.lock().expect("memstore poisoned");
         let current = state
             .items
