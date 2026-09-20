@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "next dev --hostname 127.0.0.1 --port 1421",
     "build": "next build && node scripts/generate-csp.mjs",
-    "lint": "eslint",
+    "lint": "oxlint app components hooks lib scripts tests next.config.ts",
     "format": "prettier --write \"**/*.{ts,tsx}\"",
     "typecheck": "tsc --noEmit",
     "test": "node --test tests/items.test.mjs tests/session-resume.test.mjs"
@@ -33,11 +33,10 @@
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
-    "eslint": "^9.39.1",
-    "eslint-config-next": "16.3.5",
+    "oxlint": "1.83.0",
     "prettier": "^3.9.6",
     "prettier-plugin-tailwindcss": "^0.8.1",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "typescript": "7.0.2"
   }
 }
