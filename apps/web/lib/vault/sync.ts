@@ -1,4 +1,5 @@
 import {
+  BrowserDeviceEnrollmentCoordinator,
   BrowserSyncCredentialStore,
   DurableSyncOutbox,
   SyncClient,
@@ -18,6 +19,11 @@ import {
 import { browserDeviceKeyStore, wasmStatics } from "./vault"
 
 const SYNC_CONFIG_FORMAT = 1
+const credentialStore = new BrowserSyncCredentialStore()
+const deviceEnrollmentCoordinator = new BrowserDeviceEnrollmentCoordinator(
+  browserDeviceKeyStore,
+  credentialStore
+)
 
 export {
   browserSyncApiBaseUrl,
@@ -43,7 +49,6 @@ export async function enrollBrowserVaultSync(
   }
   const apiBaseUrl = browserSyncApiBaseUrl()
   const registration = await browserDeviceKeyStore.createIdentity(newId())
-  const credentialStore = new BrowserSyncCredentialStore()
   let createdAccountId: string | null = null
   let configurationSaved = false
   try {
@@ -95,6 +100,32 @@ export async function enrollBrowserVaultSync(
     }
     throw error
   }
+}
+
+export async function approveBrowserSyncDevice(
+  connected: ConnectedSingleOwnerVaultSync,
+  requestJson: string
+): Promise<string> {
+  const approverDeviceId = connected.client.deviceId
+  if (approverDeviceId === null) {
+    throw new Error("The active sync connection is missing its device identity.")
+  }
+  const drafts = await deviceEnrollmentCoordinator.listApprovalDrafts(
+    connected.client.apiBaseUrl,
+    connected.client.accountId
+  )
+  const existing = drafts.find((draft) => draft.request_json === requestJson)
+  const prepared = existing === undefined
+    ? await deviceEnrollmentCoordinator.prepareApproval(
+        connected.client,
+        approverDeviceId,
+        requestJson
+      )
+    : await deviceEnrollmentCoordinator.resumeApproval(
+        connected.client,
+        existing.request_id
+      )
+  return prepared.grant_json
 }
 
 export async function resumeBrowserVaultSync(

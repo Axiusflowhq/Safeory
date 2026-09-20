@@ -13,6 +13,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Field, FieldDescription, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
+import { Textarea } from "@/components/ui/textarea"
 import type { VaultSyncStatus } from "@/lib/vault/use-vault"
 import type { BrowserSyncEnrollment } from "@/lib/vault/sync"
 
@@ -20,6 +21,7 @@ interface SyncPanelProps {
   status: VaultSyncStatus
   onGenerateAccountSecret: () => string
   onEnroll: (enrollment: BrowserSyncEnrollment) => Promise<boolean>
+  onApproveDevice: (requestJson: string) => Promise<string>
   onRetry: () => Promise<boolean>
   onResetInvalidConfiguration: () => boolean
   onSyncNow: () => Promise<boolean>
@@ -44,6 +46,7 @@ export function SyncPanel({
   status,
   onGenerateAccountSecret,
   onEnroll,
+  onApproveDevice,
   onRetry,
   onResetInvalidConfiguration,
   onSyncNow,
@@ -56,6 +59,9 @@ export function SyncPanel({
   const [secretCopied, setSecretCopied] = useState(false)
   const [busy, setBusy] = useState(false)
   const [localError, setLocalError] = useState<string | null>(null)
+  const [deviceRequest, setDeviceRequest] = useState("")
+  const [deviceGrant, setDeviceGrant] = useState("")
+  const [grantCopied, setGrantCopied] = useState(false)
   const connected = status.accountId !== null
   const working = status.phase === "connecting" || status.phase === "syncing" || busy
   const accountSecretConfirmed =
@@ -99,6 +105,17 @@ export function SyncPanel({
     } catch {
       setSecretCopied(false)
       setLocalError("Clipboard access was unavailable. Select and copy the Account Secret manually.")
+    }
+  }
+
+  async function copyDeviceGrant(): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(deviceGrant)
+      setGrantCopied(true)
+      setLocalError(null)
+    } catch {
+      setGrantCopied(false)
+      setLocalError("Clipboard access was unavailable. Select and copy the encrypted grant manually.")
     }
   }
 
@@ -321,6 +338,79 @@ export function SyncPanel({
               <span>Encrypted conflicts</span>
               <span className="tabular-nums">{status.blockedItems}</span>
             </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {status.phase === "ready" ? (
+        <div className="space-y-4 border-t pt-5">
+          <div>
+            <h3 className="text-sm font-semibold">Approve another device</h3>
+            <p className="mt-1 max-w-[65ch] text-sm leading-6 text-[var(--text-secondary)]">
+              Paste the self-signed request shown on the joining device. Approval creates
+              an encrypted, device-bound grant and reserves a pending device for 30 minutes.
+              Only approve a request you initiated and recognize.
+            </p>
+          </div>
+          <Field>
+            <FieldLabel htmlFor="safeory-device-enrollment-request">
+              Joining-device request
+            </FieldLabel>
+            <Textarea
+              id="safeory-device-enrollment-request"
+              value={deviceRequest}
+              onChange={(event) => {
+                setDeviceRequest(event.target.value.trim())
+                setDeviceGrant("")
+                setGrantCopied(false)
+                setLocalError(null)
+              }}
+              className="min-h-28 font-mono text-xs"
+              autoComplete="off"
+              spellCheck={false}
+              placeholder="Paste the complete enrollment request JSON"
+              disabled={working}
+            />
+          </Field>
+          <Button
+            type="button"
+            variant="secondary"
+            disabled={working || deviceRequest.length === 0}
+            onClick={() => void run(async () => {
+              const grant = await onApproveDevice(deviceRequest)
+              setDeviceGrant(grant)
+              setGrantCopied(false)
+              return true
+            })}
+          >
+            Approve and create encrypted grant
+          </Button>
+          {deviceGrant !== "" ? (
+            <Field>
+              <FieldLabel htmlFor="safeory-device-enrollment-grant">
+                Encrypted device grant
+              </FieldLabel>
+              <Textarea
+                id="safeory-device-enrollment-grant"
+                readOnly
+                value={deviceGrant}
+                className="min-h-28 font-mono text-xs"
+                aria-describedby="safeory-device-enrollment-grant-description"
+              />
+              <FieldDescription id="safeory-device-enrollment-grant-description">
+                Return this complete package to the joining device. It contains no Account
+                Secret or vault plaintext and can be opened only by that device.
+              </FieldDescription>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={working}
+                onClick={() => void copyDeviceGrant()}
+              >
+                <HugeiconsIcon icon={Copy01Icon} strokeWidth={2} data-icon="inline-start" />
+                {grantCopied ? "Copied" : "Copy encrypted grant"}
+              </Button>
+            </Field>
           ) : null}
         </div>
       ) : null}

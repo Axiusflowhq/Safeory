@@ -6,7 +6,8 @@ Date: 2026-09-20
 
 Accepted and partially implemented. The cryptographic request/grant format,
 durable pending-device API state machine, and shared browser approval/acceptance
-coordinator are implemented; application wiring and reviewed product UX remain.
+coordinator are implemented. The web sync panel drives explicit approval and
+grant export; joining-device import, extension wiring, and reviewed UX remain.
 
 ## Context
 
@@ -105,10 +106,11 @@ Revocation and cancellation invalidate pending bearers. The existing immediate
 - The shared browser coordinator persists locally wrapped approval drafts before
   network mutation, retries exact server input, and verifies the approver against
   active server inventory before saving joining credentials. Web and extension
-  surfaces still need to drive that coordinator and consume transported grants.
+  surfaces still need to complete joining-device grant import; the web surface
+  now drives the approving half while extension wiring remains.
 - The API and database implement bounded pending-device creation, activation,
   cancellation, expiry, exact-input idempotency, approver-revocation
   invalidation, and minimal security-event state. The browser contracts layer
   consumes that state machine with encrypted durable drafts and fail-closed
-  inventory confirmation; application UX still needs to wire the flow before it
-  is production-ready.
+  inventory confirmation. Web approval is wired, but joining-device import and
+  extension UX must complete the flow before it is production-ready.

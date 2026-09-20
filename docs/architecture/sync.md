@@ -196,7 +196,9 @@ ordinary authentication, reserve bounded slots, expire, can be cancelled, and
 activate atomically with a minimal event. The shared browser coordinator wraps
 approval bearers under a non-extractable key before server mutation, resumes
 exact requests, and saves joining credentials only after matching the signed
-approver against active inventory. Application wiring and reviewed UX remain.
+approver against active inventory. Joining-device wiring and reviewed UX remain.
+The web sync panel now exposes explicit request approval and encrypted-grant
+copying; joining-device root import and extension UX remain.
 
 Email or Cognito access alone cannot deliver usable vault keys.
 

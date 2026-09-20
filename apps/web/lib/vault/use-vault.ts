@@ -19,6 +19,7 @@ import {
 import { newId, type VaultItemJson } from "./items"
 import {
   clearBrowserSyncConfiguration,
+  approveBrowserSyncDevice,
   enrollBrowserVaultSync,
   loadBrowserSyncConfiguration,
   resumeBrowserVaultSync,
@@ -458,6 +459,14 @@ export function useVault() {
     []
   )
 
+  const approveSyncDevice = useCallback(async (requestJson: string): Promise<string> => {
+    const connected = syncConnectionRef.current
+    if (connected === null) {
+      throw new Error("Encrypted sync must be connected before approving another device.")
+    }
+    return approveBrowserSyncDevice(connected, requestJson)
+  }, [])
+
   const retrySync = useCallback(async (): Promise<boolean> => {
     const session = sessionRef.current
     if (!session || !session.isUnlocked()) return false
@@ -860,6 +869,7 @@ export function useVault() {
     clearGeneratedSecret,
     generateAccountSecret,
     enrollSync,
+    approveSyncDevice,
     retrySync,
     resetInvalidSyncConfiguration,
     syncNow: performSync,

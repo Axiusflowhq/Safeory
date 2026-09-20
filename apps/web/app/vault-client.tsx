@@ -670,6 +670,7 @@ function VaultWorkspace({ vault }: { vault: Vault }) {
                 status={vault.syncStatus}
                 onGenerateAccountSecret={vault.generateAccountSecret}
                 onEnroll={vault.enrollSync}
+                onApproveDevice={vault.approveSyncDevice}
                 onRetry={vault.retrySync}
                 onResetInvalidConfiguration={vault.resetInvalidSyncConfiguration}
                 onSyncNow={vault.syncNow}
