@@ -29,8 +29,10 @@ try {
     "src/persistence.ts",
     "src/device-keys.ts",
     "src/session.ts",
+    "src/sync-compatibility.ts",
     "tests/device-keys.test.ts",
     "tests/session-durability.test.ts",
+    "tests/sync-compatibility.test.ts",
     "--outDir",
     output,
     "--module",
@@ -51,6 +53,7 @@ try {
       "--test",
       join(output, "tests", "device-keys.test.js"),
       join(output, "tests", "session-durability.test.js"),
+      join(output, "tests", "sync-compatibility.test.js"),
     ])
   }
 } finally {

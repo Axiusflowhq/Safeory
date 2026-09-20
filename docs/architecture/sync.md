@@ -7,8 +7,11 @@ membership/space domain contracts and a ciphertext-preserving single-owner
 migration plan. It also prepares and opens device-specific, generation-bound
 space-key envelopes; atomic server rotation fencing, mutation/pull protocol,
 and client persistence remain incomplete. The API exposes the canonical
-`vault-sync` compatibility advertisement and consumes its wire bounds, but its
-object endpoints have not yet migrated to the complete header/mutation format.
+`vault-sync` compatibility advertisement and consumes its wire bounds. The
+browser contracts package validates that bounded advertisement and negotiates
+protocol, object-header, and envelope versions before sync. Application wiring
+and migration of the API object endpoints to the complete header/mutation
+format remain incomplete.
 
 ## Goals
 

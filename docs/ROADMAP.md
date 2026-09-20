@@ -169,7 +169,9 @@ gates are green, including the generated-WASM Node smoke test.**
   matrix define independent protocol/mutation/header/envelope/payload versions.
   `vault-sync` implements negotiation plus bounded opaque object and mutation
   contracts. The API now exposes the canonical compatibility advertisement and
-  shares wire bounds; object-endpoint and browser adoption remain.
+  shares wire bounds. `@safeory/contracts` now validates and negotiates that
+  advertisement for browser clients; application wiring and object-endpoint
+  adoption remain.
 - Decide the high-entropy Account Secret/device-enrollment construction in an
   ADR, implement recovery/new-device enrollment, and test server-dump offline
   attack resistance. Cognito authentication alone is insufficient.
@@ -215,9 +217,10 @@ surface:
   PostgreSQL/Valkey/Garage/Mailpit; it is not the production hosting plan.
 - `vault-sync`: the versioned household/space domain and ciphertext-preserving
   local migration, rotatable space-key envelope, compatibility negotiation, and
-  opaque mutation contracts are implemented. Next integrate those contracts
-  with the API and clients. Exact revision preconditions reject stale overwrites;
-  conflict handling preserves
+  opaque mutation contracts are implemented. The shared browser contracts now
+  provide fail-closed compatibility preflight; next wire it into clients and
+  integrate scoped object mutations with the API. Exact revision preconditions
+  reject stale overwrites; conflict handling preserves
   both candidates or requires explicit
   user resolution rather than silently applying last-writer-wins. Tombstones
   and history remain bounded.

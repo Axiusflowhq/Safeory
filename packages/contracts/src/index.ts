@@ -41,3 +41,15 @@ export type {
   DeviceRegistrationV1,
   WasmDeviceIdentityLike,
 } from "./device-keys";
+export {
+  CURRENT_SYNC_COMPATIBILITY,
+  SyncCompatibilityError,
+  fetchSyncCompatibility,
+  negotiateSyncCompatibility,
+  parseSyncCompatibilityAdvertisement,
+} from "./sync-compatibility";
+export type {
+  CompatibilityAdvertisementV1,
+  NegotiatedCompatibility,
+  VersionRangeV1,
+} from "./sync-compatibility";

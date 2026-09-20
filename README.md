@@ -31,10 +31,12 @@ Implemented now:
   ciphertext-preserving migration plan, plus independently rotatable
   device-specific space-key envelopes and independently versioned opaque-sync
   compatibility/mutation contracts;
+- `@safeory/contracts` browser-side sync compatibility parsing, bounded endpoint
+  preflight, and independent protocol/header/envelope version negotiation;
 - pinned Rust/JS lockfiles and dependency/security CI policy.
 
-Not implemented yet: browser/API integration and server enforcement for the
-account/household/private-and-shared-space contracts, production Account
+Not implemented yet: browser/API object synchronization and server enforcement
+for the account/household/private-and-shared-space contracts, production Account
 Secret/device enrollment, end-to-end multi-device sync,
 remote collaboration and SecureLinks, TOTP/passkeys/security health/importers,
 the household Inbox and private document automation, recurring/cloud reminders,
