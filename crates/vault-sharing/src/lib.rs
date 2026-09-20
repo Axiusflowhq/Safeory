@@ -22,7 +22,14 @@ const PAIRING_FORMAT_VERSION: u16 = 1;
 const PAIRING_CHALLENGE_WRAP_INFO: &[u8] = b"safeory:v1:trusted-device-pairing-challenge-wrap";
 const PAIRING_CHALLENGE_AAD_DOMAIN: &[u8] = b"safeory:trusted-device-pairing-challenge:v1";
 const PAIRING_PROOF_DOMAIN: &[u8] = b"safeory:trusted-device-pairing:v1\0";
+const DEVICE_ENROLLMENT_FORMAT_VERSION: u16 = 1;
+const DEVICE_ENROLLMENT_ALGORITHM: &str = "x25519-hkdf-sha256+xchacha20poly1305+ed25519";
+const DEVICE_ENROLLMENT_REQUEST_DOMAIN: &[u8] = b"safeory:device-enrollment-request:v1\0";
+const DEVICE_ENROLLMENT_GRANT_DOMAIN: &[u8] = b"safeory:device-enrollment-grant:v1\0";
+const DEVICE_ENROLLMENT_WRAP_INFO: &[u8] = b"safeory:v1:device-enrollment-grant-wrap";
+const DEVICE_ENROLLMENT_AAD_DOMAIN: &[u8] = b"safeory:device-enrollment-grant-aad:v1\0";
 pub const MAX_SHARE_PLAINTEXT_BYTES: usize = 65_536;
+pub const MAX_DEVICE_ENROLLMENT_PLAINTEXT_BYTES: usize = 4 * 1024;
 
 #[derive(Error, Debug)]
 pub enum SharingError {
@@ -56,6 +63,10 @@ pub enum SharingError {
     InvalidSigningKey,
     #[error("trusted-device pairing proof signature is invalid")]
     InvalidPairingSignature,
+    #[error("device enrollment request is invalid or has been tampered with")]
+    InvalidDeviceEnrollmentRequest,
+    #[error("device enrollment grant is invalid or has been tampered with")]
+    InvalidDeviceEnrollmentGrant,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -170,6 +181,43 @@ pub struct PairingProofV1 {
     pub encryption_public: [u8; 32],
     pub verifier_ephemeral_public: [u8; 32],
     pub challenge: [u8; 32],
+    pub signature: Vec<u8>,
+}
+
+/// Self-signed request produced by the joining device. The signature binds its
+/// account/device identifiers and both public keys before an active device asks
+/// the service to register them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceEnrollmentRequestV1 {
+    pub format_version: u16,
+    pub request_id: Uuid,
+    pub account_id: Uuid,
+    pub device_id: Uuid,
+    pub encryption_public: [u8; 32],
+    pub signing_public: [u8; 32],
+    pub challenge: [u8; 32],
+    pub signature: Vec<u8>,
+}
+
+/// One-time credential package encrypted to the joining device and signed by
+/// the active device that authorized its server registration.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceEnrollmentGrantV1 {
+    pub format_version: u16,
+    pub algorithm: String,
+    pub request_id: Uuid,
+    pub account_id: Uuid,
+    pub joining_device_id: Uuid,
+    pub joining_encryption_public: [u8; 32],
+    pub joining_signing_public: [u8; 32],
+    pub approver_device_id: Uuid,
+    pub approver_encryption_public: [u8; 32],
+    pub approver_signing_public: [u8; 32],
+    pub ephemeral_public: [u8; 32],
+    pub nonce: [u8; 24],
+    pub ciphertext: Vec<u8>,
     pub signature: Vec<u8>,
 }
 
@@ -418,6 +466,361 @@ pub fn verify_pairing_proof(
         .verify_strict(&transcript, &signature)
         .map_err(|_| SharingError::InvalidPairingSignature)?;
     Ok(proof.signing_public)
+}
+
+/// Create a portable request that proves possession of the joining device's
+/// Ed25519 key and binds the claimed X25519 recipient key into the signature.
+pub fn create_device_enrollment_request(
+    account_id: Uuid,
+    device_id: Uuid,
+    encryption_key: &DeviceKeyPair,
+    signing_key: &DeviceSigningKeyPair,
+) -> Result<DeviceEnrollmentRequestV1, SharingError> {
+    if account_id.is_nil() || device_id.is_nil() {
+        return Err(SharingError::InvalidDeviceEnrollmentRequest);
+    }
+    let request_id = Uuid::new_v4();
+    let encryption_public = encryption_key.public_bytes();
+    let signing_public = signing_key.public_bytes();
+    let mut challenge = [0u8; 32];
+    getrandom::fill(&mut challenge).map_err(|_| SharingError::Random)?;
+    let transcript = device_enrollment_request_transcript(
+        request_id,
+        account_id,
+        device_id,
+        &encryption_public,
+        &signing_public,
+        &challenge,
+    );
+    let signature = signing_key.signing.sign(&transcript).to_bytes().to_vec();
+    Ok(DeviceEnrollmentRequestV1 {
+        format_version: DEVICE_ENROLLMENT_FORMAT_VERSION,
+        request_id,
+        account_id,
+        device_id,
+        encryption_public,
+        signing_public,
+        challenge,
+        signature,
+    })
+}
+
+/// Verify the joining device's self-signed request before using its public keys
+/// in a server registration or encrypted credential grant.
+pub fn verify_device_enrollment_request(
+    request: &DeviceEnrollmentRequestV1,
+) -> Result<(), SharingError> {
+    if request.format_version != DEVICE_ENROLLMENT_FORMAT_VERSION
+        || request.request_id.is_nil()
+        || request.account_id.is_nil()
+        || request.device_id.is_nil()
+    {
+        return Err(SharingError::InvalidDeviceEnrollmentRequest);
+    }
+    let verifying_key = VerifyingKey::from_bytes(&request.signing_public)
+        .map_err(|_| SharingError::InvalidDeviceEnrollmentRequest)?;
+    if verifying_key.is_weak() {
+        return Err(SharingError::InvalidDeviceEnrollmentRequest);
+    }
+    let signature_bytes: [u8; 64] = request
+        .signature
+        .as_slice()
+        .try_into()
+        .map_err(|_| SharingError::InvalidDeviceEnrollmentRequest)?;
+    let transcript = device_enrollment_request_transcript(
+        request.request_id,
+        request.account_id,
+        request.device_id,
+        &request.encryption_public,
+        &request.signing_public,
+        &request.challenge,
+    );
+    verifying_key
+        .verify_strict(&transcript, &Signature::from_bytes(&signature_bytes))
+        .map_err(|_| SharingError::InvalidDeviceEnrollmentRequest)
+}
+
+/// Encrypt a server-issued device credential to a verified joining-device
+/// request and sign the complete grant with the active approver's Ed25519 key.
+pub fn seal_device_enrollment_grant(
+    request: &DeviceEnrollmentRequestV1,
+    approver_device_id: Uuid,
+    approver_encryption_key: &DeviceKeyPair,
+    approver_signing_key: &DeviceSigningKeyPair,
+    plaintext: &[u8],
+) -> Result<DeviceEnrollmentGrantV1, SharingError> {
+    verify_device_enrollment_request(request)?;
+    if approver_device_id.is_nil()
+        || approver_device_id == request.device_id
+        || plaintext.is_empty()
+        || plaintext.len() > MAX_DEVICE_ENROLLMENT_PLAINTEXT_BYTES
+    {
+        return Err(SharingError::InvalidDeviceEnrollmentGrant);
+    }
+    let recipient = PublicKey::from(request.encryption_public);
+    let ephemeral = DeviceKeyPair::generate()?;
+    let ephemeral_shared = ephemeral.diffie_hellman(&recipient)?;
+    let approver_shared = approver_encryption_key.diffie_hellman(&recipient)?;
+    let approver_encryption_public = approver_encryption_key.public_bytes();
+    let approver_signing_public = approver_signing_key.public_bytes();
+    let ephemeral_public = ephemeral.public_bytes();
+    let key = derive_device_enrollment_key(
+        request,
+        approver_device_id,
+        &approver_encryption_public,
+        &approver_signing_public,
+        &ephemeral_public,
+        &ephemeral_shared,
+        &approver_shared,
+    )?;
+    let aad = device_enrollment_grant_aad(
+        request,
+        approver_device_id,
+        &approver_encryption_public,
+        &approver_signing_public,
+        &ephemeral_public,
+    );
+    let mut nonce = [0u8; 24];
+    getrandom::fill(&mut nonce).map_err(|_| SharingError::Random)?;
+    let ciphertext = XChaCha20Poly1305::new((&*key).into())
+        .encrypt(
+            nonce_ref(&nonce)?,
+            Payload {
+                msg: plaintext,
+                aad: &aad,
+            },
+        )
+        .map_err(|_| SharingError::Encryption)?;
+    let transcript = device_enrollment_grant_transcript(
+        request,
+        approver_device_id,
+        &approver_encryption_public,
+        &approver_signing_public,
+        &ephemeral_public,
+        &nonce,
+        &ciphertext,
+    );
+    let signature = approver_signing_key
+        .signing
+        .sign(&transcript)
+        .to_bytes()
+        .to_vec();
+    Ok(DeviceEnrollmentGrantV1 {
+        format_version: DEVICE_ENROLLMENT_FORMAT_VERSION,
+        algorithm: DEVICE_ENROLLMENT_ALGORITHM.to_owned(),
+        request_id: request.request_id,
+        account_id: request.account_id,
+        joining_device_id: request.device_id,
+        joining_encryption_public: request.encryption_public,
+        joining_signing_public: request.signing_public,
+        approver_device_id,
+        approver_encryption_public,
+        approver_signing_public,
+        ephemeral_public,
+        nonce,
+        ciphertext,
+        signature,
+    })
+}
+
+/// Verify and decrypt an enrollment grant on the joining device. The caller
+/// must subsequently authenticate with the enclosed credential and confirm the
+/// approver identity against the server's active-device inventory.
+pub fn open_device_enrollment_grant(
+    request: &DeviceEnrollmentRequestV1,
+    grant: &DeviceEnrollmentGrantV1,
+    joining_encryption_key: &DeviceKeyPair,
+    joining_signing_key: &DeviceSigningKeyPair,
+) -> Result<Zeroizing<Vec<u8>>, SharingError> {
+    verify_device_enrollment_request(request)?;
+    if grant.format_version != DEVICE_ENROLLMENT_FORMAT_VERSION
+        || grant.algorithm != DEVICE_ENROLLMENT_ALGORITHM
+        || grant.request_id != request.request_id
+        || grant.account_id != request.account_id
+        || grant.joining_device_id != request.device_id
+        || grant.joining_encryption_public != request.encryption_public
+        || grant.joining_signing_public != request.signing_public
+        || joining_encryption_key.public_bytes() != request.encryption_public
+        || joining_signing_key.public_bytes() != request.signing_public
+        || grant.approver_device_id.is_nil()
+        || grant.approver_device_id == request.device_id
+        || grant.ciphertext.len() <= 16
+        || grant.ciphertext.len() > MAX_DEVICE_ENROLLMENT_PLAINTEXT_BYTES + 16
+    {
+        return Err(SharingError::InvalidDeviceEnrollmentGrant);
+    }
+    let verifying_key = VerifyingKey::from_bytes(&grant.approver_signing_public)
+        .map_err(|_| SharingError::InvalidDeviceEnrollmentGrant)?;
+    if verifying_key.is_weak() {
+        return Err(SharingError::InvalidDeviceEnrollmentGrant);
+    }
+    let signature_bytes: [u8; 64] = grant
+        .signature
+        .as_slice()
+        .try_into()
+        .map_err(|_| SharingError::InvalidDeviceEnrollmentGrant)?;
+    let transcript = device_enrollment_grant_transcript(
+        request,
+        grant.approver_device_id,
+        &grant.approver_encryption_public,
+        &grant.approver_signing_public,
+        &grant.ephemeral_public,
+        &grant.nonce,
+        &grant.ciphertext,
+    );
+    verifying_key
+        .verify_strict(&transcript, &Signature::from_bytes(&signature_bytes))
+        .map_err(|_| SharingError::InvalidDeviceEnrollmentGrant)?;
+
+    let ephemeral = PublicKey::from(grant.ephemeral_public);
+    let approver = PublicKey::from(grant.approver_encryption_public);
+    let ephemeral_shared = joining_encryption_key.diffie_hellman(&ephemeral)?;
+    let approver_shared = joining_encryption_key.diffie_hellman(&approver)?;
+    let key = derive_device_enrollment_key(
+        request,
+        grant.approver_device_id,
+        &grant.approver_encryption_public,
+        &grant.approver_signing_public,
+        &grant.ephemeral_public,
+        &ephemeral_shared,
+        &approver_shared,
+    )?;
+    let aad = device_enrollment_grant_aad(
+        request,
+        grant.approver_device_id,
+        &grant.approver_encryption_public,
+        &grant.approver_signing_public,
+        &grant.ephemeral_public,
+    );
+    let plaintext = XChaCha20Poly1305::new((&*key).into())
+        .decrypt(
+            nonce_ref(&grant.nonce)?,
+            Payload {
+                msg: &grant.ciphertext,
+                aad: &aad,
+            },
+        )
+        .map_err(|_| SharingError::Authentication)?;
+    if plaintext.is_empty() || plaintext.len() > MAX_DEVICE_ENROLLMENT_PLAINTEXT_BYTES {
+        return Err(SharingError::InvalidDeviceEnrollmentGrant);
+    }
+    Ok(Zeroizing::new(plaintext))
+}
+
+fn device_enrollment_request_transcript(
+    request_id: Uuid,
+    account_id: Uuid,
+    device_id: Uuid,
+    encryption_public: &[u8; 32],
+    signing_public: &[u8; 32],
+    challenge: &[u8; 32],
+) -> Vec<u8> {
+    let mut transcript = Vec::with_capacity(DEVICE_ENROLLMENT_REQUEST_DOMAIN.len() + 146);
+    transcript.extend_from_slice(DEVICE_ENROLLMENT_REQUEST_DOMAIN);
+    transcript.extend_from_slice(&DEVICE_ENROLLMENT_FORMAT_VERSION.to_be_bytes());
+    transcript.extend_from_slice(request_id.as_bytes());
+    transcript.extend_from_slice(account_id.as_bytes());
+    transcript.extend_from_slice(device_id.as_bytes());
+    transcript.extend_from_slice(encryption_public);
+    transcript.extend_from_slice(signing_public);
+    transcript.extend_from_slice(challenge);
+    transcript
+}
+
+fn device_enrollment_grant_context(
+    request: &DeviceEnrollmentRequestV1,
+    approver_device_id: Uuid,
+    approver_encryption_public: &[u8; 32],
+    approver_signing_public: &[u8; 32],
+    ephemeral_public: &[u8; 32],
+) -> Vec<u8> {
+    let mut context = Vec::with_capacity(256);
+    context.extend_from_slice(&DEVICE_ENROLLMENT_FORMAT_VERSION.to_be_bytes());
+    context.extend_from_slice(DEVICE_ENROLLMENT_ALGORITHM.as_bytes());
+    context.extend_from_slice(request.request_id.as_bytes());
+    context.extend_from_slice(request.account_id.as_bytes());
+    context.extend_from_slice(request.device_id.as_bytes());
+    context.extend_from_slice(&request.encryption_public);
+    context.extend_from_slice(&request.signing_public);
+    context.extend_from_slice(&request.challenge);
+    context.extend_from_slice(approver_device_id.as_bytes());
+    context.extend_from_slice(approver_encryption_public);
+    context.extend_from_slice(approver_signing_public);
+    context.extend_from_slice(ephemeral_public);
+    context
+}
+
+fn device_enrollment_grant_aad(
+    request: &DeviceEnrollmentRequestV1,
+    approver_device_id: Uuid,
+    approver_encryption_public: &[u8; 32],
+    approver_signing_public: &[u8; 32],
+    ephemeral_public: &[u8; 32],
+) -> Vec<u8> {
+    let context = device_enrollment_grant_context(
+        request,
+        approver_device_id,
+        approver_encryption_public,
+        approver_signing_public,
+        ephemeral_public,
+    );
+    let mut aad = Vec::with_capacity(DEVICE_ENROLLMENT_AAD_DOMAIN.len() + context.len());
+    aad.extend_from_slice(DEVICE_ENROLLMENT_AAD_DOMAIN);
+    aad.extend_from_slice(&context);
+    aad
+}
+
+fn derive_device_enrollment_key(
+    request: &DeviceEnrollmentRequestV1,
+    approver_device_id: Uuid,
+    approver_encryption_public: &[u8; 32],
+    approver_signing_public: &[u8; 32],
+    ephemeral_public: &[u8; 32],
+    ephemeral_shared: &[u8; 32],
+    approver_shared: &[u8; 32],
+) -> Result<Zeroizing<[u8; 32]>, SharingError> {
+    let context = device_enrollment_grant_context(
+        request,
+        approver_device_id,
+        approver_encryption_public,
+        approver_signing_public,
+        ephemeral_public,
+    );
+    let salt = Sha256::digest(&context);
+    let mut key_material = Zeroizing::new([0u8; 64]);
+    key_material[..32].copy_from_slice(ephemeral_shared);
+    key_material[32..].copy_from_slice(approver_shared);
+    let hk = Hkdf::<Sha256>::new(Some(&salt), key_material.as_ref());
+    let mut output = Zeroizing::new([0u8; 32]);
+    hk.expand(DEVICE_ENROLLMENT_WRAP_INFO, output.as_mut())
+        .map_err(|_| SharingError::KeyDerivation)?;
+    Ok(output)
+}
+
+fn device_enrollment_grant_transcript(
+    request: &DeviceEnrollmentRequestV1,
+    approver_device_id: Uuid,
+    approver_encryption_public: &[u8; 32],
+    approver_signing_public: &[u8; 32],
+    ephemeral_public: &[u8; 32],
+    nonce: &[u8; 24],
+    ciphertext: &[u8],
+) -> Vec<u8> {
+    let context = device_enrollment_grant_context(
+        request,
+        approver_device_id,
+        approver_encryption_public,
+        approver_signing_public,
+        ephemeral_public,
+    );
+    let mut transcript =
+        Vec::with_capacity(DEVICE_ENROLLMENT_GRANT_DOMAIN.len() + context.len() + 32 + 24);
+    transcript.extend_from_slice(DEVICE_ENROLLMENT_GRANT_DOMAIN);
+    transcript.extend_from_slice(&context);
+    transcript.extend_from_slice(nonce);
+    transcript.extend_from_slice(&(ciphertext.len() as u64).to_be_bytes());
+    transcript.extend_from_slice(&Sha256::digest(ciphertext));
+    transcript
 }
 
 fn derive_pairing_challenge_key(
@@ -1049,5 +1452,136 @@ mod tests {
 
         assert_ne!(first.ephemeral_public, second.ephemeral_public);
         assert_ne!(first.ciphertext, second.ciphertext);
+    }
+
+    #[test]
+    fn device_enrollment_grant_is_signed_and_recipient_confidential() {
+        let account_id = Uuid::new_v4();
+        let joining_device_id = Uuid::new_v4();
+        let joining_encryption = DeviceKeyPair::generate().expect("joining encryption key");
+        let joining_signing = DeviceSigningKeyPair::generate().expect("joining signing key");
+        let request = create_device_enrollment_request(
+            account_id,
+            joining_device_id,
+            &joining_encryption,
+            &joining_signing,
+        )
+        .expect("request");
+        verify_device_enrollment_request(&request).expect("verify request");
+
+        let approver_device_id = Uuid::new_v4();
+        let approver_encryption = DeviceKeyPair::generate().expect("approver encryption key");
+        let approver_signing = DeviceSigningKeyPair::generate().expect("approver signing key");
+        let credential = br#"{"account_id":"test","device_token":"secret"}"#;
+        let grant = seal_device_enrollment_grant(
+            &request,
+            approver_device_id,
+            &approver_encryption,
+            &approver_signing,
+            credential,
+        )
+        .expect("seal grant");
+        let opened =
+            open_device_enrollment_grant(&request, &grant, &joining_encryption, &joining_signing)
+                .expect("open grant");
+
+        assert_eq!(opened.as_slice(), credential);
+        assert_eq!(grant.account_id, account_id);
+        assert_eq!(grant.joining_device_id, joining_device_id);
+        assert_eq!(grant.approver_device_id, approver_device_id);
+    }
+
+    #[test]
+    fn device_enrollment_rejects_request_and_grant_context_substitution() {
+        let joining_encryption = DeviceKeyPair::generate().expect("joining encryption key");
+        let joining_signing = DeviceSigningKeyPair::generate().expect("joining signing key");
+        let request = create_device_enrollment_request(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &joining_encryption,
+            &joining_signing,
+        )
+        .expect("request");
+        let approver_encryption = DeviceKeyPair::generate().expect("approver encryption key");
+        let approver_signing = DeviceSigningKeyPair::generate().expect("approver signing key");
+        let grant = seal_device_enrollment_grant(
+            &request,
+            Uuid::new_v4(),
+            &approver_encryption,
+            &approver_signing,
+            b"credential",
+        )
+        .expect("grant");
+
+        let mut substituted_request = request.clone();
+        substituted_request.account_id = Uuid::new_v4();
+        assert!(matches!(
+            verify_device_enrollment_request(&substituted_request),
+            Err(SharingError::InvalidDeviceEnrollmentRequest)
+        ));
+
+        let mut substituted_grant = grant.clone();
+        substituted_grant.approver_device_id = Uuid::new_v4();
+        assert!(matches!(
+            open_device_enrollment_grant(
+                &request,
+                &substituted_grant,
+                &joining_encryption,
+                &joining_signing,
+            ),
+            Err(SharingError::InvalidDeviceEnrollmentGrant)
+        ));
+
+        let mut tampered_ciphertext = grant;
+        tampered_ciphertext.ciphertext[0] ^= 1;
+        assert!(matches!(
+            open_device_enrollment_grant(
+                &request,
+                &tampered_ciphertext,
+                &joining_encryption,
+                &joining_signing,
+            ),
+            Err(SharingError::InvalidDeviceEnrollmentGrant)
+        ));
+    }
+
+    #[test]
+    fn device_enrollment_rejects_wrong_recipient_and_oversized_credentials() {
+        let joining_encryption = DeviceKeyPair::generate().expect("joining encryption key");
+        let joining_signing = DeviceSigningKeyPair::generate().expect("joining signing key");
+        let request = create_device_enrollment_request(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &joining_encryption,
+            &joining_signing,
+        )
+        .expect("request");
+        let approver_encryption = DeviceKeyPair::generate().expect("approver encryption key");
+        let approver_signing = DeviceSigningKeyPair::generate().expect("approver signing key");
+        let approver_device_id = Uuid::new_v4();
+        assert!(matches!(
+            seal_device_enrollment_grant(
+                &request,
+                approver_device_id,
+                &approver_encryption,
+                &approver_signing,
+                &vec![0u8; MAX_DEVICE_ENROLLMENT_PLAINTEXT_BYTES + 1],
+            ),
+            Err(SharingError::InvalidDeviceEnrollmentGrant)
+        ));
+
+        let grant = seal_device_enrollment_grant(
+            &request,
+            approver_device_id,
+            &approver_encryption,
+            &approver_signing,
+            b"credential",
+        )
+        .expect("grant");
+        let outsider_encryption = DeviceKeyPair::generate().expect("outsider encryption key");
+        assert!(matches!(
+            open_device_enrollment_grant(&request, &grant, &outsider_encryption, &joining_signing,),
+            Err(SharingError::InvalidDeviceEnrollmentGrant)
+        ));
     }
 }

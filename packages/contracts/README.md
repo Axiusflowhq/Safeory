@@ -42,6 +42,12 @@ cross-tab version fence as local mutations.
 account/household/private-space migration. It persists random identifiers before
 topology publication, so network or local-state interruptions retry the
 identical topology rather than orphaning a second household or space.
+The browser device-key adapter also exposes ADR 0007's approved-device
+request/grant operations without exporting stored private keys: joining requests
+are self-signed, credential grants are approver-signed and X25519-encrypted to
+the joining device, and transient credential buffers are cleared after use.
+Durable pending-device activation and inventory confirmation remain application
+and server coordination responsibilities.
 `DurableVaultSyncRuntime` composes pull acceptance, restart-time local change
 harvesting, and ordered upload. The harvester derives stable operation IDs from
 encrypted content, continues already queued revision chains, and carries only

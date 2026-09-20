@@ -69,9 +69,9 @@ Secret.
   passphrase plus Account Secret before it can accept synchronized ciphertext.
 - An existing-device approval path may deliver an AccountRootKey/space-key
   capsule only after dual X25519/Ed25519 possession proof and explicit user
-  approval. Its signed capsule and server state machine require a follow-up ADR
-  or amendment; the current unauthenticated `sender_public` share field is not
-  sufficient authorization.
+  approval. ADR 0007 defines the signed, recipient-encrypted device-credential
+  handoff and pending activation state; the current unauthenticated
+  `sender_public` share field is not sufficient authorization.
 - Existing local vaults migrate without changing item ciphertext: unlock,
   generate an Account Secret, create the remote root envelope, and retain the
   existing local root wrap.

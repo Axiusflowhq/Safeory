@@ -82,9 +82,11 @@ Rule: cloud integration starts only after the local platform below is stable.
    direct discovery. Web and extension development enrollment now generate and
    confirm the Account Secret, re-authenticate before account creation, and
    durably queue the account bootstrap envelope before publishing topology.
-   Production identity, pending-device approval, signed existing-device transfer,
-   hosted recovery, and external cryptographic review remain. Cognito identity
-   must not become the sole protection for remotely stored root wraps.
+   ADR 0007 now defines and implements the signed, recipient-encrypted
+   device-credential handoff core. Production identity, durable pending-device
+   activation and UX, hosted recovery, and external cryptographic review remain.
+   Cognito identity must not become the sole protection for remotely stored root
+   wraps.
 3. Integrate the implemented browser compatibility/opaque transport client and
    credential-free durable push outbox/pull cursor coordinator into web/extension
    application mutation and acceptance flows. A strict encrypted-item adapter now

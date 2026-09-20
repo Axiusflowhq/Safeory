@@ -305,7 +305,47 @@ if (!wrongAccountFailed || wrongAccountDevice.isInitialized()) {
   throw new Error("remote root wrap must reject account substitution");
 }
 
-// 12. Recovery kit: generate, install, verify, unlock fresh instance with it.
+// 12. Approved-device credential handoff is request-bound, recipient-confidential,
+// and signed by the active approving device.
+const joiningIdentity = WasmDeviceIdentity.generate(
+  "66666666-6666-4666-8666-666666666666",
+);
+const approverIdentity = WasmDeviceIdentity.generate(
+  "77777777-7777-4777-8777-777777777777",
+);
+const enrollmentRequest = joiningIdentity.createDeviceEnrollmentRequestJson(accountId);
+const credentialPackage = new TextEncoder().encode(JSON.stringify({
+  account_id: accountId,
+  device_id: "66666666-6666-4666-8666-666666666666",
+  device_token: `sfo_dev_v1_${"a".repeat(64)}`,
+}));
+const enrollmentGrant = approverIdentity.sealDeviceEnrollmentGrantJson(
+  enrollmentRequest,
+  credentialPackage,
+);
+const openedCredentialPackage = joiningIdentity.openDeviceEnrollmentGrant(
+  enrollmentRequest,
+  enrollmentGrant,
+);
+if (new TextDecoder().decode(openedCredentialPackage) !== new TextDecoder().decode(credentialPackage)) {
+  throw new Error("approved-device credential grant round trip failed");
+}
+const tamperedEnrollmentGrant = JSON.parse(enrollmentGrant);
+tamperedEnrollmentGrant.ciphertext[0] ^= 1;
+let tamperedEnrollmentGrantFailed = false;
+try {
+  joiningIdentity.openDeviceEnrollmentGrant(
+    enrollmentRequest,
+    JSON.stringify(tamperedEnrollmentGrant),
+  );
+} catch {
+  tamperedEnrollmentGrantFailed = true;
+}
+if (!tamperedEnrollmentGrantFailed) {
+  throw new Error("tampered approved-device credential grant must fail");
+}
+
+// 13. Recovery kit: generate, install, verify, unlock fresh instance with it.
 const secretHex = WasmVault.generateRecoverySecret();
 if (!/^[0-9a-f]{64}$/.test(secretHex)) throw new Error("recovery secret should be 64 hex chars");
 restored.installRecoveryKit(secretHex);

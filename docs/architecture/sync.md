@@ -179,11 +179,20 @@ coordinator remain.
 ### Additional device
 
 1. The new device authenticates the hosted account but has no content key.
-2. An active device or reviewed recovery path authorizes enrollment.
-3. The new device proves possession of its encryption/signing keys.
-4. An authorized client wraps only the required account/space keys to that
-   device.
-5. The service activates the device and records a minimal security event.
+2. It creates ADR 0007's self-signed request binding its account/device UUIDs
+   and X25519/Ed25519 public keys.
+3. An active device or reviewed recovery path explicitly authorizes enrollment
+   and signs a recipient-encrypted device-credential grant.
+4. The new device proves X25519 possession by opening and using that grant, then
+   verifies the approver against the authenticated active-device inventory.
+5. The service atomically activates the pending device and records a minimal
+   security event before ordinary sync access is allowed.
+6. The joining device supplies its master passphrase and Account Secret to open
+   the account bootstrap inside WASM and install a new device-local root wrap.
+
+The request/grant cryptographic core and browser secure-key-store adapter are
+implemented. Durable pending-device server state, expiry/cancellation,
+application coordination, and reviewed UX remain.
 
 Email or Cognito access alone cannot deliver usable vault keys.
 

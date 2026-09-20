@@ -63,6 +63,15 @@ without storing or transmitting the secret itself. Production identity,
 approved-device and recovery UX, signed existing-device transfer, server-dump
 validation, and external review remain required before production claims.
 
+ADR 0007's approved-device handoff core is implemented in `vault-sharing` and
+`vault-wasm`. A self-signed joining request binds account/device context and both
+joining public keys. The credential grant combines ephemeral and approver-static
+X25519 exchanges, encrypts only to the joining device, and carries an Ed25519
+signature over its complete context and ciphertext digest. Browser adapters
+unwrap stored device private keys only for the operation and immediately clear
+transient copies. Durable pending activation, inventory confirmation, and UX are
+still required before this primitive becomes a production enrollment path.
+
 The combined product also requires independently rotatable space keys:
 
 ```text

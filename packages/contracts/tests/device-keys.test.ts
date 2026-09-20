@@ -50,6 +50,17 @@ function fakeIdentity(deviceId: string, expectedPrivate: Uint8Array): WasmDevice
       };
       return JSON.stringify(proof);
     },
+    createDeviceEnrollmentRequestJson: (accountId: string) =>
+      JSON.stringify({ account_id: accountId, device_id: deviceId }),
+    sealDeviceEnrollmentGrantJson: (requestJson: string, credentialPackage: Uint8Array) =>
+      JSON.stringify({
+        request: JSON.parse(requestJson) as unknown,
+        credential: Array.from(credentialPackage),
+      }),
+    openDeviceEnrollmentGrant: (_requestJson: string, grantJson: string) => {
+      const grant = JSON.parse(grantJson) as { credential: number[] };
+      return Uint8Array.from(grant.credential);
+    },
   };
 }
 
@@ -170,4 +181,26 @@ test("browser device identity deletion removes the local responder key", async (
   await store.deleteIdentity(DEVICE_ID);
   assert.deepEqual(await store.listIdentities(), []);
   await assert.rejects(store.answerPairingChallenge(challenge()), /does not hold the private keys/);
+});
+
+test("browser device key store performs enrollment crypto without exposing stored private keys", async () => {
+  const storage = new MemoryStorage();
+  const store = new BrowserDeviceKeyStore(new FakeFactory(), storage, crypto);
+  await store.createIdentity(DEVICE_ID);
+  const accountId = "77777777-7777-4777-8777-777777777777";
+  const request = await store.createDeviceEnrollmentRequest(DEVICE_ID, accountId);
+  assert.deepEqual(JSON.parse(request), { account_id: accountId, device_id: DEVICE_ID });
+
+  const credential = new TextEncoder().encode("device credential");
+  const grant = await store.sealDeviceEnrollmentGrant(DEVICE_ID, request, credential);
+  const opened = await store.openDeviceEnrollmentGrant(DEVICE_ID, request, grant);
+
+  assert.equal(new TextDecoder().decode(opened), "device credential");
+  assert.equal(new TextDecoder().decode(credential), "device credential");
+  const saved = storage.records.get(DEVICE_ID);
+  assert.ok(saved);
+  assert.notDeepEqual(
+    Array.from(new Uint8Array(saved.ciphertext).subarray(0, 64)),
+    Array.from(privateMaterial()),
+  );
 });

@@ -21,6 +21,9 @@ export interface WasmDeviceIdentityLike {
   registrationJson(): string;
   exportPrivateKeyBytes(): Uint8Array;
   answerPairingChallengeJson(challengeJson: string): string;
+  createDeviceEnrollmentRequestJson(accountId: string): string;
+  sealDeviceEnrollmentGrantJson(requestJson: string, credentialPackage: Uint8Array): string;
+  openDeviceEnrollmentGrant(requestJson: string, grantJson: string): Uint8Array;
   free?: () => void;
 }
 
@@ -395,18 +398,72 @@ export class BrowserDeviceKeyStore {
     await this.storage.deleteIdentity(deviceId);
   }
 
+  async createDeviceEnrollmentRequest(deviceId: string, accountId: string): Promise<string> {
+    return this.withIdentity(deviceId, (identity) =>
+      identity.createDeviceEnrollmentRequestJson(accountId),
+    );
+  }
+
+  async sealDeviceEnrollmentGrant(
+    approverDeviceId: string,
+    requestJson: string,
+    credentialPackage: Uint8Array,
+  ): Promise<string> {
+    const input = Uint8Array.from(credentialPackage);
+    try {
+      return await this.withIdentity(approverDeviceId, (identity) =>
+        identity.sealDeviceEnrollmentGrantJson(requestJson, input),
+      );
+    } finally {
+      input.fill(0);
+    }
+  }
+
+  async openDeviceEnrollmentGrant(
+    joiningDeviceId: string,
+    requestJson: string,
+    grantJson: string,
+  ): Promise<Uint8Array> {
+    return this.withIdentity(joiningDeviceId, (identity) => {
+      const plaintext = identity.openDeviceEnrollmentGrant(requestJson, grantJson);
+      try {
+        return Uint8Array.from(plaintext);
+      } finally {
+        plaintext.fill(0);
+      }
+    });
+  }
+
   async answerPairingChallenge(challenge: PairingChallengeV1): Promise<PairingProofV1> {
     if (!isUuid(challenge.device_id)) throw new Error("pairing challenge device identifier is invalid");
-    const record = await this.storage.getIdentity(challenge.device_id);
+    return this.withIdentity(
+      challenge.device_id,
+      (identity, registration) => {
+        if (bytesToHex(challenge.encryption_public) !== registration.encryption_public_key_hex) {
+          throw new Error("Pairing challenge does not match this browser device identity.");
+        }
+        return JSON.parse(
+          identity.answerPairingChallengeJson(JSON.stringify(challenge)),
+        ) as PairingProofV1;
+      },
+      "Unable to answer the trusted-device pairing challenge.",
+    );
+  }
+
+  private async withIdentity<T>(
+    deviceId: string,
+    operation: (identity: WasmDeviceIdentityLike, registration: DeviceRegistrationV1) => T,
+    keyFailureMessage?: string,
+  ): Promise<T> {
+    if (!isUuid(deviceId)) throw new Error("device identifier is invalid");
+    const record = await this.storage.getIdentity(deviceId);
     if (record === null) {
       throw new Error("This browser does not hold the private keys for the requested device.");
-    }
-    if (bytesToHex(challenge.encryption_public) !== record.encryptionPublicKeyHex) {
-      throw new Error("Pairing challenge does not match this browser device identity.");
     }
     const wrappingKey = await this.storage.getOrCreateWrappingKey();
     let privateBytes: Uint8Array | null = null;
     let identity: WasmDeviceIdentityLike | null = null;
+    let identityReady = false;
     try {
       const plaintext = await this.cryptography.subtle.decrypt(
         {
@@ -430,9 +487,13 @@ export class BrowserDeviceKeyStore {
       ) {
         throw new Error("saved browser device identity failed its public-key integrity check");
       }
-      return JSON.parse(identity.answerPairingChallengeJson(JSON.stringify(challenge))) as PairingProofV1;
+      identityReady = true;
+      return operation(identity, registration);
     } catch (error) {
-      throw new Error("Unable to answer the trusted-device pairing challenge.", { cause: error });
+      if (!identityReady && keyFailureMessage !== undefined) {
+        throw new Error(keyFailureMessage, { cause: error });
+      }
+      throw error;
     } finally {
       privateBytes?.fill(0);
       identity?.free?.();

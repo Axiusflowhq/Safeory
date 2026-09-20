@@ -10,8 +10,9 @@ use vault_crypto::{
     SessionResumeSecret, SessionResumeWrapV1,
 };
 use vault_sharing::{
-    DeviceKeyPair, DeviceSigningKeyPair, PairingChallengeV1, PairingProofV1,
-    answer_pairing_challenge,
+    DeviceEnrollmentGrantV1, DeviceEnrollmentRequestV1, DeviceKeyPair, DeviceSigningKeyPair,
+    PairingChallengeV1, PairingProofV1, answer_pairing_challenge, create_device_enrollment_request,
+    open_device_enrollment_grant, seal_device_enrollment_grant,
 };
 
 use crate::{BrowserVault, DeadlineEntry, WasmVaultError, generate_strong_password};
@@ -19,6 +20,8 @@ use crate::{BrowserVault, DeadlineEntry, WasmVaultError, generate_strong_passwor
 const SESSION_RESUME_PAYLOAD_VERSION: u16 = 2;
 const READABLE_EXPORT_FORMAT_VERSION: u16 = 1;
 const REMOTE_ROOT_WRAP_MAX_JSON_BYTES: usize = 4 * 1024;
+const DEVICE_ENROLLMENT_REQUEST_MAX_JSON_BYTES: usize = 8 * 1024;
+const DEVICE_ENROLLMENT_GRANT_MAX_JSON_BYTES: usize = 32 * 1024;
 
 fn js_err(e: WasmVaultError) -> JsValue {
     JsValue::from_str(&e.to_string())
@@ -134,6 +137,75 @@ impl WasmDeviceIdentity {
         let proof = answer_pairing_challenge(&challenge, &self.encryption, &self.signing)
             .map_err(|error| js_err(WasmVaultError::Sharing(error)))?;
         serde_json::to_string(&proof).map_err(|_| ser_err())
+    }
+
+    /// Create the self-signed public request carried from a joining device to
+    /// an already-active approving device.
+    #[wasm_bindgen(js_name = createDeviceEnrollmentRequestJson)]
+    pub fn create_device_enrollment_request_json(
+        &self,
+        account_id: &str,
+    ) -> Result<String, JsValue> {
+        let account_id = parse_uuid(account_id)?;
+        let request = create_device_enrollment_request(
+            account_id,
+            self.device_id,
+            &self.encryption,
+            &self.signing,
+        )
+        .map_err(|error| js_err(WasmVaultError::Sharing(error)))?;
+        serde_json::to_string(&request).map_err(|_| ser_err())
+    }
+
+    /// Verify a joining-device request, encrypt an opaque credential package
+    /// to its X25519 key, and sign the grant with this approving identity.
+    #[wasm_bindgen(js_name = sealDeviceEnrollmentGrantJson)]
+    pub fn seal_device_enrollment_grant_json(
+        &self,
+        request_json: &str,
+        credential_package: &[u8],
+    ) -> Result<String, JsValue> {
+        if request_json.len() > DEVICE_ENROLLMENT_REQUEST_MAX_JSON_BYTES {
+            return Err(JsValue::from_str(
+                "device enrollment request exceeds the supported size",
+            ));
+        }
+        let request: DeviceEnrollmentRequestV1 =
+            serde_json::from_str(request_json).map_err(|_| ser_err())?;
+        let grant = seal_device_enrollment_grant(
+            &request,
+            self.device_id,
+            &self.encryption,
+            &self.signing,
+            credential_package,
+        )
+        .map_err(|error| js_err(WasmVaultError::Sharing(error)))?;
+        serde_json::to_string(&grant).map_err(|_| ser_err())
+    }
+
+    /// Verify and decrypt an approver-signed credential grant addressed to
+    /// this joining device. The returned bytes must be parsed fail-closed by
+    /// the host before they are persisted or used for authentication.
+    #[wasm_bindgen(js_name = openDeviceEnrollmentGrant)]
+    pub fn open_device_enrollment_grant_json(
+        &self,
+        request_json: &str,
+        grant_json: &str,
+    ) -> Result<Vec<u8>, JsValue> {
+        if request_json.len() > DEVICE_ENROLLMENT_REQUEST_MAX_JSON_BYTES
+            || grant_json.len() > DEVICE_ENROLLMENT_GRANT_MAX_JSON_BYTES
+        {
+            return Err(JsValue::from_str(
+                "device enrollment package exceeds the supported size",
+            ));
+        }
+        let request: DeviceEnrollmentRequestV1 =
+            serde_json::from_str(request_json).map_err(|_| ser_err())?;
+        let grant: DeviceEnrollmentGrantV1 =
+            serde_json::from_str(grant_json).map_err(|_| ser_err())?;
+        open_device_enrollment_grant(&request, &grant, &self.encryption, &self.signing)
+            .map(|plaintext| plaintext.to_vec())
+            .map_err(|error| js_err(WasmVaultError::Sharing(error)))
     }
 }
 
