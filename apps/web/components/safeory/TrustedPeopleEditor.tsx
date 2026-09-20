@@ -2,11 +2,15 @@
 
 import { useState } from "react"
 import type {
+  DeviceRegistrationV1,
   EmergencyContact,
+  PairingChallengeV1,
+  PairingProofV1,
   TrustedDevice,
   TrustedPrincipal,
 } from "@safeory/contracts"
 import {
+  Copy01Icon,
   Delete02Icon,
   DeviceAccessIcon,
   UserAdd01Icon,
@@ -37,6 +41,11 @@ interface TrustedPeopleEditorProps {
   initialPrincipals: TrustedPrincipal[]
   onSaveContacts: (contacts: EmergencyContact[]) => Promise<boolean>
   onSavePrincipals: (principals: TrustedPrincipal[]) => Promise<boolean>
+  onCreatePairingChallenge: (
+    principalId: string,
+    deviceId: string
+  ) => PairingChallengeV1 | null
+  onCompletePairing: (proof: PairingProofV1) => Promise<boolean>
 }
 
 const emptyContact: EmergencyContact = {
@@ -63,6 +72,68 @@ function emptyDevice(): TrustedDevice {
     encryption_public_key_hex: "",
     signing_public_key_hex: null,
   }
+}
+
+function isUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    value
+  )
+}
+
+function bytesToHex(bytes: number[]): string {
+  if (
+    bytes.length !== 32 ||
+    bytes.some((byte) => !Number.isInteger(byte) || byte < 0 || byte > 255)
+  ) {
+    throw new Error("Pairing proof signing key is invalid.")
+  }
+  return bytes.map((byte) => byte.toString(16).padStart(2, "0")).join("")
+}
+
+function parsePairingProof(value: string): PairingProofV1 {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(value)
+  } catch {
+    throw new Error("Pairing proof must be valid JSON.")
+  }
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    (parsed as { format_version?: unknown }).format_version !== 1 ||
+    typeof (parsed as { principal_id?: unknown }).principal_id !== "string" ||
+    typeof (parsed as { device_id?: unknown }).device_id !== "string" ||
+    !Array.isArray((parsed as { signing_public?: unknown }).signing_public)
+  ) {
+    throw new Error("Pairing proof format is invalid.")
+  }
+  return parsed as PairingProofV1
+}
+
+function parseDeviceRegistration(value: string): DeviceRegistrationV1 {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(value)
+  } catch {
+    throw new Error("Device registration must be valid JSON.")
+  }
+  if (typeof parsed !== "object" || parsed === null) {
+    throw new Error("Device registration format is invalid.")
+  }
+  const registration = parsed as Partial<DeviceRegistrationV1>
+  if (
+    registration.format_version !== 1 ||
+    typeof registration.device_id !== "string" ||
+    !isUuid(registration.device_id) ||
+    typeof registration.encryption_public_key_hex !== "string" ||
+    !/^[0-9a-f]{64}$/i.test(registration.encryption_public_key_hex) ||
+    /^0{64}$/i.test(registration.encryption_public_key_hex) ||
+    typeof registration.signing_public_key_hex !== "string" ||
+    !/^[0-9a-f]{64}$/i.test(registration.signing_public_key_hex)
+  ) {
+    throw new Error("Device registration format is invalid.")
+  }
+  return registration as DeviceRegistrationV1
 }
 
 export function TrustedPeopleFields({
@@ -263,11 +334,18 @@ export function TrustedPeopleEditor({
   initialPrincipals,
   onSaveContacts,
   onSavePrincipals,
+  onCreatePairingChallenge,
+  onCompletePairing,
 }: TrustedPeopleEditorProps) {
   const [contacts, setContacts] = useState<EmergencyContact[]>(initialContacts)
   const [principals, setPrincipals] =
     useState<TrustedPrincipal[]>(initialPrincipals)
   const [principalError, setPrincipalError] = useState<string | null>(null)
+  const [pairingChallenges, setPairingChallenges] = useState<Record<string, string>>({})
+  const [pairingProofs, setPairingProofs] = useState<Record<string, string>>({})
+  const [pairingErrors, setPairingErrors] = useState<Record<string, string>>({})
+  const [registrationDrafts, setRegistrationDrafts] = useState<Record<string, string>>({})
+  const [registrationErrors, setRegistrationErrors] = useState<Record<string, string>>({})
   const [persistedDeviceIds, setPersistedDeviceIds] = useState(
     () =>
       new Set(
@@ -305,6 +383,7 @@ export function TrustedPeopleEditor({
 
   function normalizedPrincipals(): TrustedPrincipal[] | null {
     const deviceKeys = new Set<string>()
+    const deviceIds = new Set<string>()
     const normalized: TrustedPrincipal[] = []
     for (const principal of principals) {
       const name = principal.name.trim()
@@ -314,6 +393,16 @@ export function TrustedPeopleEditor({
       }
       const devices: TrustedDevice[] = []
       for (const device of principal.devices) {
+        const deviceId = device.id.trim().toLowerCase()
+        if (!isUuid(deviceId)) {
+          setPrincipalError(`${name} has an invalid device identifier.`)
+          return null
+        }
+        if (deviceIds.has(deviceId)) {
+          setPrincipalError("The same device identifier cannot be registered more than once.")
+          return null
+        }
+        deviceIds.add(deviceId)
         const key = device.encryption_public_key_hex.trim().toLowerCase()
         if (!/^[0-9a-f]{64}$/.test(key) || /^0{64}$/.test(key)) {
           setPrincipalError(
@@ -330,6 +419,7 @@ export function TrustedPeopleEditor({
         deviceKeys.add(key)
         devices.push({
           ...device,
+          id: deviceId,
           label: device.label.trim(),
           encryption_public_key_hex: key,
         })
@@ -421,8 +511,8 @@ export function TrustedPeopleEditor({
             <p className="mt-1 max-w-[65ch] text-sm leading-6 text-pretty text-[var(--text-secondary)]">
               Access rules reference these stable principal IDs. A paired device
               can prove possession of its dedicated signing key and recipient-
-              encryption key, but pairing does not release access. Recipient-side
-              pairing setup is not available in this browser build yet.
+              encryption key, but pairing does not release access. Use the public
+              registration bundle from the recipient browser when adding a device.
             </p>
           </div>
           <Button
@@ -545,6 +635,104 @@ export function TrustedPeopleEditor({
                     </Button>
                   </div>
 
+                  <div className="grid gap-3 rounded-[var(--radius-default)] border border-dashed bg-[var(--surface-secondary)] p-3">
+                    <Field>
+                      <FieldLabel
+                        htmlFor={`safeory-principal-${principal.id}-device-registration`}
+                      >
+                        Recipient public registration
+                      </FieldLabel>
+                      <Textarea
+                        id={`safeory-principal-${principal.id}-device-registration`}
+                        value={registrationDrafts[principal.id] ?? ""}
+                        onChange={(event) => {
+                          setRegistrationDrafts((current) => ({
+                            ...current,
+                            [principal.id]: event.target.value,
+                          }))
+                          setRegistrationErrors((current) => ({
+                            ...current,
+                            [principal.id]: "",
+                          }))
+                        }}
+                        rows={3}
+                        spellCheck={false}
+                        autoComplete="off"
+                        className="font-mono text-xs"
+                        placeholder="Paste the public registration JSON copied from the recipient browser"
+                      />
+                      <FieldDescription>
+                        Safeory imports only the recipient device UUID and X25519
+                        encryption key here. The advertised Ed25519 key is ignored
+                        until the separate possession proof verifies it.
+                      </FieldDescription>
+                    </Field>
+                    <div className="flex flex-wrap items-center gap-3">
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        size="sm"
+                        disabled={(registrationDrafts[principal.id] ?? "").trim().length === 0}
+                        onClick={() => {
+                          try {
+                            const registration = parseDeviceRegistration(
+                              registrationDrafts[principal.id] ?? ""
+                            )
+                            const normalizedDeviceId = registration.device_id.toLowerCase()
+                            const normalizedKey =
+                              registration.encryption_public_key_hex.toLowerCase()
+                            const duplicate = principals.some((candidatePrincipal) =>
+                              candidatePrincipal.devices.some(
+                                (candidateDevice) =>
+                                  candidateDevice.id.toLowerCase() === normalizedDeviceId ||
+                                  candidateDevice.encryption_public_key_hex
+                                    .trim()
+                                    .toLowerCase() === normalizedKey
+                              )
+                            )
+                            if (duplicate) {
+                              throw new Error(
+                                "That recipient device ID or encryption key is already registered."
+                              )
+                            }
+                            updatePrincipal(principalIndex, {
+                              devices: [
+                                ...principal.devices,
+                                {
+                                  id: normalizedDeviceId,
+                                  label: "Recipient browser",
+                                  encryption_public_key_hex: normalizedKey,
+                                  signing_public_key_hex: null,
+                                },
+                              ],
+                            })
+                            setRegistrationDrafts((current) => ({
+                              ...current,
+                              [principal.id]: "",
+                            }))
+                            setRegistrationErrors((current) => ({
+                              ...current,
+                              [principal.id]: "",
+                            }))
+                          } catch (error) {
+                            setRegistrationErrors((current) => ({
+                              ...current,
+                              [principal.id]:
+                                error instanceof Error ? error.message : String(error),
+                            }))
+                          }
+                        }}
+                      >
+                        Import registered device
+                      </Button>
+                      {registrationErrors[principal.id] ? (
+                        <p className="text-xs text-[var(--danger)]" role="alert">
+                          {registrationErrors[principal.id]}
+                        </p>
+                      ) : null}
+                    </div>
+                  </div>
+
                   {principal.devices.length === 0 ? (
                     <p className="text-xs text-[var(--text-secondary)]">
                       No recipient-encryption device is registered. This principal
@@ -566,6 +754,27 @@ export function TrustedPeopleEditor({
                               : "No signing-key possession proof is recorded."}
                           </span>
                         </div>
+                        <Field>
+                          <FieldLabel htmlFor={`safeory-device-${device.id}-id`}>
+                            Device ID
+                          </FieldLabel>
+                          <Input
+                            id={`safeory-device-${device.id}-id`}
+                            value={device.id}
+                            onChange={
+                              persistedDeviceIds.has(device.id)
+                                ? undefined
+                                : (event) =>
+                                    updateDevice(principalIndex, deviceIndex, {
+                                      id: event.target.value,
+                                    })
+                            }
+                            readOnly={persistedDeviceIds.has(device.id)}
+                            spellCheck={false}
+                            autoComplete="off"
+                            className="font-mono text-xs"
+                          />
+                        </Field>
                         <Field>
                           <FieldLabel
                             htmlFor={`safeory-device-${device.id}-label`}
@@ -632,11 +841,144 @@ export function TrustedPeopleEditor({
                         </Button>
                         {persistedDeviceIds.has(device.id) &&
                         !device.signing_public_key_hex ? (
-                          <div className="border-t pt-3 text-xs leading-5 text-[var(--text-secondary)] sm:col-span-3">
-                            The local dual-key pairing verifier is implemented, but
-                            this browser build does not yet ship recipient-side
-                            device-key storage and a pairing responder. This device
-                            remains recipient-only until that flow exists.
+                          <div className="space-y-3 border-t pt-3 sm:col-span-3">
+                            <p className="text-xs leading-5 text-[var(--text-secondary)]">
+                              Generate a one-shot challenge, send it to the recipient
+                              browser, then paste the returned proof here. Locking,
+                              reloading, or saving the Emergency Card after challenge
+                              creation cancels the pending verifier state.
+                            </p>
+                            <div className="flex flex-wrap gap-2">
+                              <Button
+                                type="button"
+                                variant="secondary"
+                                size="sm"
+                                onClick={() => {
+                                  const challenge = onCreatePairingChallenge(
+                                    principal.id,
+                                    device.id
+                                  )
+                                  if (!challenge) return
+                                  setPairingChallenges((current) => ({
+                                    ...current,
+                                    [device.id]: JSON.stringify(challenge),
+                                  }))
+                                  setPairingProofs((current) => ({
+                                    ...current,
+                                    [device.id]: "",
+                                  }))
+                                  setPairingErrors((current) => ({
+                                    ...current,
+                                    [device.id]: "",
+                                  }))
+                                }}
+                              >
+                                Create pairing challenge
+                              </Button>
+                              {pairingChallenges[device.id] ? (
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  size="sm"
+                                  onClick={() =>
+                                    void navigator.clipboard.writeText(
+                                      pairingChallenges[device.id]
+                                    )
+                                  }
+                                >
+                                  <HugeiconsIcon
+                                    icon={Copy01Icon}
+                                    strokeWidth={2}
+                                    data-icon="inline-start"
+                                  />
+                                  Copy challenge
+                                </Button>
+                              ) : null}
+                            </div>
+                            {pairingChallenges[device.id] ? (
+                              <Textarea
+                                value={pairingChallenges[device.id]}
+                                readOnly
+                                rows={4}
+                                className="font-mono text-xs"
+                              />
+                            ) : null}
+                            <Field>
+                              <FieldLabel
+                                htmlFor={`safeory-device-${device.id}-pairing-proof`}
+                              >
+                                Recipient pairing proof
+                              </FieldLabel>
+                              <Textarea
+                                id={`safeory-device-${device.id}-pairing-proof`}
+                                value={pairingProofs[device.id] ?? ""}
+                                onChange={(event) =>
+                                  setPairingProofs((current) => ({
+                                    ...current,
+                                    [device.id]: event.target.value,
+                                  }))
+                                }
+                                rows={4}
+                                spellCheck={false}
+                                autoComplete="off"
+                                className="font-mono text-xs"
+                                placeholder="Paste the proof JSON returned by the recipient browser"
+                              />
+                            </Field>
+                            <div className="flex flex-wrap items-center gap-3">
+                              <Button
+                                type="button"
+                                size="sm"
+                                disabled={(pairingProofs[device.id] ?? "").trim().length === 0}
+                                onClick={async () => {
+                                  try {
+                                    const proof = parsePairingProof(
+                                      pairingProofs[device.id] ?? ""
+                                    )
+                                    if (
+                                      proof.principal_id !== principal.id ||
+                                      proof.device_id !== device.id
+                                    ) {
+                                      throw new Error(
+                                        "Pairing proof targets a different principal or device."
+                                      )
+                                    }
+                                    if (!(await onCompletePairing(proof))) return
+                                    const signingKey = bytesToHex(proof.signing_public)
+                                    updateDevice(principalIndex, deviceIndex, {
+                                      signing_public_key_hex: signingKey,
+                                    })
+                                    setPairingChallenges((current) => ({
+                                      ...current,
+                                      [device.id]: "",
+                                    }))
+                                    setPairingProofs((current) => ({
+                                      ...current,
+                                      [device.id]: "",
+                                    }))
+                                    setPairingErrors((current) => ({
+                                      ...current,
+                                      [device.id]: "",
+                                    }))
+                                  } catch (error) {
+                                    setPairingErrors((current) => ({
+                                      ...current,
+                                      [device.id]:
+                                        error instanceof Error
+                                          ? error.message
+                                          : String(error),
+                                    }))
+                                  }
+                                }}
+                              >
+                                Verify pairing proof
+                              </Button>
+                              {pairingErrors[device.id] ? (
+                                <p className="text-xs text-[var(--danger)]" role="alert">
+                                  {pairingErrors[device.id]}
+                                </p>
+                              ) : null}
+                            </div>
                           </div>
                         ) : null}
                         {device.signing_public_key_hex ? (

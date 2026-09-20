@@ -1,8 +1,15 @@
-# Safeory Plan — V1 Local Platform vs What Comes Next
+# Safeory Plan — Local V1 Foundation for the Combined Product
 
 Source vision: Private Life OS — organize life, own possessions, continue through
 emergencies, protect with zero-knowledge encryption. Trustworthy is the baseline;
 the Ownership Wallet + Continuity Engine + real privacy are the differentiators.
+
+Target product: a zero-knowledge consumer alternative to 1Password
+Individual/Families plus Trustworthy's household organization, collaboration,
+continuity, and legacy workflows. This 23-item checklist measures the existing
+single-household local foundation; it is not the complete combined-product
+parity checklist. See `docs/architecture/combined-product.md` and
+`docs/ROADMAP.md` for the account/household/space architecture and ordered work.
 
 Rule: cloud integration starts only after the local platform below is stable.
 
@@ -28,49 +35,81 @@ Rule: cloud integration starts only after the local platform below is stable.
 ### PEOPLE
 | # | Item | Status |
 |---|------|--------|
-| 10 | Trusted people | 🟡 Partial — encrypted continuity contacts are separate from stable principal UUIDs; devices have role-separated X25519/Ed25519 identities with local dual-key pairing proof, while remote trust/release coordination remains |
+| 10 | Trusted people | 🟡 Partial — encrypted continuity contacts are separate from stable principal UUIDs; browser devices now have durable wrapped X25519/Ed25519 identities plus a local challenge/responder pairing flow, while remote invitation/trust/release coordination remains |
 | 11 | Granular permissions | 🟡 Partial — per-item encrypted `AccessPolicy` persistence + fail-closed evaluation + browser planning UX for explicit principal-bound record rules are implemented; authenticated release/approval enforcement remains |
 
 ### PLAN
 | # | Item | Status |
 |---|------|--------|
-| 12 | Emergency access | 🟡 Partial — Emergency Card (records + contacts + instructions) works; timed release does not |
-| 13 | Waiting periods | 🟡 Policy core only — 1h/24h/7d/custom evaluated locally; no enforcement timer, no server coordinator |
+| 12 | Emergency access | 🟡 Partial — Emergency Card (records + contacts + instructions) works; a local fail-closed timed-release state machine now handles request/wait/approval/release/expiry/deny/revoke simulation, but no release UI, remote delivery, or durable server coordinator exists |
+| 13 | Waiting periods | 🟡 Local state machine — 1h/24h/7d/custom waiting periods, approval thresholds, release eligibility, expiry, revocation, exact item-revision/policy fencing, idempotency, and clock-rewind protection are tested locally; no durable server timer/coordinator yet |
 | 14 | Selected legacy access | 🟡 Local planning done — each active record can be marked Unspecified/Selected for legacy/Private forever/Destroy on death; this is encrypted planning metadata only, with no trusted-person release or automatic deletion enforcement yet |
 | 15 | "If something happens to me" | 🟡 Partial — card + instructions + kit cover the single-device case |
-| 16 | Plan test | ✅ Done (local) — checks Emergency Card completeness + verifies the saved recovery key against the current vault; does not simulate trusted-person/timed-release flows |
+| 16 | Plan test | 🟡 Not wired — the underlying recovery, Emergency Card, planning metadata, pairing, and local timed-release primitives exist, but the integrated Plan Test/readiness UI and preparedness score have not shipped yet |
 
 ### PRIVACY
 | # | Item | Status |
 |---|------|--------|
 | 17 | Client-side encryption | ✅ Done — XChaCha20-Poly1305, per-item keys, Argon2id KEK |
-| 18 | Zero-knowledge server | 🟡 Partial — `apps/api` implements account/device coordination and opaque revision-fenced ciphertext sync; production AWS account/auth integration and end-to-end client sync are still in progress |
+| 18 | Zero-knowledge server | 🟡 Partial — `apps/api` implements account/device coordination and opaque revision-fenced ciphertext transport; the Account Secret/device-enrollment design, household/space authorization, production AWS identity, and end-to-end client sync remain |
 | 19 | Local encrypted vault | ✅ Done — SQLite ciphertext-only, rollback-journal tested |
 | 20 | E2EE sharing | 🟡 Partial — `vault-sharing` v2 provides recipient-confidential X25519 envelopes plus a separate Ed25519 trusted-device pairing/signing foundation; share-v2's `sender_public` itself remains unauthenticated and there is no transport/release protocol |
 | 21 | Recovery kit | ✅ Done — save/print, install/confirm, live-key replacement, unlock-with-kit, recovery-authenticated backup restore with new passphrase, 2-of-3 social recovery crypto + e2e test |
-| 22 | Device management | 🟡 Partial — configurable auto-lock, lock-on-background, settings, Strict local lock shortcut; no multi-device, no revoke, no travel mode |
+| 22 | Device management | 🟡 Partial — configurable auto-lock, lock-on-background, settings, Strict local lock shortcut, and durable local wrapped recipient device identities with delete/rotate support; no synced inventory, reviewed new-device enrollment, remote revoke, space-key rotation, or Travel Mode |
 | 23 | Portable export | ✅ Done — readable JSON + authenticated encrypted browser/native backups, including encrypted attachments |
 
 ## What is implemented but not wired (crypto-ready, no IPC/UI)
 - `vault-sharing`: seal/open envelopes for item keys and recovery shares.
-- `vault-emergency`: policy evaluation, Shamir threshold (`blahaj`, RUSTSEC-2024-0398 fix), sealed share envelopes, full no-vendor recovery path.
+- `vault-emergency`: policy evaluation, local timed-release request state machine, Shamir threshold (`blahaj`, RUSTSEC-2024-0398 fix), sealed share envelopes, full no-vendor recovery path.
 - Compartment key hierarchy: spec'd, not coded (`safeory:v1:compartment-wrap`).
 
 ## Backlog — ordered, post-V1
-1. Finish trusted-device pairing delivery: the dual-key X25519+Ed25519 proof, v10 persisted signing binding, native/WASM completion boundary, and contracts are implemented. Add a durable browser/device secure-key-store backend plus recipient-side pairing responder before exposing the product pairing workflow or treating browser devices as long-lived authenticators. Contacts remain separate; pairing proves device-key possession, not human identity.
-2. Emergency timed-release state machine (local simulation first, then durable PostgreSQL + worker coordination on AWS).
-3. Enforce legacy/private-forever/destruction intent through trusted-person + emergency-release state once that machinery exists.
-4. Plan test (simulation) + preparedness score beyond today's local readiness checks.
-5. AWS sync productionization: Cognito account identity, Safeory device auth, RDS metadata/policy state, S3 ciphertext blobs, Valkey/worker coordination, SES notifications, and end-to-end web/extension sync.
-6. OS keystore + biometric unlock; passkeys/TOTP.
-7. Expanded home inventory and account-closure automation. Possessions now support local encrypted category/location metadata, and local encrypted subscription tracking plus credential closure planning are done; broader inventory workflows remain future work. Safeory still does not contact providers, process subscription payments, cancel subscriptions, or close accounts automatically.
-8. Email import, browser capture, mobile scanner, private-AI modes (local-first per spec).
-9. Version-history restore/rollback and richer audit metadata; bounded encrypted browse-only history is implemented locally (20 prior revisions/item), but restoring an old snapshot is intentionally deferred because historical attachment references may no longer have live attachment data. Family space and secure links remain future work.
+
+1. Implement the account -> household -> private/shared space model and
+   independently rotatable space-key envelopes. Migrate today's single-owner
+   vault to one private space without weakening existing encryption.
+2. Finalize a reviewed high-entropy Account Secret/device-enrollment design for
+   cloud accounts, plus new-device and recovery flows. Cognito identity must not
+   become the sole protection for remotely stored root wraps.
+3. Specify and implement complete opaque sync: bootstrap, household membership,
+   space/item/attachment objects, offline queues, exact-revision conflicts,
+   tombstones, revocation, key rotation, pagination, and web/extension
+   compatibility.
+4. Finish trusted-device and collaborator invitation transport. Contacts remain
+   separate; pairing proves device-key possession, not human identity.
+5. Complete consumer password-manager parity: structured multi-origin logins,
+   TOTP, passkeys, security health, save/update capture, form-fill identities,
+   importers, Firefox support, shared spaces, SecureLinks, and Travel Mode.
+6. Complete household operating workflows: family/medical/tax/legal/business/
+   contact schemas, files/folders, connections, recurring reminders, Inbox,
+   activity, browser capture, and local/private document extraction.
+7. Wire the local timed-release simulation into reviewed Plan Test flows, then
+   implement the durable PostgreSQL/worker coordinator, signed trustee protocol,
+   owner alerts, authenticated release delivery, audit, denial/revocation, and
+   expiry on AWS.
+8. Enforce legacy/private-forever/destruction intent only after the remote Trust
+   Engine exists, including documented S3/backups and cryptographic-erasure
+   semantics.
+9. AWS productionization: reviewable IaC, Cognito account identity, Safeory
+   device auth, RDS metadata/policy state, S3 ciphertext, Valkey coordination,
+   SES generic notifications, end-to-end sync, monitoring, and restore drills.
+10. OS keystore + biometric unlock where browser/platform APIs permit; a native
+    client requires its own ADR before claiming native autofill or hardware
+    isolation.
+11. Expanded home inventory and account-closure automation. Safeory still does
+    not contact providers, process payments, cancel subscriptions, or close
+    accounts automatically.
+12. Version-history restore/rollback and richer encrypted activity. Bounded
+    browse-only history exists, but restore remains deferred because historical
+    attachment references may no longer have live attachment data.
 
 ## Non-goals (explicit)
 Banking/investment aggregation, resale marketplace, whole-vault cloud AI,
 ads/data business of any kind, and company-side decryption — ever. Password
 autofill is a core extension feature and is intentionally in scope.
+The current consumer scope also excludes 1Password Business/Enterprise/Developer
+parity: workforce SSO/provisioning, enterprise posture administration, SSH
+agents, CLI secret injection, and infrastructure-secret automation.
 
 ## Verification gates (must stay green)
 `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`,

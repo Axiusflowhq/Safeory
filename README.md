@@ -1,9 +1,17 @@
 # Safeory
 
-Safeory is a local-first, zero-knowledge consumer vault for important personal
-information: documents, records, property, insurance, vehicles, and possessions,
-with an encrypted emergency card, recovery kit, and portable export — all
-working offline on one device, before any cloud or trusted-person networking.
+Safeory is a local-first, zero-knowledge family life vault. Its target combines
+the consumer credential capabilities expected from 1Password
+Individual/Families with Trustworthy-style household organization,
+collaboration, continuity, and legacy planning. The implemented foundation
+already protects documents, credentials, records, property, insurance,
+vehicles, possessions, receipts, subscriptions, attachments, recovery, and an
+Emergency Card offline on one device.
+
+The target does not include 1Password Business/Enterprise/Developer features
+such as workforce SSO/provisioning, SSH agents, CLI secret injection, or
+enterprise secrets automation. The authoritative combined-product contract is
+`docs/architecture/combined-product.md`.
 
 ## Current phase
 
@@ -16,11 +24,17 @@ Implemented now:
 - `apps/web`, the primary full-vault interface, with setup/unlock/recovery, schema-driven record editing, encrypted attachments, Emergency Card, recovery kit, master-passphrase rotation, search, trash/restore/permanent purge, and a local Today/deadlines view;
 - `apps/extension`, an MV3 browser extension with an isolated background vault, exact-origin credential matching, trusted-click discovery, bounded request throttling, one-shot fill authorization, and a compact credential surface;
 - ciphertext-only browser snapshot validation, IndexedDB CAS persistence, and fail-closed durability poisoning when an in-memory mutation cannot be saved;
-- portable emergency/recovery primitives, encrypted legacy/account-closure planning metadata, bounded history and attachment formats in the native core, browser encrypted attachment persistence with authenticated chunked add/download/delete and backup/restore, browser readable export, plus Trust Engine policy/threshold foundations and local dual-key trusted-device pairing verification;
+- portable emergency/recovery primitives, encrypted legacy/account-closure planning metadata, bounded history and attachment formats in the native core, browser encrypted attachment persistence with authenticated chunked add/download/delete and backup/restore, browser readable export, plus Trust Engine policy/threshold foundations and local dual-key trusted-device pairing with durable wrapped recipient keys and a browser pairing responder;
 - `apps/api` plus a local Docker integration stack for account/device coordination and opaque encrypted-object sync using PostgreSQL, Valkey, S3-compatible object storage, and SMTP; the production target is AWS as documented in `docs/architecture/aws.md`;
 - pinned Rust/JS lockfiles and dependency/security CI policy.
 
-Not implemented yet: recipient-side durable browser device-key storage/pairing responder, timed emergency release, automated account closure, account/passkey flows, and end-to-end multi-device sync UX.
+Not implemented yet: the account/household/private-and-shared-space model,
+production Account Secret/device enrollment, end-to-end multi-device sync,
+remote collaboration and SecureLinks, TOTP/passkeys/security health/importers,
+the household Inbox and private document automation, recurring/cloud reminders,
+remote pairing/invitation transport, durable emergency release delivery, and
+Plan Test. A fail-closed local timed-release state machine exists in
+`vault-emergency`, but it is not wired to a release UI or server coordinator.
 
 ## Validation
 ```text
@@ -52,6 +66,19 @@ The post-V1 strategy (password-manager + autofill + sync/mobile) is in
 `crates/vault-wasm` for the browser vault core, `packages/contracts` for the
 shared session/persistence layer, `apps/web` for the web app, and
 `apps/extension` for the browser extension.
+
+Architecture documents:
+
+- `docs/architecture/combined-product.md` — product scope, household/space
+  model, sync responsibilities, private automation, reminders, and launch gates;
+- `docs/architecture/overview.md` — component and trust-boundary overview;
+- `docs/architecture/sync.md` — opaque sync, household key distribution,
+  conflicts, revocation, SecureLinks, and Travel Mode;
+- `docs/architecture/trust-engine.md` — collaboration, continuity, and key
+  release model;
+- `docs/architecture/aws.md` — production deployment contract;
+- `docs/security/cryptography.md`, `server-visible-metadata.md`, and
+  `threat-model.md` — cryptography and privacy/security boundaries.
 
 ## Production AWS infrastructure
 

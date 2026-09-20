@@ -106,6 +106,25 @@ impl DeviceSigningKeyPair {
     pub fn public_bytes(&self) -> [u8; 32] {
         self.signing.verifying_key().to_bytes()
     }
+
+    /// Restore a long-lived signing identity from secure device storage.
+    ///
+    /// Callers must keep the input bytes out of logs/serialization and zeroize
+    /// transient copies after constructing the key pair.
+    pub fn from_secret_bytes(bytes: [u8; 32]) -> Result<Self, SharingError> {
+        let signing = SigningKey::from_bytes(&bytes);
+        if signing.verifying_key().is_weak() {
+            return Err(SharingError::InvalidSigningKey);
+        }
+        Ok(Self { signing })
+    }
+
+    /// Export secret bytes only for a reviewed secure-device-storage adapter.
+    /// The returned wrapper zeroizes its memory when dropped.
+    #[must_use]
+    pub fn secret_bytes(&self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(self.signing.to_bytes())
+    }
 }
 
 /// Public challenge package sent by the vault owner to an unpaired recipient
@@ -167,6 +186,25 @@ impl DeviceKeyPair {
     #[must_use]
     pub fn public_bytes(&self) -> [u8; 32] {
         self.public
+    }
+
+    /// Restore a long-lived recipient-encryption identity from secure device
+    /// storage. The public key is always re-derived from the private key.
+    #[must_use]
+    pub fn from_secret_bytes(bytes: [u8; 32]) -> Self {
+        let secret = StaticSecret::from(bytes);
+        let public = PublicKey::from(&secret);
+        Self {
+            secret,
+            public: public.to_bytes(),
+        }
+    }
+
+    /// Export secret bytes only for a reviewed secure-device-storage adapter.
+    /// The returned wrapper zeroizes its memory when dropped.
+    #[must_use]
+    pub fn secret_bytes(&self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(self.secret.to_bytes())
     }
 
     /// 128-bit public-key fingerprint bound into every sealed envelope.

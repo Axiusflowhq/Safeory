@@ -1,7 +1,13 @@
 /** Browser-side adapter between generated `vault-wasm` and VaultSession. */
 
-import init, { WasmVault } from "vault-wasm"
-import { VaultSession, type WasmStatics, type WasmVaultLike } from "@safeory/contracts"
+import init, { WasmDeviceIdentity, WasmVault } from "vault-wasm"
+import {
+  BrowserDeviceKeyStore,
+  VaultSession,
+  type WasmDeviceIdentityLike,
+  type WasmStatics,
+  type WasmVaultLike,
+} from "@safeory/contracts"
 
 let ready: Promise<void> | null = null
 
@@ -24,6 +30,16 @@ export const wasmStatics: WasmStatics = {
   generateRecoverySecret: () => WasmVault.generateRecoverySecret(),
   generatePassword: (length: number) => WasmVault.generatePassword(length),
 }
+
+export const browserDeviceKeyStore = new BrowserDeviceKeyStore({
+  generate: (deviceId: string) =>
+    WasmDeviceIdentity.generate(deviceId) as unknown as WasmDeviceIdentityLike,
+  fromPrivateKeyBytes: (deviceId: string, privateKeyBytes: Uint8Array) =>
+    WasmDeviceIdentity.fromPrivateKeyBytes(
+      deviceId,
+      privateKeyBytes
+    ) as unknown as WasmDeviceIdentityLike,
+})
 
 /** Load browser persistence only after the WASM runtime is initialized. */
 export async function loadVaultSession(): Promise<VaultSession> {

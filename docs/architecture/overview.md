@@ -1,5 +1,12 @@
 # Safeory Architecture Overview
 
+Safeory's target is a zero-knowledge consumer product combining 1Password
+Individual/Families-style credential management with Trustworthy-style
+household organization, collaboration, continuity, and legacy planning. The
+authoritative combined-product contract is
+`docs/architecture/combined-product.md`; this overview describes the system
+boundaries that support it.
+
 ## Security objective
 
 Safeory is a local-first encrypted vault. Plaintext and usable vault keys stay on authorized user devices. Backend infrastructure stores ciphertext and the minimum metadata needed to authenticate devices, synchronize opaque objects, and coordinate emergency-access policy.
@@ -35,6 +42,30 @@ React web app                    Browser extension
 ```
 
 Dependency direction points inward toward portable Rust crates. Security-domain crates do not depend on React, browser UI types, a particular reverse proxy, object-store vendor, or cloud-provider SDK type.
+
+## Product-domain boundaries
+
+The target domain is deliberately broader than the currently implemented
+single-owner vault:
+
+```text
+Account (sign-in, subscription, devices)
+  -> Household (members, roles, collaborators, security events)
+       -> Space (private/shared/travel/purpose key boundary)
+            -> Item (independent revision and content key)
+                 -> Attachment / reminder / history
+```
+
+Server roles authorize operations but do not make ciphertext readable. Content
+access also requires a client-held space or item key. Private spaces are never
+implicitly readable by household organizers. Full, partial, and legacy
+collaboration map to explicit space/item key delivery rather than a boolean
+account-wide access flag.
+
+The current local vault migrates to one account, one household, and one private
+space. The migration and independently rotatable space/compartment key hierarchy
+must land before shared-family spaces, Travel Mode, or production collaboration
+are considered complete.
 
 ## Local-first ownership
 
@@ -85,6 +116,12 @@ master passphrase
 
 Creation is the reverse path. The database receives only salts, nonces, ciphertexts, opaque IDs, revisions, and format metadata.
 
+This is the implemented local unlock path. Before remotely stored wraps become a
+production dependency, a reviewed ADR must add a high-entropy Account Secret or
+equivalent device-enrollment factor to resist password-only offline attacks after
+a server-data compromise. Cognito proves account identity; it does not replace
+client-side key protection.
+
 ## Platform boundaries
 
 `vault-platform` defines capabilities such as secure key storage, biometrics, filesystem, clipboard, clock, randomness, and network transport. Platform-specific implementations live outside the security-domain crates. Phase 0 uses the OS CSPRNG directly and does not yet persist root keys in OS secure storage.
@@ -121,3 +158,24 @@ No backend component receives usable vault decryption keys or vault plaintext.
 Opaque AWS-hosted synchronization is in implementation; this architecture
 describes the intended server-visible contract and deployment boundaries, not a
 claim that the complete sync/auth/device HTTP endpoint surface has shipped.
+
+## Cross-cutting protocols still required
+
+The following are architecture deliverables rather than UI tasks:
+
+- versioned account/device/household/space bootstrap and key-envelope delivery;
+- offline mutation, incremental sync, conflict, tombstone, attachment, and
+  client-compatibility rules;
+- remote revocation and space-key rotation;
+- append-only minimal security events plus encrypted human-readable activity;
+- invitation, SecureLink, trustee-request, approval, release, and expiry
+  protocols;
+- private-local versus opt-in cloud reminder scheduling;
+- zero-knowledge-compatible ingestion, Inbox review, and local/private document
+  extraction.
+
+Their detailed target behavior lives in
+`docs/architecture/combined-product.md`; the opaque object and household-key
+distribution contract is expanded in `docs/architecture/sync.md`. Features that
+depend on these protocols must not be represented as complete merely because
+their local model or cryptographic primitive exists.

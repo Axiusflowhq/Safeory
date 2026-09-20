@@ -2,7 +2,7 @@
 // Proves the WASM crypto core actually runs outside Rust: create, put, list,
 // lock, snapshot, reload, unlock, decrypt, and fail-closed behaviors.
 import { readFile } from "node:fs/promises";
-import init, { WasmVault } from "./pkg/vault_wasm.js";
+import init, { WasmDeviceIdentity, WasmVault } from "./pkg/vault_wasm.js";
 
 // --target web exports an async init that must run before any binding call.
 // Node cannot fetch file:// URLs, so feed the wasm bytes directly.
@@ -237,5 +237,61 @@ if (pw.length !== 24) throw new Error("password length mismatch");
 for (const re of [/[a-z]/, /[A-Z]/, /[0-9]/, /[^A-Za-z0-9]/]) {
   if (!re.test(pw)) throw new Error("password missing a required character class: " + re);
 }
+
+// 13. Recipient-side trusted-device pairing responder: durable private bytes
+// round-trip through the generated bindings, then answer the owner's challenge.
+const pairingPrincipalId = "44444444-4444-4444-8444-444444444444";
+const pairingDeviceId = "55555555-5555-4555-8555-555555555555";
+const recipientIdentity = WasmDeviceIdentity.generate(pairingDeviceId);
+const registration = JSON.parse(recipientIdentity.registrationJson());
+if (registration.device_id !== pairingDeviceId) throw new Error("device registration id mismatch");
+if (!/^[0-9a-f]{64}$/.test(registration.encryption_public_key_hex)) {
+  throw new Error("recipient encryption public key format mismatch");
+}
+if (!/^[0-9a-f]{64}$/.test(registration.signing_public_key_hex)) {
+  throw new Error("recipient signing public key format mismatch");
+}
+const privateKeyBytes = recipientIdentity.exportPrivateKeyBytes();
+if (privateKeyBytes.byteLength !== 64) throw new Error("device private-key bundle length mismatch");
+const restoredIdentity = WasmDeviceIdentity.fromPrivateKeyBytes(pairingDeviceId, privateKeyBytes);
+privateKeyBytes.fill(0);
+if (restoredIdentity.registrationJson() !== recipientIdentity.registrationJson()) {
+  throw new Error("restored device identity public keys changed");
+}
+
+const pairingOwner = new WasmVault();
+pairingOwner.create(pass);
+pairingOwner.setEmergencyCardJson(JSON.stringify({
+  selected_item_ids: [],
+  contacts: [],
+  principals: [{
+    id: pairingPrincipalId,
+    name: "Grace",
+    relation: "Trustee",
+    devices: [{
+      id: pairingDeviceId,
+      label: "Recipient browser",
+      encryption_public_key_hex: registration.encryption_public_key_hex,
+      signing_public_key_hex: null,
+    }],
+  }],
+  retired_principal_ids: [],
+  retired_device_ids: [],
+  retired_signing_public_key_hexes: [],
+  instructions: "",
+}));
+const pairingChallenge = pairingOwner.createTrustedDevicePairingChallengeJson(
+  pairingPrincipalId,
+  pairingDeviceId,
+);
+const pairingProof = restoredIdentity.answerPairingChallengeJson(pairingChallenge);
+const pairingRevision = pairingOwner.completeTrustedDevicePairingJson(pairingProof);
+if (pairingRevision !== 2n) throw new Error("pairing completion should advance card revision to 2");
+const pairedDevice = JSON.parse(pairingOwner.getEmergencyCardJson()).card.principals[0].devices[0];
+if (pairedDevice.signing_public_key_hex !== registration.signing_public_key_hex) {
+  throw new Error("pairing did not persist recipient signing key");
+}
+recipientIdentity.free();
+restoredIdentity.free();
 
 console.log("WASM smoke test: ALL PASS");

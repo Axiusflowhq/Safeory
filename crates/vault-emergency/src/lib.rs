@@ -36,6 +36,16 @@ pub enum EmergencyError {
     Sharing(#[from] vault_sharing::SharingError),
     #[error("cryptographic operation failed")]
     Crypto(#[from] vault_crypto::CryptoError),
+    #[error("access policy does not authorize this release request")]
+    ReleaseDenied,
+    #[error("release request time moved backwards")]
+    TimeRewind,
+    #[error("release request time overflowed")]
+    TimeOverflow,
+    #[error("approval is not authorized for this release request")]
+    UnauthorizedApprover,
+    #[error("release request transition conflicts with terminal state")]
+    InvalidReleaseTransition,
 }
 
 /// Distinct approvals presented when requesting access.
@@ -123,6 +133,344 @@ pub fn evaluate(
         permission: grant.permission,
         duration_seconds: grant.duration.seconds(),
     }
+}
+
+/// Durable-state shape for a local timed-release simulation. The future server
+/// coordinator may persist an equivalent state machine, but this portable core
+/// intentionally performs no I/O and never handles vault decryption keys.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReleaseRequest {
+    request_id: Uuid,
+    trustee_id: Uuid,
+    what: String,
+    condition: AccessCondition,
+    item_revision: u64,
+    requested_at: u64,
+    last_event_at: u64,
+    state_revision: u64,
+    grant: AccessGrant,
+    approvals: BTreeSet<Uuid>,
+    state: ReleaseRequestState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReleaseRequestState {
+    Pending,
+    Released {
+        released_at: u64,
+        expires_at: Option<u64>,
+    },
+    Denied {
+        denied_at: u64,
+    },
+    Revoked {
+        revoked_at: u64,
+    },
+}
+
+/// Effective access state after applying policy/revision fencing and time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReleaseStatus {
+    PolicyChanged,
+    AwaitingApprovals {
+        required: u8,
+        received: u8,
+    },
+    Waiting {
+        not_before: u64,
+        remaining_seconds: u64,
+    },
+    Eligible,
+    Released {
+        permission: Permission,
+        released_at: u64,
+        expires_at: Option<u64>,
+    },
+    Expired {
+        expired_at: u64,
+    },
+    Denied,
+    Revoked,
+}
+
+impl ReleaseRequest {
+    #[must_use]
+    pub fn request_id(&self) -> Uuid {
+        self.request_id
+    }
+
+    #[must_use]
+    pub fn trustee_id(&self) -> Uuid {
+        self.trustee_id
+    }
+
+    #[must_use]
+    pub fn what(&self) -> &str {
+        &self.what
+    }
+
+    #[must_use]
+    pub fn condition(&self) -> AccessCondition {
+        self.condition
+    }
+
+    #[must_use]
+    pub fn item_revision(&self) -> u64 {
+        self.item_revision
+    }
+
+    #[must_use]
+    pub fn requested_at(&self) -> u64 {
+        self.requested_at
+    }
+
+    #[must_use]
+    pub fn state_revision(&self) -> u64 {
+        self.state_revision
+    }
+
+    #[must_use]
+    pub fn state(&self) -> ReleaseRequestState {
+        self.state
+    }
+
+    #[must_use]
+    pub fn approvals(&self) -> &BTreeSet<Uuid> {
+        &self.approvals
+    }
+
+    fn check_time(&self, now: u64) -> Result<(), EmergencyError> {
+        if now < self.last_event_at {
+            return Err(EmergencyError::TimeRewind);
+        }
+        Ok(())
+    }
+
+    fn policy_matches(&self, policy: &AccessPolicy, current_item_revision: u64) -> bool {
+        if current_item_revision != self.item_revision || validate_access_policy(policy).is_err() {
+            return false;
+        }
+        if policy.destruction == Some(LegacyCondition::Death)
+            && self.condition == AccessCondition::Death
+        {
+            return false;
+        }
+        if policy.private_forever && self.condition == AccessCondition::Death {
+            return false;
+        }
+        policy.grants.iter().any(|grant| grant == &self.grant)
+    }
+
+    pub fn status(
+        &self,
+        policy: &AccessPolicy,
+        current_item_revision: u64,
+        now: u64,
+    ) -> Result<ReleaseStatus, EmergencyError> {
+        self.check_time(now)?;
+        match self.state {
+            ReleaseRequestState::Denied { .. } => return Ok(ReleaseStatus::Denied),
+            ReleaseRequestState::Revoked { .. } => return Ok(ReleaseStatus::Revoked),
+            ReleaseRequestState::Pending | ReleaseRequestState::Released { .. } => {}
+        }
+        if !self.policy_matches(policy, current_item_revision) {
+            return Ok(ReleaseStatus::PolicyChanged);
+        }
+        match self.state {
+            ReleaseRequestState::Released {
+                released_at,
+                expires_at,
+            } => {
+                if let Some(expired_at) = expires_at
+                    && now >= expired_at
+                {
+                    return Ok(ReleaseStatus::Expired { expired_at });
+                }
+                return Ok(ReleaseStatus::Released {
+                    permission: self.grant.permission,
+                    released_at,
+                    expires_at,
+                });
+            }
+            ReleaseRequestState::Pending => {}
+            ReleaseRequestState::Denied { .. } | ReleaseRequestState::Revoked { .. } => {
+                unreachable!("terminal release states return before policy validation")
+            }
+        }
+
+        if self.grant.approvals_required > 0 {
+            let received = u8::try_from(
+                self.grant
+                    .approver_ids
+                    .intersection(&self.approvals)
+                    .count(),
+            )
+            .unwrap_or(u8::MAX);
+            if received < self.grant.approvals_required {
+                return Ok(ReleaseStatus::AwaitingApprovals {
+                    required: self.grant.approvals_required,
+                    received,
+                });
+            }
+        }
+
+        let not_before = self
+            .requested_at
+            .checked_add(self.grant.wait_period.seconds())
+            .ok_or(EmergencyError::TimeOverflow)?;
+        if now < not_before {
+            return Ok(ReleaseStatus::Waiting {
+                not_before,
+                remaining_seconds: not_before - now,
+            });
+        }
+        Ok(ReleaseStatus::Eligible)
+    }
+
+    /// Add one configured approver. Repeating the same approval is an
+    /// idempotent no-op and does not advance the request revision.
+    pub fn approve(&mut self, approver_id: Uuid, now: u64) -> Result<bool, EmergencyError> {
+        self.check_time(now)?;
+        if !matches!(self.state, ReleaseRequestState::Pending) {
+            return Err(EmergencyError::InvalidReleaseTransition);
+        }
+        if !self.grant.approver_ids.contains(&approver_id) {
+            return Err(EmergencyError::UnauthorizedApprover);
+        }
+        if !self.approvals.insert(approver_id) {
+            return Ok(false);
+        }
+        self.last_event_at = now;
+        self.state_revision = self
+            .state_revision
+            .checked_add(1)
+            .ok_or(EmergencyError::TimeOverflow)?;
+        Ok(true)
+    }
+
+    /// Owner-side denial is terminal. Retrying denial is idempotent.
+    pub fn deny(&mut self, now: u64) -> Result<bool, EmergencyError> {
+        self.check_time(now)?;
+        match self.state {
+            ReleaseRequestState::Denied { .. } => return Ok(false),
+            ReleaseRequestState::Pending => {}
+            ReleaseRequestState::Released { .. } | ReleaseRequestState::Revoked { .. } => {
+                return Err(EmergencyError::InvalidReleaseTransition);
+            }
+        }
+        self.state = ReleaseRequestState::Denied { denied_at: now };
+        self.last_event_at = now;
+        self.state_revision = self
+            .state_revision
+            .checked_add(1)
+            .ok_or(EmergencyError::TimeOverflow)?;
+        Ok(true)
+    }
+
+    /// Revocation is terminal and may cancel either a pending or already
+    /// released request. Retrying revocation is idempotent.
+    pub fn revoke(&mut self, now: u64) -> Result<bool, EmergencyError> {
+        self.check_time(now)?;
+        match self.state {
+            ReleaseRequestState::Revoked { .. } => return Ok(false),
+            ReleaseRequestState::Denied { .. } => {
+                return Err(EmergencyError::InvalidReleaseTransition);
+            }
+            ReleaseRequestState::Pending | ReleaseRequestState::Released { .. } => {}
+        }
+        self.state = ReleaseRequestState::Revoked { revoked_at: now };
+        self.last_event_at = now;
+        self.state_revision = self
+            .state_revision
+            .checked_add(1)
+            .ok_or(EmergencyError::TimeOverflow)?;
+        Ok(true)
+    }
+
+    /// Release only when the exact original item revision/policy still matches,
+    /// every required approval exists, and the waiting period has elapsed.
+    /// Repeating release after success is an idempotent no-op.
+    pub fn release(
+        &mut self,
+        policy: &AccessPolicy,
+        current_item_revision: u64,
+        now: u64,
+    ) -> Result<ReleaseStatus, EmergencyError> {
+        self.check_time(now)?;
+        let status = self.status(policy, current_item_revision, now)?;
+        if !matches!(status, ReleaseStatus::Eligible) {
+            return Ok(status);
+        }
+        let expires_at = self
+            .grant
+            .duration
+            .seconds()
+            .map(|seconds| now.checked_add(seconds).ok_or(EmergencyError::TimeOverflow))
+            .transpose()?;
+        self.state = ReleaseRequestState::Released {
+            released_at: now,
+            expires_at,
+        };
+        self.last_event_at = now;
+        self.state_revision = self
+            .state_revision
+            .checked_add(1)
+            .ok_or(EmergencyError::TimeOverflow)?;
+        Ok(ReleaseStatus::Released {
+            permission: self.grant.permission,
+            released_at: now,
+            expires_at,
+        })
+    }
+}
+
+/// Start a local release simulation for the exact current item revision.
+/// Invalid/denied policy never creates a request object.
+pub fn begin_release_request(
+    policy: &AccessPolicy,
+    what: &str,
+    condition: AccessCondition,
+    trustee_id: Uuid,
+    item_revision: u64,
+    requested_at: u64,
+) -> Result<ReleaseRequest, EmergencyError> {
+    if validate_access_policy(policy).is_err()
+        || (policy.destruction == Some(LegacyCondition::Death)
+            && condition == AccessCondition::Death)
+        || (policy.private_forever && condition == AccessCondition::Death)
+    {
+        return Err(EmergencyError::ReleaseDenied);
+    }
+    let grant = policy
+        .grants
+        .iter()
+        .find(|grant| {
+            grant.trustee_id == trustee_id && grant.what == what && grant.condition == condition
+        })
+        .cloned()
+        .ok_or(EmergencyError::ReleaseDenied)?;
+    requested_at
+        .checked_add(grant.wait_period.seconds())
+        .ok_or(EmergencyError::TimeOverflow)?;
+    if let Some(duration) = grant.duration.seconds() {
+        requested_at
+            .checked_add(grant.wait_period.seconds())
+            .and_then(|not_before| not_before.checked_add(duration))
+            .ok_or(EmergencyError::TimeOverflow)?;
+    }
+    Ok(ReleaseRequest {
+        request_id: Uuid::new_v4(),
+        trustee_id,
+        what: what.to_owned(),
+        condition,
+        item_revision,
+        requested_at,
+        last_event_at: requested_at,
+        state_revision: 1,
+        grant,
+        approvals: BTreeSet::new(),
+        state: ReleaseRequestState::Pending,
+    })
 }
 
 /// Splits a 32-byte secret (capsule key or recovery secret) into `total_shares`
@@ -269,6 +617,384 @@ mod tests {
             approver_ids.iter().copied().collect(),
         )
         .expect("valid grant")
+    }
+
+    fn timed_grant(
+        trustee_id: Uuid,
+        condition: AccessCondition,
+        wait_period: WaitPeriod,
+        duration: GrantDuration,
+        approvals_required: u8,
+        approver_ids: &[Uuid],
+    ) -> AccessGrant {
+        AccessGrant::new(
+            trustee_id,
+            "record",
+            Permission::View,
+            condition,
+            wait_period,
+            duration,
+            approvals_required,
+            approver_ids.iter().copied().collect(),
+        )
+        .expect("valid timed grant")
+    }
+
+    #[test]
+    fn timed_release_waits_then_releases_and_expires() {
+        let trustee = Uuid::new_v4();
+        let mut policy = AccessPolicy::new(true);
+        policy
+            .add_grant(timed_grant(
+                trustee,
+                AccessCondition::Emergency,
+                WaitPeriod::OneHour,
+                GrantDuration::OneHour,
+                0,
+                &[],
+            ))
+            .expect("add grant");
+
+        let mut request = begin_release_request(
+            &policy,
+            "record",
+            AccessCondition::Emergency,
+            trustee,
+            7,
+            1_000,
+        )
+        .expect("begin request");
+        assert_eq!(request.state_revision(), 1);
+        assert_eq!(
+            request.status(&policy, 7, 1_100).expect("status"),
+            ReleaseStatus::Waiting {
+                not_before: 4_600,
+                remaining_seconds: 3_500,
+            }
+        );
+        assert_eq!(
+            request.release(&policy, 7, 4_599).expect("not ready"),
+            ReleaseStatus::Waiting {
+                not_before: 4_600,
+                remaining_seconds: 1,
+            }
+        );
+        assert_eq!(request.state_revision(), 1);
+        assert_eq!(
+            request.release(&policy, 7, 4_600).expect("release"),
+            ReleaseStatus::Released {
+                permission: Permission::View,
+                released_at: 4_600,
+                expires_at: Some(8_200),
+            }
+        );
+        assert_eq!(request.state_revision(), 2);
+        assert_eq!(
+            request
+                .release(&policy, 7, 4_700)
+                .expect("idempotent release"),
+            ReleaseStatus::Released {
+                permission: Permission::View,
+                released_at: 4_600,
+                expires_at: Some(8_200),
+            }
+        );
+        assert_eq!(request.state_revision(), 2);
+        assert_eq!(
+            request.status(&policy, 7, 8_200).expect("expired"),
+            ReleaseStatus::Expired { expired_at: 8_200 }
+        );
+    }
+
+    #[test]
+    fn timed_release_requires_distinct_configured_approvals() {
+        let trustee = Uuid::new_v4();
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        let outsider = Uuid::new_v4();
+        let mut policy = AccessPolicy::new(true);
+        policy
+            .add_grant(timed_grant(
+                trustee,
+                AccessCondition::Incapacity,
+                WaitPeriod::Immediate,
+                GrantDuration::UntilRevoked,
+                2,
+                &[first, second],
+            ))
+            .expect("add grant");
+        let mut request = begin_release_request(
+            &policy,
+            "record",
+            AccessCondition::Incapacity,
+            trustee,
+            3,
+            500,
+        )
+        .expect("begin request");
+
+        assert_eq!(
+            request.status(&policy, 3, 500).expect("status"),
+            ReleaseStatus::AwaitingApprovals {
+                required: 2,
+                received: 0,
+            }
+        );
+        assert!(matches!(
+            request.approve(outsider, 501),
+            Err(EmergencyError::UnauthorizedApprover)
+        ));
+        assert!(request.approve(first, 501).expect("first approval"));
+        let revision_after_first = request.state_revision();
+        assert!(!request.approve(first, 501).expect("duplicate approval"));
+        assert_eq!(request.state_revision(), revision_after_first);
+        assert_eq!(
+            request.status(&policy, 3, 501).expect("one approval"),
+            ReleaseStatus::AwaitingApprovals {
+                required: 2,
+                received: 1,
+            }
+        );
+        assert!(request.approve(second, 502).expect("second approval"));
+        assert_eq!(
+            request.status(&policy, 3, 502).expect("eligible"),
+            ReleaseStatus::Eligible
+        );
+    }
+
+    #[test]
+    fn item_revision_or_grant_change_invalidates_pending_and_released_requests() {
+        let trustee = Uuid::new_v4();
+        let mut policy = AccessPolicy::new(true);
+        policy
+            .add_grant(timed_grant(
+                trustee,
+                AccessCondition::Emergency,
+                WaitPeriod::Immediate,
+                GrantDuration::UntilRevoked,
+                0,
+                &[],
+            ))
+            .expect("add grant");
+        let mut request = begin_release_request(
+            &policy,
+            "record",
+            AccessCondition::Emergency,
+            trustee,
+            12,
+            100,
+        )
+        .expect("begin request");
+
+        assert_eq!(
+            request
+                .release(&policy, 13, 100)
+                .expect("revision mismatch"),
+            ReleaseStatus::PolicyChanged
+        );
+        assert!(matches!(request.state(), ReleaseRequestState::Pending));
+
+        let mut changed_policy = policy.clone();
+        changed_policy.grants[0].permission = Permission::Download;
+        assert_eq!(
+            request
+                .release(&changed_policy, 12, 100)
+                .expect("grant mismatch"),
+            ReleaseStatus::PolicyChanged
+        );
+
+        assert!(matches!(
+            request.release(&policy, 12, 100).expect("release"),
+            ReleaseStatus::Released { .. }
+        ));
+        assert_eq!(
+            request.status(&policy, 13, 101).expect("post-release edit"),
+            ReleaseStatus::PolicyChanged
+        );
+    }
+
+    #[test]
+    fn owner_deny_and_revoke_are_terminal_and_idempotent() {
+        let trustee = Uuid::new_v4();
+        let mut policy = AccessPolicy::new(true);
+        policy
+            .add_grant(timed_grant(
+                trustee,
+                AccessCondition::Emergency,
+                WaitPeriod::OneDay,
+                GrantDuration::UntilRevoked,
+                0,
+                &[],
+            ))
+            .expect("add grant");
+        let mut denied = begin_release_request(
+            &policy,
+            "record",
+            AccessCondition::Emergency,
+            trustee,
+            1,
+            10,
+        )
+        .expect("begin denied request");
+        assert!(denied.deny(11).expect("deny"));
+        let denied_revision = denied.state_revision();
+        assert!(!denied.deny(12).expect("idempotent deny"));
+        assert_eq!(denied.state_revision(), denied_revision);
+        assert_eq!(
+            denied
+                .status(&AccessPolicy::new(true), 999, 13)
+                .expect("terminal deny"),
+            ReleaseStatus::Denied
+        );
+        assert!(matches!(
+            denied.revoke(13),
+            Err(EmergencyError::InvalidReleaseTransition)
+        ));
+
+        let mut released = begin_release_request(
+            &policy,
+            "record",
+            AccessCondition::Emergency,
+            trustee,
+            1,
+            100,
+        )
+        .expect("begin revoke request");
+        assert!(released.revoke(101).expect("revoke pending"));
+        let revoked_revision = released.state_revision();
+        assert!(!released.revoke(102).expect("idempotent revoke"));
+        assert_eq!(released.state_revision(), revoked_revision);
+        assert_eq!(
+            released
+                .status(&AccessPolicy::new(true), 999, 103)
+                .expect("terminal revoke"),
+            ReleaseStatus::Revoked
+        );
+    }
+
+    #[test]
+    fn released_access_can_be_revoked_before_duration_expires() {
+        let trustee = Uuid::new_v4();
+        let mut policy = AccessPolicy::new(true);
+        policy
+            .add_grant(timed_grant(
+                trustee,
+                AccessCondition::Emergency,
+                WaitPeriod::Immediate,
+                GrantDuration::SevenDays,
+                0,
+                &[],
+            ))
+            .expect("add grant");
+        let mut request = begin_release_request(
+            &policy,
+            "record",
+            AccessCondition::Emergency,
+            trustee,
+            5,
+            1_000,
+        )
+        .expect("begin request");
+        assert!(matches!(
+            request.release(&policy, 5, 1_000).expect("release"),
+            ReleaseStatus::Released { .. }
+        ));
+        assert!(request.revoke(1_001).expect("revoke released"));
+        assert_eq!(
+            request.status(&policy, 5, 1_002).expect("revoked status"),
+            ReleaseStatus::Revoked
+        );
+    }
+
+    #[test]
+    fn release_request_rejects_time_rewind_and_overflow() {
+        let trustee = Uuid::new_v4();
+        let approver = Uuid::new_v4();
+        let mut policy = AccessPolicy::new(true);
+        policy
+            .add_grant(timed_grant(
+                trustee,
+                AccessCondition::Emergency,
+                WaitPeriod::OneHour,
+                GrantDuration::UntilRevoked,
+                1,
+                &[approver],
+            ))
+            .expect("add grant");
+        let mut request = begin_release_request(
+            &policy,
+            "record",
+            AccessCondition::Emergency,
+            trustee,
+            2,
+            1_000,
+        )
+        .expect("begin request");
+        request.approve(approver, 1_100).expect("approve");
+        assert!(matches!(
+            request.status(&policy, 2, 1_099),
+            Err(EmergencyError::TimeRewind)
+        ));
+        assert!(matches!(
+            request.release(&policy, 2, 1_099),
+            Err(EmergencyError::TimeRewind)
+        ));
+
+        let mut overflow_policy = AccessPolicy::new(true);
+        overflow_policy
+            .add_grant(timed_grant(
+                trustee,
+                AccessCondition::Emergency,
+                WaitPeriod::OneHour,
+                GrantDuration::UntilRevoked,
+                0,
+                &[],
+            ))
+            .expect("add overflow grant");
+        assert!(matches!(
+            begin_release_request(
+                &overflow_policy,
+                "record",
+                AccessCondition::Emergency,
+                trustee,
+                1,
+                u64::MAX - 100,
+            ),
+            Err(EmergencyError::TimeOverflow)
+        ));
+    }
+
+    #[test]
+    fn release_request_creation_fails_closed_for_ungranted_or_destroyed_access() {
+        let trustee = Uuid::new_v4();
+        assert!(matches!(
+            begin_release_request(
+                &AccessPolicy::new(true),
+                "record",
+                AccessCondition::Emergency,
+                trustee,
+                1,
+                0,
+            ),
+            Err(EmergencyError::ReleaseDenied)
+        ));
+
+        let mut destroy = AccessPolicy::new(true);
+        destroy
+            .add_grant(timed_grant(
+                trustee,
+                AccessCondition::Death,
+                WaitPeriod::Immediate,
+                GrantDuration::UntilRevoked,
+                0,
+                &[],
+            ))
+            .expect("add death grant");
+        destroy.destroy_on(LegacyCondition::Death);
+        assert!(matches!(
+            begin_release_request(&destroy, "record", AccessCondition::Death, trustee, 1, 0,),
+            Err(EmergencyError::ReleaseDenied)
+        ));
     }
 
     #[test]

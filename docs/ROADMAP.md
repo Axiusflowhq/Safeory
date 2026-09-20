@@ -1,12 +1,20 @@
-# Safeory Roadmap — Full 1Password + Trustworthy Alternative
+# Safeory Roadmap — Combined 1Password Families + Trustworthy Alternative
 
 Status: strategy document. `PLAN.md` remains the source of truth for the V1
 local platform checklist; this document orders everything after it.
 
-Product definition: one zero-knowledge product that combines
-(a) a real password manager (logins, TOTP, autofill, password audit) and
-(b) a life-continuity vault (documents, property, insurance, vehicles,
-possessions, receipts, emergency access, legacy planning, trusted people).
+Product definition: one zero-knowledge consumer product that combines
+(a) the credential capabilities expected from 1Password Individual/Families
+(logins, TOTP, passkeys, autofill, security health, sharing, recovery, and
+multi-device use) and (b) the household operating capabilities expected from
+Trustworthy (structured life records, files, connections, reminders, Inbox,
+collaboration, continuity, and legacy planning).
+
+This is not a parity commitment for 1Password Business, Enterprise, or
+Developer. Workforce SSO/provisioning, SSH agents, CLI secret injection, and
+enterprise secrets automation remain outside the consumer product contract.
+The complete target architecture and capability contract are in
+`docs/architecture/combined-product.md`.
 
 Why not Vaultwarden: Vaultwarden is a server-only Bitwarden-API clone with no
 frontend and no reusable crypto. Safeory's portable `vault-*` crates already
@@ -24,7 +32,11 @@ Both surfaces share the same `vault-wasm` crypto/domain boundary. Keys stay in W
 
 Browser persistence is deliberately platform-specific: IndexedDB CAS for the web session and browser-extension storage for the extension background vault. Browser clipboard/filesystem capabilities require explicit user gestures and fail-closed handling where lifetime or permission guarantees are weaker than the core cryptographic guarantees.
 
-Non-goals that STAY: banking/investment aggregation, resale marketplace, whole-vault cloud AI, ads/data business, company-side decryption, and standalone mobile apps (mobile web + the extension cover the need for now).
+Non-goals that STAY: banking/investment aggregation, resale marketplace,
+whole-vault cloud AI, ads/data business, company-side decryption, and standalone
+native apps for the current roadmap. Responsive web and the extension are the
+committed surfaces; native-only autofill, background, and hardware-keystore
+capabilities are not claimed.
 
 ## Decision 1 — production hosting: AWS
 
@@ -43,7 +55,28 @@ The AWS decision does not change the zero-knowledge boundary. Master-passphrase
 processing, vault/item/attachment encryption and decryption, usable vault keys,
 recovery secrets, and unlocked search stay on authorized clients.
 
+## Architecture gates before connected-product claims
+
+The following must be designed and reviewed before their dependent features are
+called production-ready:
+
+1. account -> household -> space -> item domain and migration from the current
+   single-owner vault;
+2. independently rotatable private/shared space keys;
+3. a high-entropy Account Secret or equivalent device-enrollment factor for
+   remotely stored vaults;
+4. a versioned sync protocol covering bootstrap, offline writes, conflicts,
+   tombstones, attachments, history, revocation, and client compatibility;
+5. minimal append-only security events plus encrypted household activity;
+6. privacy modes for reminders, notifications, ingestion, OCR, and AI;
+7. authenticated invitation, SecureLink, trustee, and emergency-release
+   protocols.
+
+The target sync and household-key distribution contract is
+`docs/architecture/sync.md`.
+
 ## Phase map (ordered; each phase keeps all verification gates green)
+
 ### Phase 1 — Finish V1 local platform + WASM extraction (core complete)
 **Verification status: workspace Rust tests and dependency-policy gates are
 green; contracts typecheck/test/lint and web + extension typecheck/test/lint/build
@@ -76,10 +109,9 @@ gates are green, including the generated-WASM Node smoke test.**
   from `vault-core` with fail-closed tests. Verified in Node across the real
   WASM boundary (`smoke.test.mjs` is part of `test:browser` and covers the
   browser-vault crypto/durability surface including principal/grant/retirement
-  state; v10 pairing protocol/completion semantics are covered by native Rust
-  tests, including the `vault-wasm` crate, while generated-WASM smoke does not
-  exercise pairing until a shipped recipient responder can drive that flow end
-  to end).
+  state and the generated recipient-device pairing responder. Pairing generation,
+  private-key restoration, challenge response, and owner completion are exercised
+  across the real JS/WASM boundary in addition to native Rust tests).
 - ✅ DONE: `apps/web` vault UI — sidebar by record type with counts, item
   list + search, and schema-driven create/edit forms for ALL record kinds
   (credentials with inline generator, notes, documents, insurance, financial,
@@ -105,44 +137,54 @@ gates are green, including the generated-WASM Node smoke test.**
   build all green.
 - ✅ DONE: encrypted per-item grant persistence, separate continuity-contact and
   stable local principal registries, bounded recipient-encryption device bindings,
-  and browser grant-planning UX for per-record rules. TODO: a durable
-  recipient-side device-key backend/pairing responder plus signed release/approval
-  enforcement before any grant is actionable outside local planning. Local
-  dual-key pairing verification is implemented; it does not enable release.
-- ✅ DONE: Today/deadlines is exposed as a redacted unlocked-only WASM projection and rendered lazily in the web app. TODO: browser attachments and item links/jump navigation; add headless-browser `wasm-pack test` when a browser is available.
+  browser grant-planning UX, and durable browser recipient-device identities. The
+  browser stores X25519+Ed25519 private material only as AES-GCM ciphertext under
+  a non-extractable local Web Crypto wrapping key, exposes public registration,
+  answers one-shot pairing challenges through WASM, and persists the verified
+  Ed25519 binding on the owner side. TODO: authenticated remote invitation/pairing
+  transport plus signed release/approval enforcement before any grant is actionable
+  outside local planning. Pairing proves device-key possession; it does not enable
+  release or establish real-world human identity.
+- ✅ DONE: Today/deadlines is exposed as a redacted unlocked-only WASM projection and rendered lazily in the web app. Browser attachments are implemented. TODO: item links/jump navigation and headless-browser `wasm-pack test` when a browser is available.
+- ✅ DONE (core simulation): `vault-emergency` now includes a fail-closed, revision-fenced timed-release request state machine covering approvals, wait periods, release/expiry, deny/revoke, idempotency, policy/revision changes, overflow, and clock-rewind rejection. TODO: expose only reviewed simulation/readiness surfaces in the web app, then add authenticated remote trustee delivery and a durable PostgreSQL/worker coordinator.
 - Keep gates: frozen-lockfile install, `cargo fmt/clippy/test/audit/deny`, Compose
   config validation, Bun typecheck/test:browser/lint/check:icons/build/audit:js.
 
-### Phase 2 — Credential core upgrade (pure `vault-*` crates)
-Make credentials a first-class password-manager record, not a secure note:
-- A future payload schema after current v10: structured login item (multiple URLs/hosts, username,
-  password, password history, encrypted TOTP seed, notes, custom fields).
-- Password-strength audit in `vault-core` (local scoring, reuse detection,
-  age alerts) feeding the Today panel and the extension badge.
-- TOTP generator (RFC 6238); secrets stay encrypted, codes computed on demand.
-- Optional breach check via k-anonymity (HIBP range API), explicit opt-in,
-  default offline; documented in `server-visible-metadata.md`.
-- Importers: Bitwarden CSV/JSON and 1Password 1pux/CSV -> items + attachments.
-- Web-app UI for all of the above (built on `vault-wasm`).
+### Phase 2 — Household, space, and account-key foundation
 
-### Phase 3 — All-in-one extension (`apps/extension`) — the flagship surface
-Replaces the old "native-messaging companion" idea; the extension is now a
-first-class, standalone client sharing the same WASM core and UI package.
-- MV3 extension for Chromium + Firefox; React UI from `packages/ui`.
-- Unlock via the same `vault-wasm`; session unlock state in
-  `chrome.storage.session` (memory-scoped, cleared on browser close);
-  optional biometric/PIN re-unlock later.
-- Autofill: content script detects login forms, suggests items matched by
-  exact HTTP(S) origin (never substring; no cross-origin iframe fill),
-  fills only on explicit user action; inline password generator.
-- Save/capture: offer to save new or updated logins on submit.
-- Mini-vault: browse/search all record types, view/copy credentials + TOTP,
-  quick-add notes/receipts, read-only Emergency Card, Today/deadline badge.
-- ✅ Browser/extension threat model updated for malicious pages, sender
-  authentication, exact-origin fill, WASM-memory limits, CSP, browser-local
-  persistence races, and clipboard residual risk. Per-tab+origin credential
-  discovery throttling and one-shot fill authorization are implemented;
-  durable clipboard ownership remains follow-up hardening.
+- Add versioned Account, Household, Membership, Role, Space, and SpaceMember
+  contracts without exposing human-readable household/space names to the server.
+- Migrate the current local vault to one account, one household, and one private
+  space without re-encrypting plaintext outside the client boundary.
+- Implement independently rotatable private/shared/purpose-space keys and
+  membership envelopes. Keep random per-item and attachment keys.
+- Write the sync protocol specification and compatibility matrix before adding
+  a second implementation.
+- Decide the high-entropy Account Secret/device-enrollment construction in an
+  ADR, implement recovery/new-device enrollment, and test server-dump offline
+  attack resistance. Cognito authentication alone is insufficient.
+- Add minimal security-event and encrypted activity-event formats.
+
+### Phase 3 — Credential core and all-in-one extension
+
+Make credentials first-class password-manager records and complete the browser
+surface:
+
+- structured logins with multiple origins, username, password history,
+  encrypted TOTP seed, passkeys, notes, custom fields, and attachments;
+- password/passphrase generation plus local strength, reuse, age, passkey, and
+  2FA opportunity analysis feeding Today and the extension badge;
+- optional k-anonymity breach checks, explicit opt-in and default offline;
+- Bitwarden CSV/JSON and 1Password 1pux/CSV importers with a review/dry-run step;
+- form-fill identities, addresses, and payment cards;
+- Chromium and Firefox extension packaging, `chrome.storage.session` unlock,
+  save/update capture, inline generation, exact-origin autofill, TOTP, and
+  passkeys where browser APIs permit;
+- mini-vault search across authorized spaces and compact Today/Emergency Card;
+- durable background/offscreen compare-and-clear for clipboard ownership where
+  supported, with honest platform limitations;
+- keep the implemented sender authentication, origin binding, rate limits,
+  one-shot fill authorization, CSP, and fail-closed mutation persistence.
 
 ### Phase 4 — AWS sync + multi-device (in implementation)
 - **Status: in implementation.** The Rust API and opaque sync contract exist,
@@ -161,9 +203,11 @@ first-class, standalone client sharing the same WASM core and UI package.
   SES, IAM/secrets, CloudWatch, backup/restore, and GitHub Actions OIDC deploy.
 - Keep `docker-compose.yml` as the local integration environment using
   PostgreSQL/Valkey/Garage/Mailpit; it is not the production hosting plan.
-- `vault-sync`: device keypairs (X25519), envelope sync protocol,
-  conflict = last-writer-wins on revisions + tombstones (history already
-  bounded at 20 revisions/item).
+- `vault-sync`: device keypairs (X25519), space/item key envelopes, and a
+  versioned opaque sync protocol. Exact revision preconditions reject stale
+  overwrites; conflict handling preserves both candidates or requires explicit
+  user resolution rather than silently applying last-writer-wins. Tombstones
+  and history remain bounded.
 - Cognito-backed account creation/sign-in/email verification plus Safeory
   device registration/revocation UX. Cognito identity does not replace the
   per-device cryptographic identity used by sync/sharing.
@@ -175,37 +219,77 @@ first-class, standalone client sharing the same WASM core and UI package.
 - This is what makes the *extension* useful across machines: the web app and
   every installed extension sync through it.
 
-### Phase 5 — Web app reaches full deep-management parity (`apps/web`)
-- Deep-management surface: full record editing, attachments (encrypted, per
-  `vault-*`), portable export + recovery kit (File System Access API),
-  legacy planning, Plan Test, settings, device management.
-- **Emergency portal** mode: trusted-person access-request flow,
-  waiting-period countdown, release delivery of sealed envelopes with
-  client-side decryption in the trustee's browser.
-- Strict CSP; no service-worker caching of decrypted data.
+Additional completion requirements from the combined-product architecture:
 
-### Phase 6 — Mobile (web-first, no native apps for now)
-- Responsive/mobile-web build of `apps/web` covers vault access on phones.
-- Mobile *password autofill* is intentionally deferred (iOS AutoFill /
-  Android Autofill require native shells); revisit only if it becomes a
-  hard requirement. Copy/paste from mobile web is the interim answer.
+- household membership and space-key envelope delivery;
+- append-only security events and encrypted household activity objects;
+- pagination/bounds for large file-centric households;
+- interrupted chunk resume, attachment integrity, quota, and garbage collection;
+- key-envelope rotation after member/device revocation;
+- Travel Mode residency state and authenticated restoration;
+- protocol downgrade/compatibility tests across at least the oldest supported
+  web and extension versions.
 
-### Phase 7 — Trust Engine end-to-end (the Trustworthy differentiator)
+### Phase 5 — Household operating system and private Inbox
+
+- Add dedicated family identity, medical, tax, legal, business, contact, and
+  general-document schemas alongside the implemented record kinds.
+- Deliver page details, notes, encrypted folders/files, connections, custom and
+  recurring reminders, and item/history navigation.
+- Add Files, Inbox, Reminders, and Activity views with local search/filtering.
+- Support upload, drag/drop, extension capture, and client-side imports.
+- Implement local OCR/extraction/classification/summarization and user-reviewed
+  filing, field, connection, and reminder suggestions. Any remote processing
+  requires a separate opt-in ADR and must not be represented as zero knowledge.
+- Provide private-local reminders and an opt-in cloud-scheduled generic
+  notification mode using only the minimum metadata permitted by
+  `server-visible-metadata.md`.
+- Keep strict CSP; never cache decrypted data in a service worker.
+
+### Phase 6 — Household collaboration and secure sharing
+
+- Full, partial, and legacy collaborator invitations over authenticated account
+  and device transport.
+- Shared-space and selected-item view/edit permissions with revocation and key
+  rotation.
+- SecureLinks using encrypted immutable copies, explicit audience/expiry,
+  revocation, and no password history.
+- Device inventory, account recovery roles, security notifications, and
+  household activity/audit UX.
+- Travel Mode removes non-travel space keys and ciphertext from participating
+  devices and restores them only after authenticated sync.
+- Portable household export and account deletion with documented server backup
+  retention/cryptographic-erasure behavior.
+
+### Phase 7 — Trust Engine end-to-end (continuity differentiator)
 - Trusted-person identity + invitation flow over sync transport.
-- Timed-release state machine: PostgreSQL is the durable source of truth for
-  wait periods, request/revoke/release transitions, revisions, and idempotency;
-  Valkey workers schedule/retry jobs but cannot independently authorize a
-  release. The server enforces timing only (documented limitation).
+- Promote the already-tested local timed-release state machine to durable
+  coordination: PostgreSQL becomes the source of truth for wait periods,
+  request/revoke/release transitions, revisions, and idempotency; Valkey workers
+  schedule/retry jobs but cannot independently authorize a release. The server
+  enforces timing only (documented limitation).
 - Enforce legacy/private-forever/destruction intent once grants + release
   machinery exist. Plan Test becomes a full simulation.
+- Ship the trustee portal, signed request/approval protocol, owner alerts,
+  waiting-period countdown, sealed-capsule delivery, denial/revocation, expiry,
+  and policy/revision invalidation across devices.
+- Define operational evidence, false-claim handling, support boundaries, audit
+  retention, and incident procedures. Device-key possession must never be
+  presented as verified human identity.
 
-### Phase 8 — Hardening & launch
+### Phase 8 — Platform reach, hardening, and launch
 - External security audit of `vault-crypto`/`vault-emergency`/`vault-sharing`
   and the new `vault-wasm` boundary.
 - Passkeys/TOTP polish, travel mode, richer audit log, version-history
   restore (currently deferred).
 - Performance: unlock-time KDF calibration, WASM bundle size, large-vault
   list virtualization.
+- Responsive web remains the committed mobile surface. Native clients require
+  a new ADR, but Safeory must not claim native mobile autofill, dependable
+  background scanning/reminders, universal desktop autofill, or hardware-backed
+  biometric isolation until such clients exist.
+- Production parity gate covers the declared consumer matrix only. Unsupported
+  capabilities remain visible release notes rather than implied parity.
 
 ## Cross-cutting rules (never waived)
 1. Dependency direction stays inward to portable crates; no core crate may
@@ -222,10 +306,15 @@ first-class, standalone client sharing the same WASM core and UI package.
 | # | Question | Recommendation |
 |---|----------|----------------|
 | 0 | Crypto delivery | RESOLVED — WASM the Rust core (ADR 0003); no TS rewrite |
-| 1 | Browser storage backend | RESOLVED — IndexedDB via plain TS (`packages/contracts/persistence.ts`) persisting the ciphertext `KVSnapshot`; no Rust storage dep in WASM, preserving `#![forbid(unsafe_code)]` |
+| 1 | Browser storage backend | RESOLVED — IndexedDB via plain TS (`packages/contracts/src/persistence.ts`) persisting the ciphertext `KVSnapshot`; no Rust storage dep in WASM, preserving `#![forbid(unsafe_code)]` |
 | 2 | Extension unlock scope | `chrome.storage.session` + per-origin fill confirmation |
 | 3 | Breach checking | Opt-in k-anonymity only, default off |
 | 4 | Passkeys | Store/sync passkey metadata first; full passkey *provider* in the extension deferred |
 | 5 | Mobile | Responsive web only; native autofill deferred |
 | 6 | Sync backend | RESOLVED — AWS production: Rust HTTP API + Cognito + RDS PostgreSQL + S3 ciphertext storage + Valkey/ElastiCache as ephemeral coordination + SES + CloudFront/Route 53/ACM; Docker Compose is local development only |
 | 7 | AWS production packaging | RESOLVED architecture in `docs/architecture/aws.md`; implement reviewable IaC under `infra/aws/`, OIDC CI/CD, migrations, health checks, observability, and tested backup/restore before Phase 4 is production-ready |
+| 8 | Product parity boundary | RESOLVED — target 1Password Individual/Families + Trustworthy household/continuity; exclude 1Password Business/Enterprise/Developer |
+| 9 | Household key boundary | Space/compartment keys with explicit private/shared membership; finalize envelope/rotation ADR before Phase 2 implementation |
+| 10 | Cloud offline-attack factor | Add a high-entropy Account Secret or equivalent device-enrollment factor; exact construction and migration require review |
+| 11 | Document automation | Local/private processing by default; any remote OCR/AI is explicit opt-in with a separate disclosure/threat ADR |
+| 12 | Reminder scheduling | Offer private-local and opt-in minimal-metadata cloud scheduling; never put reminder content in email/push metadata |

@@ -10,6 +10,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 getrandom.workspace = true
+js-sys = "=0.3.83"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

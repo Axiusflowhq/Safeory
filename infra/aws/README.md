@@ -4,6 +4,12 @@ AWS is Safeory's production hosting target. The service-level architecture,
 security boundary, launch topology, scale-up path, and production-ready gate are
 defined in `docs/architecture/aws.md`.
 
+The deployed system must also satisfy the combined consumer-product and sync
+contracts in `docs/architecture/combined-product.md` and
+`docs/architecture/sync.md`, including account/household/private-and-shared
+spaces, Account Secret review, key-envelope rotation, collaboration,
+SecureLinks, generic reminders, and Trust Engine coordination.
+
 Infrastructure as code will live in this directory. Do not treat manual AWS
 console configuration as the source of truth.
 

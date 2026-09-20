@@ -1,6 +1,7 @@
 "use client"
 
 import { useRef, useState } from "react"
+import Image from "next/image"
 import {
   AlertCircleIcon,
   ArrowLeft01Icon,
@@ -117,21 +118,14 @@ export function PassphraseGate({
     <main className="flex min-h-svh items-center justify-center bg-[var(--surface)] px-4 py-10">
       <section className="w-full max-w-md overflow-hidden rounded-[var(--radius-default)] border bg-[var(--surface)] text-[var(--text-primary)] shadow-[var(--fancy-shadow-basic)]">
         <div className="border-b bg-[var(--surface-secondary)] px-6 py-6 sm:px-8">
-          <div className="mb-5 flex size-11 items-center justify-center rounded-[var(--radius-default)] border bg-[var(--surface)] shadow-[var(--fancy-shadow-basic)]">
-            <HugeiconsIcon
-              icon={
-                showRecovery
-                  ? KeyRoundIcon
-                  : isImport
-                    ? DatabaseRestoreIcon
-                    : isSetup
-                      ? VaultIcon
-                      : LockKeyIcon
-              }
-              strokeWidth={1.8}
-              className="size-5 text-[var(--icon-active)]"
-            />
-          </div>
+          <Image
+            src="/branding-assets/safeory-logo.svg"
+            alt="Safeory"
+            width={48}
+            height={48}
+            className="mb-5 size-12"
+            priority
+          />
           <h1 className="text-xl font-semibold tracking-tight text-[var(--text-primary)]">
             {showRecovery
               ? "Unlock with recovery key"

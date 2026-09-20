@@ -4,6 +4,10 @@ Status: production deployment target. The local Docker Compose stack remains a
 development/integration environment; AWS is the intended hosted production
 environment for Safeory.
 
+This topology hosts the connected form of the combined consumer product defined
+in `docs/architecture/combined-product.md`: credential sync, household spaces,
+collaboration, SecureLinks, generic reminders, and continuity coordination.
+
 ## Goals
 
 The first production topology is intentionally small enough for roughly the
@@ -22,11 +26,14 @@ These responsibilities do **not** move to AWS:
 
 - master-passphrase processing and Argon2id key derivation;
 - AccountRootKey, per-item keys, attachment keys, and recovery secrets;
+- production Account Secret processing and private/shared space-key unwraps;
 - vault/item/attachment plaintext encryption and decryption;
 - local unlocked search and password/TOTP calculations that do not require a
   network service;
 - the unlocked WASM session and same-tab reload-resume capability;
 - plaintext export/import processing before encrypted data is uploaded.
+- OCR, classification, summarization, and filing suggestions in the default
+  private-local automation mode.
 
 AWS receives only the server-visible metadata documented in
 `docs/security/server-visible-metadata.md` plus opaque ciphertext objects.
@@ -86,9 +93,10 @@ flowchart TD
   supported), Single-AZ, encrypted storage, automated backups, deletion
   protection, and private database subnets.
 - RDS stores account/device/auth-routing metadata, opaque sync metadata,
-  revisions, idempotency state, audit/security workflow metadata, and later
-  trusted-person/emergency policy state. It never stores vault plaintext or a
-  usable vault key.
+  household/space membership and role codes, revisions, idempotency state,
+  minimal audit/security events, reminder delivery envelopes, SecureLink state,
+  and trusted-person/emergency workflow state. It never stores household/space
+  names, reminder content, vault plaintext, or a usable vault key.
 - Schema migrations remain source-controlled under `apps/api/migrations` and
   run as an explicit deployment step before the new API version receives
   traffic.
@@ -121,16 +129,17 @@ flowchart TD
 
 ### Email
 
-- **Amazon SES** sends verification, security-event, invitation, and emergency-
-  workflow notifications.
+- **Amazon SES** sends verification, security-event, invitation, emergency-
+  workflow, and opt-in generic reminder notifications.
 - Email must never contain vault item names/values, attachment plaintext,
-  recovery secrets, or usable decryption material.
+  reminder titles/notes, recovery secrets, or usable decryption material.
 - Mailpit remains local-development tooling only.
 
 ### Valkey and background work
 
 - Valkey is strictly ephemeral: rate-limit counters, retry coordination,
-  deduplication windows, and worker wakeups.
+  deduplication windows, reminder/emergency worker wakeups, and short-lived
+  delivery attempts.
 - For the first ~100 users, Valkey may run as a container on the AWS API host
   because loss of this state must never invalidate durable authorization or
   emergency-policy correctness.
@@ -201,6 +210,30 @@ flowchart TD
   restore PostgreSQL, restore/reconcile ciphertext objects, start a clean API,
   and prove an authorized client can sync/decrypt its own data without the
   server receiving plaintext.
+- Restore drills must also prove household memberships, space-key envelope
+  versions, revocations, SecureLink expiry, reminder delivery state, and
+  emergency workflow fencing remain consistent with the restored object set.
+
+## Connected-product service rules
+
+- Cognito account identity, Safeory device authorization, household roles, and
+  cryptographic space membership are separate checks. No single layer grants
+  content access by itself.
+- The service routes encrypted space/item key envelopes but never receives the
+  production Account Secret, SpaceKey, ItemKey, or trustee capsule key.
+- SecureLinks expose encrypted immutable copies or revisions. RDS stores only
+  capability hashes, audience mode, expiry, revocation, rate-limit state, and
+  opaque object references.
+- Cloud reminder scheduling is opt-in. RDS stores only the next delivery time,
+  opaque reminder/account routing IDs, delivery channel, and state. SES/push
+  content is generic.
+- Ordinary SMTP document forwarding is not part of the zero-knowledge topology.
+  Client-side connectors retrieve and encrypt locally. Any future remote
+  ingestion or OCR/AI processor requires a separate trust-boundary ADR.
+- The durable security-event stream contains only reviewed event types and
+  opaque references. Human-readable household activity is an encrypted object.
+- Emergency and legacy workers may advance only transitions permitted by the
+  durable PostgreSQL state machine. A queue message is never authorization.
 
 ## Cost posture
 
@@ -235,12 +268,17 @@ AWS hosting is not considered complete until all of these are true:
 
 1. infrastructure exists as reviewable IaC;
 2. Cognito-backed account flow and Safeory device authorization are integrated;
-3. end-to-end web/extension sync passes conflict/offline/reconnect/revocation
-   tests;
-4. RDS and S3 backup/restore drills pass;
-5. secrets are outside source/build artifacts and deploy uses short-lived IAM;
-6. CloudWatch alarms/log retention and redaction are verified;
-7. TLS/CSP/security headers and origin restrictions are tested;
-8. no AWS service receives vault plaintext or usable vault/recovery keys;
-9. load/soak testing covers the expected launch population with headroom;
-10. the security threat model is reviewed against the final deployed topology.
+3. the Account Secret/device-enrollment design and current local-vault migration
+   have passed security review;
+4. household/private/shared space membership and key rotation work end-to-end;
+5. web/extension sync passes conflict/offline/reconnect/revocation, attachment,
+   compatibility, and interrupted-transfer tests;
+6. collaborator invitations, SecureLinks, generic reminders, and security-event
+   flows pass authorization and metadata-leakage tests;
+7. RDS and S3 backup/restore drills pass;
+8. secrets are outside source/build artifacts and deploy uses short-lived IAM;
+9. CloudWatch alarms/log retention and redaction are verified;
+10. TLS/CSP/security headers and origin restrictions are tested;
+11. no AWS service receives vault plaintext or usable vault/recovery/space keys;
+12. load/soak testing covers the expected launch population with headroom;
+13. the security threat model is reviewed against the final deployed topology.

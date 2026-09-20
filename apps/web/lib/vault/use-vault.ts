@@ -6,8 +6,11 @@ import {
   VaultDurabilityError,
   type AttachmentSummary,
   type DeadlineSummary,
+  type DeviceRegistrationV1,
   type EmergencyCard,
   type EmergencyContact,
+  type PairingChallengeV1,
+  type PairingProofV1,
   type TrashedItemSummary,
   type TrustedPrincipal,
   type VaultSession,
@@ -19,7 +22,7 @@ import {
   refreshSessionResume,
   resumeSessionFromReload,
 } from "./session-resume"
-import { loadVaultSession, wasmStatics } from "./vault"
+import { browserDeviceKeyStore, loadVaultSession, wasmStatics } from "./vault"
 
 export type VaultPhase = "loading" | "load_error" | "setup" | "unlock" | "open"
 
@@ -446,6 +449,80 @@ export function useVault() {
     [run]
   )
 
+  const createTrustedDevicePairingChallenge = useCallback(
+    (principalId: string, deviceId: string): PairingChallengeV1 | null => {
+      const session = sessionRef.current
+      if (!session || !session.isUnlocked()) return null
+      try {
+        setError(null)
+        return session.createTrustedDevicePairingChallenge(principalId, deviceId)
+      } catch (pairingError: unknown) {
+        setError(errorMessage(pairingError))
+        return null
+      }
+    },
+    []
+  )
+
+  const completeTrustedDevicePairing = useCallback(
+    (proof: PairingProofV1) =>
+      run(async (session) => {
+        await session.completeTrustedDevicePairing(proof)
+      }),
+    [run]
+  )
+
+  const listBrowserDeviceIdentities = useCallback(async (): Promise<
+    DeviceRegistrationV1[]
+  > => {
+    try {
+      setError(null)
+      return await browserDeviceKeyStore.listIdentities()
+    } catch (deviceError: unknown) {
+      setError(errorMessage(deviceError))
+      return []
+    }
+  }, [])
+
+  const createBrowserDeviceIdentity = useCallback(async (): Promise<
+    DeviceRegistrationV1 | null
+  > => {
+    try {
+      setError(null)
+      return await browserDeviceKeyStore.createIdentity(newId())
+    } catch (deviceError: unknown) {
+      setError(errorMessage(deviceError))
+      return null
+    }
+  }, [])
+
+  const deleteBrowserDeviceIdentity = useCallback(
+    async (deviceId: string): Promise<boolean> => {
+      try {
+        setError(null)
+        await browserDeviceKeyStore.deleteIdentity(deviceId)
+        return true
+      } catch (deviceError: unknown) {
+        setError(errorMessage(deviceError))
+        return false
+      }
+    },
+    []
+  )
+
+  const answerBrowserPairingChallenge = useCallback(
+    async (challenge: PairingChallengeV1): Promise<PairingProofV1 | null> => {
+      try {
+        setError(null)
+        return await browserDeviceKeyStore.answerPairingChallenge(challenge)
+      } catch (deviceError: unknown) {
+        setError(errorMessage(deviceError))
+        return null
+      }
+    },
+    []
+  )
+
   const installRecoveryKit = useCallback(
     () =>
       run(async (session) => {
@@ -528,6 +605,12 @@ export function useVault() {
     setEmergencyContacts,
     setEmergencyInstructions,
     setTrustedPrincipals,
+    createTrustedDevicePairingChallenge,
+    completeTrustedDevicePairing,
+    listBrowserDeviceIdentities,
+    createBrowserDeviceIdentity,
+    deleteBrowserDeviceIdentity,
+    answerBrowserPairingChallenge,
     installRecoveryKit,
     clearGeneratedSecret,
   }

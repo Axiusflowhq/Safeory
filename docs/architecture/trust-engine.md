@@ -3,9 +3,14 @@
 Status: cryptographic/policy foundation, encrypted per-item grant persistence,
 stable local trusted-principal UUIDs, recipient-encryption device bindings, and
 browser grant-planning UX are implemented. The local dual-key pairing/signing
-verifier and persisted signing-key binding are implemented; recipient-side
-durable key storage/responder, AWS-coordinated timed release, and actionable
-release enforcement remain in progress.
+verifier, durable browser recipient-device key store/responder, and persisted
+signing-key binding are implemented; authenticated remote pairing transport,
+AWS-coordinated timed release, and actionable release enforcement remain in
+progress.
+
+This document covers continuity authorization inside the combined-product
+architecture. Household membership and ordinary collaboration are separate from
+emergency/legacy policy; see `docs/architecture/combined-product.md`.
 
 Implementation status: the policy model (`AccessPolicy`/`AccessGrant`,
 conditions, wait periods, durations, private-forever, destruction) with
@@ -28,11 +33,13 @@ recipient/signing key; rotation is remove + add with a fresh device UUID and
 fresh key pair.
 Browser grant planning binds explicit principal UUIDs to the canonical per-record
 scope `record`; advanced/custom/legacy rules are preserved rather than rewritten.
-The timed-release state machine is still pending — no UI or server path can
-release anything today. The local Plan
-Test checks only locally enforceable preparedness (Emergency Card
-completeness and recovery-key verification) and reports aggregate local legacy
-planning coverage; it is not a release simulation. Each regular vault item can
+The portable local timed-release state machine is implemented in
+`vault-emergency`: it models request creation, approvals, configured waiting
+periods, release eligibility, finite-duration expiry, denial, revocation,
+revision/policy invalidation, idempotent retries, and clock-rewind rejection.
+It is currently a simulation/test primitive only — no shipped UI or server path
+releases anything today. The integrated Plan Test/readiness UI is also still
+pending. Each regular vault item can
 also carry one encrypted `LegacyDisposition` planning preference
 (`Unspecified`, `SelectedForLegacy`, `PrivateForever`, `DestroyOnDeath`). That
 preference is not an `AccessPolicy`, grants no access, and triggers no automatic
@@ -44,6 +51,28 @@ release or deletion.
 - No automatic whole-vault AI access. No email/browser ingestion in V1.
 - Password autofill belongs to the password-manager extension and is outside the
   Trust Engine scope. Banking connections and marketplaces remain non-goals.
+
+## Identity and access layers
+
+Safeory must not collapse these distinct concepts:
+
+1. **Account identity** authenticates a person to the hosted service.
+2. **Household membership and role** authorize account-management operations.
+3. **Device identity** proves possession of encryption/signing keys and is
+   independently revocable.
+4. **Space membership** delivers current private/shared content keys.
+5. **Per-item grants** narrow or extend access to a specific record.
+6. **Continuity policy** controls future emergency/incapacity/death release.
+
+A household `owner` or `organizer` does not automatically receive another
+member's private-space keys. A full collaborator receives explicitly selected
+shared-space membership, not implicit private access. A partial collaborator
+receives only selected space/item envelopes and capabilities. A legacy
+collaborator receives no current content key solely from the legacy
+designation.
+
+Server-side role checks and client-side cryptographic authorization are both
+required. Passing one without the other fails closed.
 
 ## V1 scope (from product vision)
 
@@ -58,20 +87,25 @@ sharing envelope format, recovery kit, device management, portable export.
 ## Key hierarchy (target, backwards-compatible)
 
 ```text
-Master passphrase
-  -> Argon2id KEK
-  -> unwrap AccountRootKey (random 256-bit, existing v1 format)
-       |-- HKDF "lifevault:v1:item-wrap" -> per-item keys (existing)
-       |-- HKDF "safeory:v1:compartment-wrap:<compartment-id>"
-       |     -> per-compartment wrap key -> per-item keys in that compartment
-       |-- HKDF "safeory:v1:emergency-wrap" -> emergency capsule keys (Phase 3)
+Master passphrase + production Account Secret/device enrollment factor
+  -> reviewed unlock/key-combining construction
+  -> unwrap AccountRootKey (random 256-bit; passphrase-only v1 exists today)
+       |-- private/shared space key envelopes (target)
+       |     `-- per-item keys in that space
+       |-- HKDF "lifevault:v1:item-wrap" -> current per-item keys (existing)
+       |-- HKDF "safeory:v1:compartment-wrap:<space-id>" (target)
+       |-- attachment keys
+       `-- HKDF "safeory:v1:emergency-wrap" -> emergency capsule keys
 ```
 
 Rules:
 
 1. Existing `lifevault:v1:item-wrap` domain is immutable wire format. Do not
    rename. New compartments use `safeory:v1:*`.
-2. All Ownership kinds reuse the existing per-item envelope. Item payload schema
+2. Before production cloud launch, an ADR must define a high-entropy Account
+   Secret or equivalent device-enrollment factor, format migration, and recovery
+   behavior. Cognito authentication does not replace client-side key protection.
+3. All Ownership kinds reuse the existing per-item envelope. Item payload schema
    v4 introduced the required per-item legacy-planning disposition. Readers
    explicitly decode v1-v3 as `Unspecified`; older builds that only understand
    through v3 reject v4 rather than silently dropping the field. Later payload
@@ -80,10 +114,19 @@ Rules:
    did not change for the v4 payload-only migration.
    Compartments remain future work, with key separation requiring its own
    reviewed migration.
-3. Per-item keys stay random per revision. Sharing wraps only the item key to
+4. Per-item keys stay random per revision. Sharing wraps only the item key to
    the recipient device public key; never the root/compartment key.
-4. Destroying a compartment/item key makes its blobs cryptographically
+5. Destroying a space/item key makes its blobs cryptographically
    inaccessible (secure-deletion principle). Cloud replicas are assumed.
+
+6. Removing a collaborator prevents future envelope delivery and rotates the
+   affected space key for future writes. It cannot revoke plaintext or keys
+   already copied by a formerly authorized device; product copy must state this
+   limitation.
+
+7. Travel Mode is implemented at the space boundary by deleting non-travel
+   space keys and local ciphertext from participating devices. Hiding UI rows is
+   not Travel Mode.
 
 ## Ownership Graph (V1 minimal)
 
@@ -111,9 +154,10 @@ Policy {
 ```
 
 Conditions V1: `normal | emergency | incapacity | death`.
-`emergency` maps to the planned timer-coordinated release path; the future
-coordinator will enforce timing but cannot decrypt (documented limitation, no
-fake time-lock crypto claims).
+`emergency` maps to the timer-coordinated release path. The portable core now
+models timing and state transitions locally; the future durable coordinator will
+enforce those transitions across devices but cannot decrypt (documented
+limitation, no fake time-lock crypto claims).
 
 V1 enforcement order: owner-only + explicit per-item grants + waiting period +
 deny/revoke wins over release. 2-of-3 threshold uses standard Shamir sharing
@@ -126,7 +170,34 @@ both keys against a one-time owner challenge and persists that binding to the
 existing device UUID. This is device-key authentication, not human-identity
 verification. Future release must still verify a domain-separated signed
 request from an active paired device, resolve it to a principal UUID, and only
-then evaluate policy. Timed-release coordination remains pending.
+then evaluate policy. The local release state machine is implemented; remote
+authenticated delivery and durable coordination remain pending.
+
+## Remote protocol requirements
+
+The production Trust Engine must add:
+
+- authenticated invitations and explicit acceptance;
+- owner-generated, one-time, expiring pairing challenges delivered through an
+  account-authenticated channel;
+- signed, domain-separated request/approval/deny/revoke messages;
+- resolution of every signer to an active device and principal at decision time;
+- durable PostgreSQL state transitions preserving the local state-machine
+  invariants, with Valkey used only for retries and wakeups;
+- notification of all active owner devices without disclosing record names;
+- policy/revision fencing immediately before capsule delivery;
+- tamper-evident minimal security events plus encrypted readable activity;
+- trustee-side capsule receipt and decryption without exposing a usable key to
+  the coordinator;
+- operational rules for false death/incapacity claims, evidence handling,
+  support intervention, abuse, appeals, and incident response.
+
+Device-key possession is never equivalent to verified human identity. If
+Safeory offers identity/evidence verification, its provider, assurance level,
+retention, appeal path, and limitations require a separate reviewed design.
+
+Plan Test uses isolated simulation identifiers and can never create a live
+request, approval, capsule, notification, or server timer.
 
 ## Recovery (no backdoor)
 
@@ -147,17 +218,21 @@ must be messaged as such in UI copy.
    2-of-3 sealed shares and decrypts vault items. Compartment-wrap key
    separation (`safeory:v1:compartment-wrap:<id>`) remains future work with
    its own review + migration.
-4. Grants/waiting-period policy engine — DONE locally in `vault-emergency` as the
-   local fail-closed simulation/test harness (`evaluate`): owner-only
-   default, explicit grants, approvals, waiting periods, private-forever and
-   destruction winning over release. The policy is persisted per encrypted item;
+4. Grants/waiting-period policy engine — DONE locally in `vault-emergency` as a
+   fail-closed evaluator plus revision-fenced release-request state machine:
+   owner-only default, explicit grants, approvals, waiting periods,
+   finite-duration expiry, deny/revoke, private-forever and destruction winning
+   over release. The policy is persisted per encrypted item;
    stable principal UUIDs, recipient-device registry, and browser planning UX are
    implemented. The local dual-key pairing/signing foundation plus native/WASM
-   owner-side challenge/proof verification APIs are implemented. The shipped
-   browser UI deliberately does not expose pairing until recipient-side durable
-   private-key storage and a pairing responder exist; the release coordinator
-   also remains future work.
-   Waiting periods/durations therefore remain declarative.
+   owner-side challenge/proof verification APIs are implemented. The browser now
+   persists recipient X25519+Ed25519 private material encrypted under a
+   non-extractable Web Crypto wrapping key, exposes only a public registration
+   bundle, answers one-shot challenges through WASM, and lets the owner verify and
+   persist the Ed25519 binding. Remote invitation/pairing transport, product
+   release UI, trustee delivery, and the durable server coordinator remain future
+   work. Local waiting-period/duration transition semantics are now executable
+   and tested rather than declarative-only.
 5. Per-record legacy planning disposition — DONE locally as encrypted payload
    metadata with exact-revision client operations and reader UX. It is deliberately separate
    from the Trust Engine policy object until real release/deletion enforcement is

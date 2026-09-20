@@ -1,6 +1,7 @@
 "use client"
 
 import { useMemo, useState } from "react"
+import Image from "next/image"
 import {
   Add01Icon,
   FileViewIcon,
@@ -21,7 +22,6 @@ import {
   LockPasswordIcon,
   NotesIcon,
   RepeatIcon,
-  Safe2Icon,
   SettingsIcon,
   ShieldCheckIcon,
   TrashBin2Icon,
@@ -31,6 +31,7 @@ import {
 } from "@solar-icons/react/bold"
 
 import { EmergencyCardEditor } from "@/components/safeory/EmergencyCardEditor"
+import { DevicePairingPanel } from "@/components/safeory/DevicePairingPanel"
 import { ExportPanel } from "@/components/safeory/ExportPanel"
 import { ItemEditor } from "@/components/safeory/ItemEditor"
 import { PassphraseGate } from "@/components/safeory/PassphraseGate"
@@ -42,6 +43,7 @@ import { TrustedPeopleEditor } from "@/components/safeory/TrustedPeopleEditor"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { FancyButton } from "@/components/ui/fancy-button"
 import { Input } from "@/components/ui/input"
 import {
   Sidebar,
@@ -210,10 +212,18 @@ function VaultWorkspace({ vault }: { vault: Vault }) {
         Skip to content
       </a>
       <Sidebar collapsible="icon" className="border-[var(--border)]">
-        <SidebarHeader className="px-3 py-3">
-          <div className="flex h-10 items-center gap-2 overflow-hidden rounded-[var(--radius-default)] px-1.5">
-            <div className="flex size-8 shrink-0 items-center justify-center rounded-[var(--radius-default)] bg-[var(--primary)] text-[var(--primary-foreground)] shadow-[var(--fancy-shadow-basic)]">
-              <Safe2Icon className="size-[18px]" aria-hidden="true" />
+        <SidebarHeader className="px-3 py-3 group-data-[collapsible=icon]:px-2">
+          <div className="flex h-10 items-center gap-2 overflow-hidden rounded-[var(--radius-default)] px-1.5 group-data-[collapsible=icon]:px-0">
+            <div className="flex size-8 shrink-0 items-center justify-center">
+              <Image
+                src="/branding-assets/safeory-logo.svg"
+                alt=""
+                width={48}
+                height={48}
+                aria-hidden="true"
+                className="size-8"
+                priority
+              />
             </div>
             <div className="min-w-0 group-data-[collapsible=icon]:hidden">
               <p className="truncate text-sm font-semibold tracking-tight">
@@ -389,19 +399,20 @@ function VaultWorkspace({ vault }: { vault: Vault }) {
               Local encrypted vault
             </Badge>
             {view === "items" ? (
-              <Button
+              <FancyButton
+                variant="primary"
+                size="xsmall"
+                className="h-7"
                 onClick={() => {
                   setCreating(true)
                   setEditing(null)
                 }}
+                leadingIcon={
+                  <HugeiconsIcon icon={Add01Icon} strokeWidth={2} />
+                }
               >
-                <HugeiconsIcon
-                  icon={Add01Icon}
-                  strokeWidth={2}
-                  data-icon="inline-start"
-                />
                 New item
-              </Button>
+              </FancyButton>
             ) : null}
           </div>
         </header>
@@ -610,6 +621,12 @@ function VaultWorkspace({ vault }: { vault: Vault }) {
                 one encrypted place.
               </p>
             </div>
+            <DevicePairingPanel
+              listIdentities={vault.listBrowserDeviceIdentities}
+              createIdentity={vault.createBrowserDeviceIdentity}
+              deleteIdentity={vault.deleteBrowserDeviceIdentity}
+              answerChallenge={vault.answerBrowserPairingChallenge}
+            />
             <TrustedPeopleEditor
               initialContacts={vault.getEmergencyCard()?.card.contacts ?? []}
               initialPrincipals={
@@ -617,6 +634,8 @@ function VaultWorkspace({ vault }: { vault: Vault }) {
               }
               onSaveContacts={vault.setEmergencyContacts}
               onSavePrincipals={vault.setTrustedPrincipals}
+              onCreatePairingChallenge={vault.createTrustedDevicePairingChallenge}
+              onCompletePairing={vault.completeTrustedDevicePairing}
             />
           </section>
         ) : null}
@@ -715,10 +734,18 @@ function LoadingVault() {
   return (
     <SidebarProvider>
       <Sidebar collapsible="icon" className="border-[var(--border)]">
-        <SidebarHeader className="px-3 py-3">
-          <div className="flex h-10 items-center gap-2 overflow-hidden rounded-[var(--radius-default)] px-1.5">
-            <div className="flex size-8 shrink-0 items-center justify-center rounded-[var(--radius-default)] bg-[var(--primary)] text-[var(--primary-foreground)] shadow-[var(--fancy-shadow-basic)]">
-              <Safe2Icon className="size-[18px]" aria-hidden="true" />
+        <SidebarHeader className="px-3 py-3 group-data-[collapsible=icon]:px-2">
+          <div className="flex h-10 items-center gap-2 overflow-hidden rounded-[var(--radius-default)] px-1.5 group-data-[collapsible=icon]:px-0">
+            <div className="flex size-8 shrink-0 items-center justify-center">
+              <Image
+                src="/branding-assets/safeory-logo.svg"
+                alt=""
+                width={48}
+                height={48}
+                aria-hidden="true"
+                className="size-8"
+                priority
+              />
             </div>
             <div className="min-w-0 group-data-[collapsible=icon]:hidden">
               <p className="truncate text-sm font-semibold tracking-tight">

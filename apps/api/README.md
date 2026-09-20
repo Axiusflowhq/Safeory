@@ -47,3 +47,10 @@ comes only from the authenticated device, never from a client-supplied account
 ID. Object IDs, revisions, sizes, hashes, and change cursors are server-visible;
 titles, kinds, fields, notes, vault keys, passphrases, recovery secrets, and
 tombstone meaning remain encrypted/client-side.
+
+This endpoint set is not yet the complete combined-product protocol. The target
+account/household/space authorization, key-envelope distribution, conflict,
+revocation, attachment, SecureLink, reminder, Travel Mode, and compatibility
+contract is documented in `docs/architecture/sync.md`. Implementations must not
+invent incompatible behavior outside that contract without an ADR and matching
+threat-model/server-metadata updates.

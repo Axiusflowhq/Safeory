@@ -42,6 +42,41 @@ random 256-bit per-item key
 
 The AccountRootKey is generated randomly and is never a passphrase hash.
 
+### Production cloud unlock and space hierarchy (target)
+
+The hierarchy above is the implemented local format. Before production cloud
+sync makes remotely stored root-wrap material a normal dependency, Safeory must
+add a reviewed high-entropy Account Secret or equivalent device-enrollment
+factor. Its purpose is to keep a stolen server database plus a guessed account
+password insufficient for offline root-key recovery. Cognito authentication,
+email verification, MFA, or a bearer session does not provide this cryptographic
+property.
+
+The construction, wire format, device transfer, loss/recovery behavior, and
+passphrase-only-v1 migration require a dedicated ADR and external review. Until
+that ADR lands, documentation must not claim two-secret protection equivalent to
+products that combine a password with a high-entropy account secret.
+
+The combined product also requires independently rotatable space keys:
+
+```text
+AccountRootKey
+  |-- private-space key envelope
+  |-- shared-household-space key envelope
+  |-- purpose/travel-space key envelope
+  `-- recovery and emergency capsule contexts
+
+SpaceKey
+  |-- wraps random per-item keys
+  `-- rotates for future writes after membership revocation
+```
+
+Space membership delivers a SpaceKey only to authorized device public keys.
+Per-item and attachment keys remain random. Removing a member cannot erase
+plaintext or keys already received by that device; it blocks future delivery
+and triggers reviewed forward-rotation behavior. Private spaces are not
+implicitly shared with household organizers.
+
 ## Passphrase KDF
 
 Phase 0 baseline:
@@ -96,8 +131,9 @@ HKDF-SHA-256 derives context keys from the AccountRootKey. Phase 0 reserves:
 
 - `lifevault:v1:item-wrap`
 - `safeory:v1:attachment-wrap`
-- `safeory:v1:sync-auth` (future)
-- `safeory:v1:emergency-wrap` (future)
+- `safeory:v1:sync-auth` (reserved; exact protocol requires review)
+- `safeory:v1:emergency-wrap` (reserved for capsule-key hierarchy)
+- `safeory:v1:compartment-wrap:<space-id>` (target; not implemented)
 
 A key derived for one purpose must not be reused for another purpose.
 
@@ -208,6 +244,13 @@ The encrypted item envelope also carries a payload schema version. Readers rejec
 newer payload schemas before deserialization, preventing an older binary from
 silently reading and later rewriting a newer payload while dropping unknown data.
 
-## Emergency access (future)
+## Emergency access (partially implemented)
 
-Emergency grants will wrap only authorized keys to the trusted recipient's public key using reviewed public-key primitives/libraries. The future release coordinator will control timing but never decrypt the capsule. V1 waiting periods are policy enforcement, not cryptographic time-lock encryption.
+Local grants, recipient envelopes, pairing proofs, threshold recovery, and the
+timed-release state machine are implemented. The remote protocol will wrap only
+authorized item/space capsule keys to active trustee devices using reviewed
+primitives. The future release coordinator controls durable timing and delivery
+eligibility but never decrypts the capsule. Waiting periods are policy
+enforcement, not cryptographic time-lock encryption. Signed requests,
+authenticated transport, trustee delivery, durable audit, false-claim handling,
+and production key rotation remain unimplemented.

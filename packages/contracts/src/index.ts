@@ -35,3 +35,9 @@ export type {
   AttachmentSummary,
   TrashedItemSummary,
 } from "./session";
+export { BrowserDeviceKeyStore } from "./device-keys";
+export type {
+  DeviceIdentityFactory,
+  DeviceRegistrationV1,
+  WasmDeviceIdentityLike,
+} from "./device-keys";

@@ -7,7 +7,10 @@ use wasm_bindgen::prelude::*;
 use vault_crypto::{
     EncryptedAttachmentV1, RecoverySecret, SessionResumeSecret, SessionResumeWrapV1,
 };
-use vault_sharing::PairingProofV1;
+use vault_sharing::{
+    DeviceKeyPair, DeviceSigningKeyPair, PairingChallengeV1, PairingProofV1,
+    answer_pairing_challenge,
+};
 
 use crate::{BrowserVault, DeadlineEntry, WasmVaultError, generate_strong_password};
 
@@ -20,6 +23,115 @@ fn js_err(e: WasmVaultError) -> JsValue {
 
 fn ser_err() -> JsValue {
     JsValue::from_str("serialization failed")
+}
+
+const DEVICE_IDENTITY_PRIVATE_BYTES: usize = 64;
+
+#[derive(serde::Serialize)]
+struct DeviceRegistrationPayload {
+    format_version: u16,
+    device_id: uuid::Uuid,
+    encryption_public_key_hex: String,
+    signing_public_key_hex: String,
+}
+
+fn hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
+/// Long-lived recipient device identity used by the browser secure-key-store
+/// adapter. Secret material is exported only as a short-lived Uint8Array so the
+/// host can immediately wrap it with a non-extractable Web Crypto key.
+#[wasm_bindgen]
+pub struct WasmDeviceIdentity {
+    device_id: uuid::Uuid,
+    encryption: DeviceKeyPair,
+    signing: DeviceSigningKeyPair,
+}
+
+#[wasm_bindgen]
+impl WasmDeviceIdentity {
+    #[wasm_bindgen(js_name = generate)]
+    pub fn generate(device_id: &str) -> Result<WasmDeviceIdentity, JsValue> {
+        let device_id = parse_uuid(device_id)?;
+        let encryption =
+            DeviceKeyPair::generate().map_err(|_| js_err(WasmVaultError::RandomGeneration))?;
+        let signing = DeviceSigningKeyPair::generate()
+            .map_err(|_| js_err(WasmVaultError::RandomGeneration))?;
+        Ok(Self {
+            device_id,
+            encryption,
+            signing,
+        })
+    }
+
+    #[wasm_bindgen(js_name = fromPrivateKeyBytes)]
+    pub fn from_private_key_bytes(
+        device_id: &str,
+        private_key_bytes: &[u8],
+    ) -> Result<WasmDeviceIdentity, JsValue> {
+        if private_key_bytes.len() != DEVICE_IDENTITY_PRIVATE_BYTES {
+            return Err(JsValue::from_str("device private-key material is invalid"));
+        }
+        let device_id = parse_uuid(device_id)?;
+        let mut encryption_bytes = [0u8; 32];
+        encryption_bytes.copy_from_slice(&private_key_bytes[..32]);
+        let mut signing_bytes = [0u8; 32];
+        signing_bytes.copy_from_slice(&private_key_bytes[32..]);
+        let encryption = DeviceKeyPair::from_secret_bytes(encryption_bytes);
+        let signing = DeviceSigningKeyPair::from_secret_bytes(signing_bytes)
+            .map_err(|_| JsValue::from_str("device signing key is invalid"))?;
+        encryption_bytes.fill(0);
+        signing_bytes.fill(0);
+        Ok(Self {
+            device_id,
+            encryption,
+            signing,
+        })
+    }
+
+    #[wasm_bindgen(js_name = registrationJson)]
+    pub fn registration_json(&self) -> Result<String, JsValue> {
+        serde_json::to_string(&DeviceRegistrationPayload {
+            format_version: 1,
+            device_id: self.device_id,
+            encryption_public_key_hex: hex(&self.encryption.public_bytes()),
+            signing_public_key_hex: hex(&self.signing.public_bytes()),
+        })
+        .map_err(|_| ser_err())
+    }
+
+    #[wasm_bindgen(js_name = exportPrivateKeyBytes)]
+    pub fn export_private_key_bytes(&self) -> js_sys::Uint8Array {
+        let encryption = self.encryption.secret_bytes();
+        let signing = self.signing.secret_bytes();
+        let mut output = [0u8; DEVICE_IDENTITY_PRIVATE_BYTES];
+        output[..32].copy_from_slice(encryption.as_ref());
+        output[32..].copy_from_slice(signing.as_ref());
+        let js_output = js_sys::Uint8Array::from(output.as_slice());
+        output.fill(0);
+        js_output
+    }
+
+    #[wasm_bindgen(js_name = answerPairingChallengeJson)]
+    pub fn answer_pairing_challenge_json(&self, challenge_json: &str) -> Result<String, JsValue> {
+        let challenge: PairingChallengeV1 =
+            serde_json::from_str(challenge_json).map_err(|_| ser_err())?;
+        if challenge.device_id != self.device_id {
+            return Err(JsValue::from_str(
+                "pairing challenge targets a different device",
+            ));
+        }
+        let proof = answer_pairing_challenge(&challenge, &self.encryption, &self.signing)
+            .map_err(|error| js_err(WasmVaultError::Sharing(error)))?;
+        serde_json::to_string(&proof).map_err(|_| ser_err())
+    }
 }
 
 #[wasm_bindgen]

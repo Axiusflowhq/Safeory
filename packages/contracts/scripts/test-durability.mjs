@@ -27,7 +27,9 @@ try {
     tsc,
     "--ignoreConfig",
     "src/persistence.ts",
+    "src/device-keys.ts",
     "src/session.ts",
+    "tests/device-keys.test.ts",
     "tests/session-durability.test.ts",
     "--outDir",
     output,
@@ -45,7 +47,11 @@ try {
   ])
 
   if (compiled) {
-    run(node, ["--test", join(output, "tests", "session-durability.test.js")])
+    run(node, [
+      "--test",
+      join(output, "tests", "device-keys.test.js"),
+      join(output, "tests", "session-durability.test.js"),
+    ])
   }
 } finally {
   rmSync(output, { recursive: true, force: true })
