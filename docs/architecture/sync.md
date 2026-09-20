@@ -41,6 +41,14 @@ authenticated permanent-deletion bit inside WASM for opaque tombstone routing.
 A bounded credential-free IndexedDB push outbox
 retains canonical mutation/ciphertext pairs until a matching upload response is
 durably acknowledged, so interrupted acknowledgements replay by operation ID.
+A web settings control now enrolls through the deployment's same-origin
+`/api/` proxy. The development registration bearer remains ephemeral, device
+credentials stay wrapped under a non-extractable IndexedDB key, and only API,
+account, and device routing identifiers enter local storage. Once unlocked, the
+web runtime resumes that credential and runs serialized sync after durable local
+mutations, browser reconnect/foreground events, manual requests, and a 30-second
+bounded interval. The browser extension and reviewed production account-secret
+enrollment flows remain to be integrated.
 A pull coordinator verifies each downloaded body, waits for an idempotent
 durable-acceptance callback, and only then compare-and-swap checkpoints that
 change sequence. The API now persists revision-fenced household topology,

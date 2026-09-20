@@ -13,9 +13,17 @@ import {
   type PairingProofV1,
   type TrashedItemSummary,
   type TrustedPrincipal,
+  type ConnectedSingleOwnerVaultSync,
   type VaultSession,
 } from "@safeory/contracts"
 import { newId, type VaultItemJson } from "./items"
+import {
+  clearBrowserSyncConfiguration,
+  enrollBrowserVaultSync,
+  loadBrowserSyncConfiguration,
+  resumeBrowserVaultSync,
+} from "./sync"
+import { startBrowserSyncSchedule } from "./sync-scheduler"
 import {
   clearSessionResume,
   loadSessionResumeForReload,
@@ -38,6 +46,31 @@ export interface EditableEntry {
   revision: number
 }
 
+export type VaultSyncPhase =
+  | "not_configured"
+  | "connecting"
+  | "ready"
+  | "syncing"
+  | "error"
+
+export interface VaultSyncStatus {
+  phase: VaultSyncPhase
+  accountId: string | null
+  lastSyncedAt: number | null
+  pendingUploads: number
+  blockedItems: number
+  error: string | null
+}
+
+const INITIAL_SYNC_STATUS: VaultSyncStatus = {
+  phase: "not_configured",
+  accountId: null,
+  lastSyncedAt: null,
+  pendingUploads: 0,
+  blockedItems: 0,
+  error: null,
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
@@ -53,12 +86,20 @@ function localTodayYmd(): string {
 export function useVault() {
   const sessionRef = useRef<VaultSession | null>(null)
   const operationTailRef = useRef<Promise<void>>(Promise.resolve())
+  const syncConnectionRef = useRef<ConnectedSingleOwnerVaultSync | null>(null)
+  const syncPendingRef = useRef<Promise<boolean> | null>(null)
+  const syncQueuedRef = useRef(false)
+  const performSyncRef = useRef<(
+    connection?: ConnectedSingleOwnerVaultSync | null
+  ) => Promise<boolean>>(() => Promise.resolve(false))
+  const syncGenerationRef = useRef(0)
   const [phase, setPhase] = useState<VaultPhase>("loading")
   const [items, setItems] = useState<ListedEntry[]>([])
   const [trashedItems, setTrashedItems] = useState<TrashedItemSummary[]>([])
   const [error, setError] = useState<string | null>(null)
   const [hasRecoveryKit, setHasRecoveryKit] = useState(false)
   const [generatedSecret, setGeneratedSecret] = useState<string | null>(null)
+  const [syncStatus, setSyncStatus] = useState<VaultSyncStatus>(INITIAL_SYNC_STATUS)
   const [emergencyCardSnapshot, setEmergencyCardSnapshot] = useState<{
     card: EmergencyCard
     revision: number
@@ -80,6 +121,124 @@ export function useVault() {
     setEmergencyCardSnapshot(session.getEmergencyCard())
     setHasRecoveryKit(session.hasRecoveryKit())
   }, [])
+
+  const performSync = useCallback(
+    (connection = syncConnectionRef.current): Promise<boolean> => {
+      if (connection === null) return Promise.resolve(false)
+      if (syncPendingRef.current !== null) {
+        syncQueuedRef.current = true
+        return syncPendingRef.current
+      }
+      const generation = syncGenerationRef.current
+      setSyncStatus((current) => ({ ...current, phase: "syncing", error: null }))
+      const task = connection.runtime
+        .syncOnce()
+        .then((result) => {
+          if (generation !== syncGenerationRef.current) return false
+          refresh()
+          setSyncStatus((current) => ({
+            ...current,
+            phase: "ready",
+            accountId: connection.client.accountId,
+            lastSyncedAt: Date.now(),
+            pendingUploads: result.push.remaining,
+            blockedItems: result.harvest.blockedObjectIds.length,
+            error: null,
+          }))
+          return true
+        })
+        .catch((syncError: unknown) => {
+          if (generation === syncGenerationRef.current) {
+            setSyncStatus((current) => ({
+              ...current,
+              phase: "error",
+              accountId: connection.client.accountId,
+              error: errorMessage(syncError),
+            }))
+          }
+          return false
+        })
+        .finally(() => {
+          if (syncPendingRef.current !== task) return
+          syncPendingRef.current = null
+          if (syncQueuedRef.current && generation === syncGenerationRef.current) {
+            syncQueuedRef.current = false
+            queueMicrotask(() => void performSyncRef.current(connection))
+          }
+        })
+      syncPendingRef.current = task
+      return task
+    },
+    [refresh]
+  )
+  performSyncRef.current = performSync
+
+  const stopSync = useCallback(() => {
+    syncGenerationRef.current += 1
+    syncConnectionRef.current = null
+    syncPendingRef.current = null
+    syncQueuedRef.current = false
+  }, [])
+
+  const startSync = useCallback(
+    async (session: VaultSession): Promise<void> => {
+      const generation = syncGenerationRef.current + 1
+      syncGenerationRef.current = generation
+      syncConnectionRef.current = null
+      let accountId: string | null = null
+      try {
+        accountId = loadBrowserSyncConfiguration()?.accountId ?? null
+        if (accountId === null) {
+          setSyncStatus(INITIAL_SYNC_STATUS)
+          return
+        }
+        setSyncStatus((current) => ({
+          ...current,
+          phase: "connecting",
+          accountId,
+          error: null,
+        }))
+        const connected = await resumeBrowserVaultSync(session)
+        if (
+          generation !== syncGenerationRef.current ||
+          sessionRef.current !== session ||
+          !session.isUnlocked()
+        ) {
+          return
+        }
+        if (connected === null) {
+          setSyncStatus(INITIAL_SYNC_STATUS)
+          return
+        }
+        syncConnectionRef.current = connected
+        setSyncStatus((current) => ({
+          ...current,
+          phase: "ready",
+          accountId: connected.client.accountId,
+          error: null,
+        }))
+        await performSync(connected)
+      } catch (syncError: unknown) {
+        if (generation !== syncGenerationRef.current) return
+        setSyncStatus((current) => ({
+          ...current,
+          phase: "error",
+          accountId,
+          error: errorMessage(syncError),
+        }))
+      }
+    },
+    [performSync]
+  )
+
+  useEffect(() => {
+    const request = () => void performSync()
+    const stopSchedule = startBrowserSyncSchedule(request)
+    return () => {
+      stopSchedule()
+      stopSync()
+    }
+  }, [performSync, stopSync])
 
   useEffect(() => {
     let active = true
@@ -114,6 +273,7 @@ export function useVault() {
             throw resumeRefreshError
           }
           setPhase("open")
+          void startSync(session)
           return
         }
 
@@ -129,7 +289,7 @@ export function useVault() {
     return () => {
       active = false
     }
-  }, [refresh])
+  }, [refresh, startSync])
 
   const run = useCallback(
     (
@@ -144,10 +304,12 @@ export function useVault() {
           if (sessionRef.current !== session) return false
           await operation(session)
           refresh()
+          void performSync()
           return true
         })
         .catch((operationError: unknown) => {
           if (operationError instanceof VaultDurabilityError) {
+            stopSync()
             clearSessionResume()
             sessionRef.current = null
             setItems([])
@@ -168,7 +330,7 @@ export function useVault() {
       )
       return task
     },
-    [refresh]
+    [performSync, refresh, stopSync]
   )
 
   const create = useCallback(
@@ -177,8 +339,9 @@ export function useVault() {
         await session.create(passphrase)
         await refreshSessionResume(session)
         setPhase("open")
+        void startSync(session)
       }),
-    [run]
+    [run, startSync]
   )
 
   const importEncryptedBackup = useCallback(
@@ -187,8 +350,9 @@ export function useVault() {
         await session.importEncryptedSnapshot(snapshotJson, passphrase)
         await refreshSessionResume(session)
         setPhase("open")
+        void startSync(session)
       }),
-    [run]
+    [run, startSync]
   )
 
   const unlock = useCallback(
@@ -197,8 +361,9 @@ export function useVault() {
         await session.unlock(passphrase)
         await refreshSessionResume(session)
         setPhase("open")
+        void startSync(session)
       }),
-    [run]
+    [run, startSync]
   )
 
   const unlockWithRecoveryKit = useCallback(
@@ -207,8 +372,9 @@ export function useVault() {
         await session.unlockWithRecoveryKit(secretHex)
         await refreshSessionResume(session)
         setPhase("open")
+        void startSync(session)
       }),
-    [run]
+    [run, startSync]
   )
 
   const changePassphrase = useCallback(
@@ -229,6 +395,7 @@ export function useVault() {
         return
       }
       sessionRef.current?.lock()
+      stopSync()
       setItems([])
       setTrashedItems([])
       setEmergencyCardSnapshot(null)
@@ -236,7 +403,78 @@ export function useVault() {
     } catch (lockError: unknown) {
       setError(errorMessage(lockError))
     }
-  }, [])
+  }, [stopSync])
+
+  const enrollSync = useCallback(
+    async (registrationToken: string): Promise<boolean> => {
+      const session = sessionRef.current
+      if (!session || !session.isUnlocked()) return false
+      const generation = syncGenerationRef.current + 1
+      syncGenerationRef.current = generation
+      syncConnectionRef.current = null
+      setSyncStatus((current) => ({
+        ...current,
+        phase: "connecting",
+        error: null,
+      }))
+      try {
+        const connected = await enrollBrowserVaultSync(session, registrationToken)
+        if (generation !== syncGenerationRef.current || sessionRef.current !== session) {
+          return false
+        }
+        syncConnectionRef.current = connected
+        setSyncStatus((current) => ({
+          ...current,
+          phase: "ready",
+          accountId: connected.client.accountId,
+          error: null,
+        }))
+        return await performSync(connected)
+      } catch (syncError: unknown) {
+        if (generation === syncGenerationRef.current) {
+          const configuration = (() => {
+            try {
+              return loadBrowserSyncConfiguration()
+            } catch {
+              return null
+            }
+          })()
+          setSyncStatus((current) => ({
+            ...current,
+            phase: "error",
+            accountId: configuration?.accountId ?? null,
+            error: errorMessage(syncError),
+          }))
+        }
+        return false
+      }
+    },
+    [performSync]
+  )
+
+  const retrySync = useCallback(async (): Promise<boolean> => {
+    const session = sessionRef.current
+    if (!session || !session.isUnlocked()) return false
+    await startSync(session)
+    return syncConnectionRef.current !== null
+  }, [startSync])
+
+  const resetInvalidSyncConfiguration = useCallback(() => {
+    if (syncStatus.accountId !== null) return false
+    try {
+      clearBrowserSyncConfiguration()
+      stopSync()
+      setSyncStatus(INITIAL_SYNC_STATUS)
+      return true
+    } catch (resetError: unknown) {
+      setSyncStatus((current) => ({
+        ...current,
+        phase: "error",
+        error: errorMessage(resetError),
+      }))
+      return false
+    }
+  }, [stopSync, syncStatus.accountId])
 
   const putItem = useCallback(
     (item: VaultItemJson) =>
@@ -579,6 +817,7 @@ export function useVault() {
     error,
     hasRecoveryKit,
     generatedSecret,
+    syncStatus,
     newId,
     generatePassword,
     exportReadableVault,
@@ -613,5 +852,9 @@ export function useVault() {
     answerBrowserPairingChallenge,
     installRecoveryKit,
     clearGeneratedSecret,
+    enrollSync,
+    retrySync,
+    resetInvalidSyncConfiguration,
+    syncNow: performSync,
   }
 }

@@ -91,8 +91,11 @@ Rule: cloud integration starts only after the local platform below is stable.
    A composed encrypted-item runtime now pulls first, reconstructs missing local
    outbox entries from the durable vault with content-derived operation IDs,
    preserves queued revision chains, publishes authenticated tombstone metadata,
-   and then flushes. Web/extension enrollment UI, scheduling, and lifecycle
-   integration remain. Then complete multi-device bootstrap,
+   and then flushes. The web settings surface now performs explicit same-origin
+   development enrollment, resumes locally wrapped device credentials after
+   unlock, and schedules serialized cycles after durable mutations, reconnect,
+   foregrounding, and a bounded interval. Extension lifecycle integration and
+   reviewed production account enrollment remain. Then complete multi-device bootstrap,
    household membership, attachment transport, offline queues, exact-revision conflicts,
    tombstones, revocation, key rotation, pagination, and web/extension
    convergence.

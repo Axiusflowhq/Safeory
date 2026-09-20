@@ -37,6 +37,7 @@ import { ItemEditor } from "@/components/safeory/ItemEditor"
 import { PassphraseGate } from "@/components/safeory/PassphraseGate"
 import { PassphraseChangePanel } from "@/components/safeory/PassphraseChangePanel"
 import { RecoveryKitPanel } from "@/components/safeory/RecoveryKitPanel"
+import { SyncPanel } from "@/components/safeory/SyncPanel"
 import { TodayView } from "@/components/safeory/TodayView"
 import { TrashView } from "@/components/safeory/TrashView"
 import { TrustedPeopleEditor } from "@/components/safeory/TrustedPeopleEditor"
@@ -396,7 +397,11 @@ function VaultWorkspace({ vault }: { vault: Vault }) {
           </div>
           <div className="ml-auto flex items-center gap-2">
             <Badge variant="outline" className="hidden sm:inline-flex">
-              Local encrypted vault
+              {vault.syncStatus.phase === "ready"
+                ? "Encrypted sync on"
+                : vault.syncStatus.phase === "syncing"
+                  ? "Syncing encrypted vault"
+                  : "Local encrypted vault"}
             </Badge>
             {view === "items" ? (
               <FancyButton
@@ -660,6 +665,15 @@ function VaultWorkspace({ vault }: { vault: Vault }) {
               onInstall={vault.installRecoveryKit}
               onClearSecret={vault.clearGeneratedSecret}
             />
+            <div className="mt-5">
+              <SyncPanel
+                status={vault.syncStatus}
+                onEnroll={vault.enrollSync}
+                onRetry={vault.retrySync}
+                onResetInvalidConfiguration={vault.resetInvalidSyncConfiguration}
+                onSyncNow={vault.syncNow}
+              />
+            </div>
             <PassphraseChangePanel
               onChangePassphrase={vault.changePassphrase}
             />

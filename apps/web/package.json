@@ -9,7 +9,7 @@
     "lint": "oxlint app components hooks lib scripts tests next.config.ts",
     "format": "prettier --write \"**/*.{ts,tsx}\"",
     "typecheck": "tsc --noEmit",
-    "test": "node --test tests/items.test.mjs tests/session-resume.test.mjs"
+    "test": "node --test tests/items.test.mjs tests/session-resume.test.mjs tests/sync.test.mjs tests/sync-scheduler.test.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",
