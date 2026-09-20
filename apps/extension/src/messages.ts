@@ -24,6 +24,22 @@ export interface FillPayload {
   password: string;
 }
 
+export type ExtensionSyncPhase =
+  | "not_configured"
+  | "connecting"
+  | "ready"
+  | "syncing"
+  | "error";
+
+export interface ExtensionSyncStatus {
+  phase: ExtensionSyncPhase;
+  accountId: string | null;
+  lastSyncedAt: number | null;
+  pendingUploads: number;
+  blockedItems: number;
+  error: string | null;
+}
+
 export type ContentRequest =
   | { type: "findCredentials" }
   | { type: "fillCredential"; id: string; authorization: string };
@@ -53,7 +69,11 @@ export type PopupRequest =
       website: string;
     }
   | { type: "copyPassword"; id: string }
-  | { type: "generatePassword"; length: number };
+  | { type: "generatePassword"; length: number }
+  | { type: "enrollSync"; apiBaseUrl: string; registrationToken: string }
+  | { type: "syncNow" }
+  | { type: "retrySync" }
+  | { type: "resetSyncConfiguration" };
 
 export type PopupResponse =
   | {
@@ -61,6 +81,7 @@ export type PopupResponse =
       initialized: boolean;
       unlocked: boolean;
       credentialCount: number;
+      sync: ExtensionSyncStatus;
     }
   | { type: "credentials"; items: CredentialSummary[] }
   | { type: "password"; password: string }

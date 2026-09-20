@@ -22,7 +22,7 @@ Implemented now:
 - portable Rust crypto/domain/storage crates with Argon2id root-key wrapping, HKDF-separated per-item keys, XChaCha20-Poly1305 authenticated envelopes, explicit schema/version checks, bounded encrypted records, and negative security tests;
 - `crates/vault-wasm`, which runs the browser vault core in WebAssembly, keeps usable vault keys inside WASM memory, persists ciphertext snapshots through browser storage, and exposes only redacted list/deadline projections until a user explicitly opens a record;
 - `apps/web`, the primary full-vault interface, with setup/unlock/recovery, schema-driven record editing, encrypted attachments, Emergency Card, recovery kit, master-passphrase rotation, search, trash/restore/permanent purge, and a local Today/deadlines view;
-- `apps/extension`, an MV3 browser extension with an isolated background vault, exact-origin credential matching, trusted-click discovery, bounded request throttling, one-shot fill authorization, and a compact credential surface;
+- `apps/extension`, an MV3 browser extension with an isolated background vault, exact-origin credential matching, trusted-click discovery, bounded request throttling, one-shot fill authorization, a compact credential surface, and development encrypted-sync enrollment/lifecycle wiring;
 - ciphertext-only browser snapshot validation, IndexedDB CAS persistence, and fail-closed durability poisoning when an in-memory mutation cannot be saved;
 - portable emergency/recovery primitives, encrypted legacy/account-closure planning metadata, bounded history and attachment formats in the native core, browser encrypted attachment persistence with authenticated chunked add/download/delete and backup/restore, browser readable export, plus Trust Engine policy/threshold foundations and local dual-key trusted-device pairing with durable wrapped recipient keys and a browser pairing responder;
 - `apps/api` plus a local Docker integration stack for account/device coordination and opaque encrypted-object sync using PostgreSQL, Valkey, S3-compatible object storage, and SMTP, including a canonical sync-compatibility endpoint; the production target is AWS as documented in `docs/architecture/aws.md`;
@@ -35,9 +35,8 @@ Implemented now:
   preflight, and independent protocol/header/envelope version negotiation;
 - pinned Rust/JS lockfiles and dependency/security CI policy.
 
-Not implemented yet: browser/API object synchronization and server enforcement
-for the account/household/private-and-shared-space contracts, production Account
-Secret/device enrollment, end-to-end multi-device sync,
+Not implemented yet: production Account Secret/device enrollment, cross-account
+shared-object routing, end-to-end same-account multi-device sync,
 remote collaboration and SecureLinks, TOTP/passkeys/security health/importers,
 the household Inbox and private document automation, recurring/cloud reminders,
 remote pairing/invitation transport, durable emergency release delivery, and

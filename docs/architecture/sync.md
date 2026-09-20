@@ -27,9 +27,10 @@ is repaired by replay rather than misclassified as a local edit. `VaultSession`
 now supplies that callback through an exact-ciphertext WASM compare-and-swap,
 authenticating the candidate under the in-WASM root key before persisting the
 resulting snapshot with its existing cross-tab durability fence. Plaintext stays
-inside WASM and the unlocked root key is preserved. Wiring account enrollment,
-topology, and the acceptor lifecycle into web/extension remains application
-work. The initial single-owner topology bootstrap is now crash-safe: generated
+inside WASM and the unlocked root key is preserved. The extension supplies the
+same callback through its serialized `chrome.storage.local` snapshot queue,
+preserving its background-worker key boundary. The initial single-owner
+topology bootstrap is now crash-safe: generated
 household, membership, private-space, and metadata-object IDs are persisted in
 IndexedDB before publication, exact publication retries reuse that draft, and
 the migration inventory includes every encrypted vault record except the
@@ -47,14 +48,22 @@ credentials stay wrapped under a non-extractable IndexedDB key, and only API,
 account, and device routing identifiers enter local storage. Once unlocked, the
 web runtime resumes that credential and runs serialized sync after durable local
 mutations, browser reconnect/foreground events, manual requests, and a 30-second
-bounded interval. The browser extension and reviewed production account-secret
-enrollment flows remain to be integrated.
+bounded interval. The MV3 extension now performs equivalent explicit development
+enrollment, stores only non-secret routing metadata in extension storage, resumes
+its wrapped credential after unlock, and coalesces mutation, manual, unlock, and
+one-minute alarm triggers. Its remote accepts share the local mutation durability
+queue, and locking aborts active network work. MV3 worker reclamation deliberately
+requires another unlock because usable vault keys are not persisted. Reviewed
+production account-secret/new-device enrollment remains to be integrated, so the
+development web and extension controls create independent accounts rather than
+claiming same-account convergence.
 A pull coordinator verifies each downloaded body, waits for an idempotent
 durable-acceptance callback, and only then compare-and-swap checkpoints that
 change sequence. The API now persists revision-fenced household topology,
 accepts exact publication retries idempotently, and enforces household/space
-authorization on object list, download, and upload paths. Web/extension
-application wiring and cross-account shared-object routing remain incomplete.
+authorization on object list, download, and upload paths. Cross-account
+shared-object routing and production same-account web/extension convergence
+remain incomplete.
 
 The browser contracts package also parses the canonical versioned account,
 household, membership, space, space-member, and single-owner migration topology.

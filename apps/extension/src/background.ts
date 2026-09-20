@@ -6,12 +6,21 @@
  */
 
 import init, { WasmVault } from "vault-wasm";
+import type { ConnectedSingleOwnerVaultSync } from "@safeory/contracts";
 import { createSerializedMutationRunner } from "./mutation";
 import { loadSnapshot, saveSnapshot } from "./storage";
+import {
+  clearExtensionSyncConfiguration,
+  loadExtensionSyncConfiguration,
+} from "./sync-configuration";
+import { enrollExtensionVaultSync, resumeExtensionVaultSync } from "./sync";
+import { createSyncRequestRunner } from "./sync-request";
+import { createExtensionVaultSyncSession } from "./sync-session";
 import type {
   ContentRequest,
   ContentResponse,
   CredentialSummary,
+  ExtensionSyncStatus,
   PopupRequest,
   PopupResponse,
 } from "./messages";
@@ -45,6 +54,20 @@ interface ContentRequestState {
 }
 
 const contentRequestState = new Map<string, ContentRequestState>();
+const SYNC_ALARM_NAME = "safeory.encrypted-sync";
+const INITIAL_SYNC_STATUS: ExtensionSyncStatus = {
+  phase: "not_configured",
+  accountId: null,
+  lastSyncedAt: null,
+  pendingUploads: 0,
+  blockedItems: 0,
+  error: null,
+};
+
+let syncConnection: ConnectedSingleOwnerVaultSync | null = null;
+let syncGeneration = 0;
+let syncStatus: ExtensionSyncStatus = { ...INITIAL_SYNC_STATUS };
+let syncAbortController: AbortController | null = null;
 
 function ensureInit(): Promise<void> {
   initPromise ??= (init as unknown as (a?: unknown) => Promise<unknown>)().then(() => undefined);
@@ -84,6 +107,7 @@ const mutateAndPersist = createSerializedMutationRunner<ExtensionWasmVault>({
     }
   },
   discard: (current) => {
+    stopSync();
     if (vault === current) vault = null;
     try {
       current.lock();
@@ -92,6 +116,148 @@ const mutateAndPersist = createSerializedMutationRunner<ExtensionWasmVault>({
     }
   },
 });
+
+const syncSession = createExtensionVaultSyncSession(mutateAndPersist);
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+const syncRequests = createSyncRequestRunner(async () => {
+  const connection = syncConnection;
+  if (connection === null) return false;
+  const unlocked = await mutateAndPersist.access((current) => current.isUnlocked());
+  if (!unlocked) return false;
+  const generation = syncGeneration;
+  syncStatus = { ...syncStatus, phase: "syncing", error: null };
+  try {
+    const signal = syncAbortController?.signal;
+    const result = await connection.runtime.syncOnce(
+      signal === undefined ? {} : { signal },
+    );
+    if (generation !== syncGeneration || syncConnection !== connection) return false;
+    syncStatus = {
+      phase: "ready",
+      accountId: connection.client.accountId,
+      lastSyncedAt: Date.now(),
+      pendingUploads: result.push.remaining,
+      blockedItems: result.harvest.blockedObjectIds.length,
+      error: null,
+    };
+    return true;
+  } catch (error) {
+    if (generation === syncGeneration && syncConnection === connection) {
+      syncStatus = {
+        ...syncStatus,
+        phase: "error",
+        accountId: connection.client.accountId,
+        error: errorMessage(error),
+      };
+    }
+    return false;
+  }
+});
+
+function stopSync(): void {
+  syncAbortController?.abort();
+  syncAbortController = null;
+  syncGeneration += 1;
+  syncConnection = null;
+  syncRequests.invalidate();
+  void chrome.alarms.clear(SYNC_ALARM_NAME);
+}
+
+function scheduleSync(): void {
+  chrome.alarms.create(SYNC_ALARM_NAME, { periodInMinutes: 1 });
+}
+
+async function startSync(): Promise<void> {
+  syncAbortController?.abort();
+  const abortController = new AbortController();
+  syncAbortController = abortController;
+  const generation = syncGeneration + 1;
+  syncGeneration = generation;
+  syncConnection = null;
+  syncRequests.invalidate();
+  syncStatus = { ...syncStatus, phase: "connecting", error: null };
+  let accountId: string | null = null;
+  try {
+    const configuration = await loadExtensionSyncConfiguration();
+    accountId = configuration?.accountId ?? null;
+    if (configuration === null) {
+      syncStatus = { ...INITIAL_SYNC_STATUS };
+      return;
+    }
+    syncStatus = { ...syncStatus, phase: "connecting", accountId, error: null };
+    const connected = await resumeExtensionVaultSync(syncSession, abortController.signal);
+    const unlocked = await mutateAndPersist.access((current) => current.isUnlocked());
+    if (generation !== syncGeneration || !unlocked || connected === null) return;
+    syncConnection = connected;
+    syncStatus = {
+      ...syncStatus,
+      phase: "ready",
+      accountId: connected.client.accountId,
+      error: null,
+    };
+    scheduleSync();
+    await syncRequests.request();
+  } catch (error) {
+    if (generation !== syncGeneration) return;
+    syncStatus = {
+      ...syncStatus,
+      phase: "error",
+      accountId,
+      error: errorMessage(error),
+    };
+  }
+}
+
+async function enrollSync(apiBaseUrl: string, registrationToken: string): Promise<void> {
+  const unlocked = await mutateAndPersist.access((current) => current.isUnlocked());
+  if (!unlocked) throw new Error("locked");
+  syncAbortController?.abort();
+  const abortController = new AbortController();
+  syncAbortController = abortController;
+  const generation = syncGeneration + 1;
+  syncGeneration = generation;
+  syncConnection = null;
+  syncRequests.invalidate();
+  syncStatus = { ...syncStatus, phase: "connecting", error: null };
+  try {
+    const connected = await enrollExtensionVaultSync(
+      syncSession,
+      registrationToken,
+      apiBaseUrl,
+      abortController.signal,
+    );
+    if (generation !== syncGeneration) return;
+    syncConnection = connected;
+    syncStatus = {
+      ...syncStatus,
+      phase: "ready",
+      accountId: connected.client.accountId,
+      error: null,
+    };
+    scheduleSync();
+    await syncRequests.request();
+  } catch (error) {
+    if (generation === syncGeneration) {
+      syncStatus = { ...syncStatus, phase: "error", error: errorMessage(error) };
+    }
+    throw error;
+  }
+}
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name !== SYNC_ALARM_NAME) return;
+  if (syncConnection === null) {
+    void chrome.alarms.clear(SYNC_ALARM_NAME);
+    return;
+  }
+  void syncRequests.request();
+});
+
+self.addEventListener("online", () => void syncRequests.request());
 
 // --- Credential extraction from the generic item model ---
 
@@ -140,6 +306,7 @@ async function addCredential(
     if (!current.isUnlocked()) throw new Error("locked");
     current.putItemJson(JSON.stringify(item));
   });
+  void syncRequests.request();
   return { type: "ok" };
 }
 
@@ -361,6 +528,7 @@ chrome.runtime.onMessage.addListener((raw: unknown, sender, sendResponse) => {
           initialized: v.isInitialized(),
           unlocked: v.isUnlocked(),
           credentialCount: v.isUnlocked() ? listCredentials(v).length : 0,
+          sync: { ...syncStatus },
         } satisfies PopupResponse));
       }
       case "create": {
@@ -368,6 +536,7 @@ chrome.runtime.onMessage.addListener((raw: unknown, sender, sendResponse) => {
           return { type: "error", error: "unauthorized sender" } satisfies PopupResponse;
         }
         await mutateAndPersist((v) => v.create(msg.passphrase));
+        void startSync();
         return { type: "ok" } satisfies PopupResponse;
       }
       case "unlock": {
@@ -375,6 +544,7 @@ chrome.runtime.onMessage.addListener((raw: unknown, sender, sendResponse) => {
           return { type: "error", error: "unauthorized sender" } satisfies PopupResponse;
         }
         await mutateAndPersist.access((v) => v.unlock(msg.passphrase));
+        void startSync();
         return { type: "ok" } satisfies PopupResponse;
       }
       case "unlockWithRecoveryKit": {
@@ -382,13 +552,16 @@ chrome.runtime.onMessage.addListener((raw: unknown, sender, sendResponse) => {
           return { type: "error", error: "unauthorized sender" } satisfies PopupResponse;
         }
         await mutateAndPersist.access((v) => v.unlockWithRecoveryKit(msg.secretHex));
+        void startSync();
         return { type: "ok" } satisfies PopupResponse;
       }
       case "lock": {
         if (!isExtensionPageSender(sender)) {
           return { type: "error", error: "unauthorized sender" } satisfies PopupResponse;
         }
+        stopSync();
         await mutateAndPersist.access((v) => v.lock());
+        syncStatus = { ...INITIAL_SYNC_STATUS };
         return { type: "ok" } satisfies PopupResponse;
       }
       case "listCredentials": {
@@ -422,6 +595,37 @@ chrome.runtime.onMessage.addListener((raw: unknown, sender, sendResponse) => {
           return { type: "error", error: "unauthorized sender" } satisfies PopupResponse;
         }
         return { type: "password", password: WasmVault.generatePassword(msg.length) } satisfies PopupResponse;
+      case "enrollSync": {
+        if (!isExtensionPageSender(sender)) {
+          return { type: "error", error: "unauthorized sender" } satisfies PopupResponse;
+        }
+        await enrollSync(msg.apiBaseUrl, msg.registrationToken);
+        return { type: "ok" } satisfies PopupResponse;
+      }
+      case "syncNow": {
+        if (!isExtensionPageSender(sender)) {
+          return { type: "error", error: "unauthorized sender" } satisfies PopupResponse;
+        }
+        if (syncConnection === null) throw new Error("Encrypted sync is not connected.");
+        await syncRequests.request();
+        return { type: "ok" } satisfies PopupResponse;
+      }
+      case "retrySync": {
+        if (!isExtensionPageSender(sender)) {
+          return { type: "error", error: "unauthorized sender" } satisfies PopupResponse;
+        }
+        await startSync();
+        return { type: "ok" } satisfies PopupResponse;
+      }
+      case "resetSyncConfiguration": {
+        if (!isExtensionPageSender(sender)) {
+          return { type: "error", error: "unauthorized sender" } satisfies PopupResponse;
+        }
+        stopSync();
+        await clearExtensionSyncConfiguration();
+        syncStatus = { ...INITIAL_SYNC_STATUS };
+        return { type: "ok" } satisfies PopupResponse;
+      }
       default:
         return { type: "error", error: "unknown message" } satisfies PopupResponse;
     }
