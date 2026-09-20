@@ -765,6 +765,11 @@ server decryption, whole-vault over-release, or waiting-policy bypass.
 
 ## 8.2 Production services
 
+Implement production infrastructure according to the approved AWS baseline in
+`infra.md`. If a measured requirement later changes a selected service or
+scaling strategy, update `infra.md` in the same change so infrastructure does not
+drift into undocumented architecture.
+
 - [ ] Run cleaned foundation server under Safeory ownership.
 - [ ] Use PostgreSQL for foundation durable storage.
 - [ ] Implement Safeory Coordinator as a separate service.
@@ -941,6 +946,8 @@ When continuing development:
 5. Prefer implementation + tests + validation over additional planning.
 6. Do not redo completed research unless new evidence invalidates it.
 7. Do not create new planning/architecture/security docs during development.
+   `infra.md` is the explicitly approved infrastructure baseline and operational
+   exception; keep it current when infrastructure decisions materially change.
 8. Update checkboxes/status in this file when work materially completes.
 9. Keep machine-readable provenance current when foundation pins/imports change.
 10. Never delete legacy behavior until replacement, migration, read-back, and
