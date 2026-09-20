@@ -37,6 +37,11 @@ WASM authenticates the candidate and compare-and-swaps the exact expected
 encrypted record without exposing plaintext, retains the unlocked root key, and
 persists the resulting ciphertext snapshot behind the same
 cross-tab version fence as local mutations.
+`VaultSession` inventories all sync-eligible encrypted item IDs, and
+`BrowserSingleOwnerSyncBootstrap` uses that inventory to create the initial
+account/household/private-space migration. It persists random identifiers before
+topology publication, so network or local-state interruptions retry the
+identical topology rather than orphaning a second household or space.
 Canonical browser parsers for the account, household, membership, space, and
 single-owner migration contracts mirror `vault-sync` bounds and fail closed on
 unknown fields, inconsistent routing references, or invalid access topology.

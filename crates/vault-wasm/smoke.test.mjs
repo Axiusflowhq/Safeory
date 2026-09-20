@@ -38,6 +38,10 @@ const item = {
   notes: null,
 };
 vault.putItemJson(JSON.stringify(item));
+const encryptedItemIds = JSON.parse(vault.listEncryptedItemIdsJson());
+if (encryptedItemIds.length !== 1 || encryptedItemIds[0] !== item.id) {
+  throw new Error("encrypted sync inventory did not include the stored item");
+}
 
 // 3. List + get back.
 const listed = JSON.parse(vault.listItemsJson());

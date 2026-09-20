@@ -74,6 +74,17 @@ export {
   DurableVaultItemAcceptor,
   IndexedDbVaultItemSyncStateStore,
 } from "./sync-vault-acceptance";
+export {
+  BrowserSingleOwnerSyncBootstrap,
+  IndexedDbSingleOwnerSyncBootstrapStore,
+  createSingleOwnerMigration,
+} from "./sync-bootstrap";
+export type {
+  HouseholdTopologyPublisher,
+  SingleOwnerSyncBootstrapState,
+  SingleOwnerSyncBootstrapStore,
+  SyncBootstrapPublication,
+} from "./sync-bootstrap";
 export type {
   ApplyRemoteEncryptedItem,
   LoadLocalEncryptedItem,

@@ -255,6 +255,13 @@ impl WasmVault {
         }
     }
 
+    /// List opaque IDs for every sync-eligible encrypted item.
+    #[wasm_bindgen(js_name = listEncryptedItemIdsJson)]
+    pub fn list_encrypted_item_ids_json(&self) -> Result<String, JsValue> {
+        serde_json::to_string(&self.inner.list_encrypted_item_ids().map_err(js_err)?)
+            .map_err(|_| ser_err())
+    }
+
     /// Compare-and-swap an already-encrypted item accepted by the sync layer.
     #[wasm_bindgen(js_name = applyEncryptedItemJson)]
     pub fn apply_encrypted_item_json(

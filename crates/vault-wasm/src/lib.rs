@@ -432,6 +432,17 @@ impl BrowserVault {
         }
     }
 
+    /// List every synchronized encrypted item ID, including trashed records
+    /// and tombstones while excluding the device-local session-resume marker.
+    pub fn list_encrypted_item_ids(&self) -> Result<Vec<Uuid>, WasmVaultError> {
+        Ok(self
+            .store
+            .list_item_ids()?
+            .into_iter()
+            .filter(|id| *id != SESSION_RESUME_MARKER_ID)
+            .collect())
+    }
+
     /// Compare-and-swap one already-encrypted sync record. This operation
     /// authenticates the candidate inside WASM without exposing plaintext or
     /// re-encrypting it, and preserves the unlocked root key. Exact expected
@@ -1991,6 +2002,13 @@ mod tests {
         let id = item.id;
         vault.put_item(&item).expect("put");
         let (secret_hex, wrapped) = vault.create_session_resume().expect("resume material");
+        assert_eq!(
+            vault
+                .list_encrypted_item_ids()
+                .expect("encrypted sync inventory"),
+            vec![id],
+            "the device-local resume marker must not enter sync inventory"
+        );
         let snapshot = vault.to_snapshot();
 
         let mut restored = BrowserVault::from_snapshot(snapshot).expect("restore");

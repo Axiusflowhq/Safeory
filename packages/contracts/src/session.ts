@@ -247,6 +247,7 @@ export interface WasmVaultLike {
   putItemJson(itemJson: string): void;
   getItemJson(id: string): string;
   getEncryptedItemJson(id: string): string | null;
+  listEncryptedItemIdsJson(): string;
   applyEncryptedItemJson(nextJson: string, expectedJson?: string): void;
   listItemsJson(): string;
   exportReadableJson(): string;
@@ -561,6 +562,14 @@ export class VaultSession {
       this.assertHealthy();
       const encoded = this.vault.getEncryptedItemJson(id);
       return encoded === null ? null : JSON.parse(encoded) as EncryptedVaultItemV1;
+    });
+  }
+
+  /** List all sync-eligible ciphertext object IDs after local writes settle. */
+  listEncryptedItemIdsForSync(): Promise<string[]> {
+    return this.mutationTail.then(() => {
+      this.assertHealthy();
+      return JSON.parse(this.vault.listEncryptedItemIdsJson()) as string[];
     });
   }
 

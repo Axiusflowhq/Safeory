@@ -29,8 +29,11 @@ authenticating the candidate under the in-WASM root key before persisting the
 resulting snapshot with its existing cross-tab durability fence. Plaintext stays
 inside WASM and the unlocked root key is preserved. Wiring account enrollment,
 topology, and the acceptor lifecycle into web/extension remains application
-work. A bounded
-credential-free IndexedDB push outbox
+work. The initial single-owner topology bootstrap is now crash-safe: generated
+household, membership, private-space, and metadata-object IDs are persisted in
+IndexedDB before publication, exact publication retries reuse that draft, and
+the migration inventory includes every encrypted vault record except the
+device-local reload marker. A bounded credential-free IndexedDB push outbox
 retains canonical mutation/ciphertext pairs until a matching upload response is
 durably acknowledged, so interrupted acknowledgements replay by operation ID.
 A pull coordinator verifies each downloaded body, waits for an idempotent

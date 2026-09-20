@@ -86,8 +86,10 @@ Rule: cloud integration starts only after the local platform below is stable.
    accepted baseline or encrypted conflict candidate, with crash-safe ordering
    around a snapshot callback. `VaultSession` now implements that callback with
    exact-ciphertext WASM compare-and-swap plus the existing snapshot durability
-   fence, without locking an active root key; atomic local enqueue and the live
-   web/extension account/topology sync lifecycle remain. Then complete bootstrap,
+   fence, without locking an active root key. Initial single-owner topology IDs
+   and migration assignments are now persisted before idempotent publication;
+   atomic local enqueue and the live web/extension enrollment/sync lifecycle
+   remain. Then complete multi-device bootstrap,
    household membership, attachment transport, offline queues, exact-revision conflicts,
    tombstones, revocation, key rotation, pagination, and web/extension
    convergence.
