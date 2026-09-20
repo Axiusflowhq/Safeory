@@ -10,8 +10,10 @@ incomplete. The API exposes the canonical `vault-sync` compatibility
 advertisement, consumes its wire bounds, validates mutation/upload binding, and
 atomically persists exact-input operation-ID outcomes with opaque headers. The
 browser contracts package validates that bounded advertisement and negotiates
-protocol, object-header, and envelope versions before sync. Browser application
-wiring and household/space authorization remain incomplete.
+protocol, object-header, and envelope versions before sync. It also implements
+strict opaque contract parsing plus authenticated, ciphertext-verifying
+list/download/upload transport. Durable browser queue/application wiring and
+household/space authorization remain incomplete.
 
 ## Goals
 

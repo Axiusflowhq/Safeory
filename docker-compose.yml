@@ -102,12 +102,12 @@ services:
       - >-
         for migration in /migrations/*.sql; do
           echo "Applying $${migration}";
-          psql
-          --host=postgres
-          --username="${POSTGRES_USER:-safeory}"
-          --dbname="${POSTGRES_DB:-safeory}"
-          --set=ON_ERROR_STOP=1
-          --file="$${migration}";
+          psql \
+            --host=postgres \
+            --username="${POSTGRES_USER:-safeory}" \
+            --dbname="${POSTGRES_DB:-safeory}" \
+            --set=ON_ERROR_STOP=1 \
+            --file="$${migration}";
         done
 
   api:

@@ -170,10 +170,12 @@ gates are green, including the generated-WASM Node smoke test.**
   `vault-sync` implements negotiation plus bounded opaque object and mutation
   contracts. The API now exposes the canonical compatibility advertisement and
   shares wire bounds. `@safeory/contracts` now validates and negotiates that
-  advertisement for browser clients. The opaque-object endpoint now validates
-  and durably persists canonical mutation/header metadata with atomic
-  operation-ID idempotency; browser sync wiring and household/space
-  authorization remain.
+  advertisement and provides a bounded authenticated browser transport for
+  canonical list/download/upload operations with ciphertext hash verification.
+  The opaque-object endpoint validates and durably persists canonical
+  mutation/header metadata with atomic operation-ID idempotency. Binding this
+  transport to durable web/extension queues plus household/space authorization
+  remains.
 - Decide the high-entropy Account Secret/device-enrollment construction in an
   ADR, implement recovery/new-device enrollment, and test server-dump offline
   attack resistance. Cognito authentication alone is insufficient.

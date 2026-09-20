@@ -8,7 +8,8 @@
     ".": "./src/index.ts",
     "./persistence": "./src/persistence.ts",
     "./session": "./src/session.ts",
-    "./sync-compatibility": "./src/sync-compatibility.ts"
+    "./sync-compatibility": "./src/sync-compatibility.ts",
+    "./sync-client": "./src/sync-client.ts"
   },
   "scripts": {
     "test": "node scripts/test-durability.mjs",

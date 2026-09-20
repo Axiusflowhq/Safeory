@@ -53,3 +53,21 @@ export type {
   NegotiatedCompatibility,
   VersionRangeV1,
 } from "./sync-compatibility";
+export {
+  OPAQUE_OBJECT_CLASSES,
+  SyncClient,
+  SyncClientError,
+  parseOpaqueMutation,
+  parseOpaqueObjectHeader,
+  parseSyncObjectMetadata,
+  parseSyncObjectPage,
+} from "./sync-client";
+export type {
+  OpaqueMutationV1,
+  OpaqueObjectClassV1,
+  OpaqueObjectHeaderV1,
+  ObjectScopeV1,
+  SyncObjectMetadataV1,
+  SyncObjectPageV1,
+  WritePreconditionV1,
+} from "./sync-client";

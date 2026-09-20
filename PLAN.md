@@ -72,9 +72,9 @@ Rule: cloud integration starts only after the local platform below is stable.
 2. Finalize a reviewed high-entropy Account Secret/device-enrollment design for
    cloud accounts, plus new-device and recovery flows. Cognito identity must not
    become the sole protection for remotely stored root wraps.
-3. Integrate the implemented browser compatibility client and canonical API
-   mutation endpoint into application sync, then complete bootstrap, household
-   membership, space/item/attachment transport, offline queues, exact-revision conflicts,
+3. Integrate the implemented browser compatibility/opaque transport client into
+   durable application sync queues, then complete bootstrap, household
+   membership, attachment transport, offline queues, exact-revision conflicts,
    tombstones, revocation, key rotation, pagination, and web/extension
    convergence.
 4. Finish trusted-device and collaborator invitation transport. Contacts remain
