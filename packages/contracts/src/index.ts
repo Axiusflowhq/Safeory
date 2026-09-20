@@ -68,11 +68,13 @@ export {
   decodePulledVaultItem,
   parseEncryptedVaultItem,
   prepareVaultItemMutation,
+  reconcilePulledVaultItem,
 } from "./sync-vault-item";
 export type {
   DecodedPulledVaultItem,
   EncryptedVaultItemV1,
   PreparedVaultItemMutation,
+  VaultItemReconciliation,
 } from "./sync-vault-item";
 export {
   DurableSyncOutbox,

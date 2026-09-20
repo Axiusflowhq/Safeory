@@ -17,7 +17,12 @@ browser transport adapter that creates create-only or exact-revision/hash-fenced
 opaque mutations and rejects pulled bodies whose encrypted item identity,
 revision, payload version, digest, or object class differs from the authenticated
 header. Durable conflict resolution and local acceptance remain intentionally
-outside that codec. A bounded credential-free IndexedDB push outbox
+outside that codec. The item adapter also implements fail-closed three-way
+reconciliation against the last durably accepted server header: it distinguishes
+safe remote fast-forwards, exact replays, local-ahead ciphertext, and concurrent
+edits without decrypting or falling back to last-writer-wins. Persisting those
+baselines/conflict candidates and applying accepted records to the live browser
+snapshot remain application-wiring work. A bounded credential-free IndexedDB push outbox
 retains canonical mutation/ciphertext pairs until a matching upload response is
 durably acknowledged, so interrupted acknowledgements replay by operation ID.
 A pull coordinator verifies each downloaded body, waits for an idempotent

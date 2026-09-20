@@ -41,6 +41,30 @@ export interface DecodedPulledVaultItem {
   ciphertext: Uint8Array
 }
 
+export type VaultItemReconciliation =
+  | {
+      action: "apply_remote"
+      item: EncryptedVaultItemV1
+      baseline: OpaqueObjectHeaderV1
+    }
+  | {
+      action: "unchanged"
+      item: EncryptedVaultItemV1
+      baseline: OpaqueObjectHeaderV1
+    }
+  | {
+      action: "keep_local"
+      item: EncryptedVaultItemV1
+      baseline: OpaqueObjectHeaderV1
+    }
+  | {
+      action: "conflict"
+      local: EncryptedVaultItemV1 | null
+      remote: EncryptedVaultItemV1
+      baseline: OpaqueObjectHeaderV1 | null
+      remoteHeader: OpaqueObjectHeaderV1
+    }
+
 /**
  * Turns one already-encrypted vault item into the canonical opaque transport
  * mutation. The server body is the encrypted record itself; plaintext and item
@@ -117,18 +141,84 @@ export async function decodePulledVaultItem(
   const ciphertext = Uint8Array.from(ciphertextValue)
   await verifyOpaqueCiphertext(header, ciphertext)
   const encryptedItem = parseEncryptedVaultItem(decodeJson(ciphertext))
-  if (
-    encryptedItem.object_id !== header.object_id ||
-    encryptedItem.revision !== header.revision ||
-    encryptedItem.payload_schema_version !== header.payload_version ||
-    header.envelope_version !== ITEM_ENVELOPE_VERSION
-  ) {
-    throw new SyncClientError(
-      "ciphertext_mismatch",
-      "The encrypted vault item does not match its opaque header.",
-    )
-  }
+  requireItemMatchesHeader(encryptedItem, header)
   return { metadata, encryptedItem, ciphertext }
+}
+
+/**
+ * Three-way reconciliation for an already-verified pull. `baselineValue` is
+ * the last server header durably accepted for this object. It is the evidence
+ * needed to distinguish a safe fast-forward from concurrent local/remote
+ * edits; without it, differing existing ciphertext is preserved as a conflict.
+ */
+export async function reconcilePulledVaultItem(
+  localValue: unknown | null,
+  baselineValue: OpaqueObjectHeaderV1 | null,
+  pulled: DecodedPulledVaultItem,
+): Promise<VaultItemReconciliation> {
+  const verified = await decodePulledVaultItem(pulled.metadata, pulled.ciphertext)
+  const remoteHeader = verified.metadata.object
+  const remote = verified.encryptedItem
+
+  const baseline = baselineValue === null ? null : parseOpaqueObjectHeader(baselineValue)
+  if (baseline !== null) {
+    if (baseline.class !== "item" || baseline.object_id !== remoteHeader.object_id) {
+      invalid("The vault item sync baseline belongs to a different object.")
+    }
+    if (!sameScope(baseline.scope, remoteHeader.scope)) {
+      throw new SyncClientError(
+        "invalid_response",
+        "The server changed an existing vault item's sync scope.",
+      )
+    }
+    if (remoteHeader.revision < baseline.revision) {
+      throw new SyncClientError(
+        "invalid_response",
+        "The pulled vault item predates its accepted server baseline.",
+      )
+    }
+    if (
+      remoteHeader.revision === baseline.revision &&
+      !sameHeaderVersion(baseline, remoteHeader)
+    ) {
+      throw new SyncClientError(
+        "invalid_response",
+        "The server substituted a vault item at an accepted revision.",
+      )
+    }
+  }
+
+  if (localValue === null) {
+    if (baseline !== null) {
+      return {
+        action: "conflict",
+        local: null,
+        remote,
+        baseline,
+        remoteHeader,
+      }
+    }
+    return { action: "apply_remote", item: remote, baseline: remoteHeader }
+  }
+
+  const local = parseEncryptedVaultItem(localValue)
+  if (local.object_id !== remoteHeader.object_id) {
+    invalid("The local vault item belongs to a different object.")
+  }
+  const localDigest = await sha256(encodeEncryptedVaultItem(local))
+  if (itemMatchesHeader(local, localDigest, remoteHeader)) {
+    return { action: "unchanged", item: local, baseline: remoteHeader }
+  }
+  if (baseline === null) {
+    return { action: "conflict", local, remote, baseline: null, remoteHeader }
+  }
+  if (itemMatchesHeader(local, localDigest, baseline)) {
+    return { action: "apply_remote", item: remote, baseline: remoteHeader }
+  }
+  if (sameHeaderVersion(baseline, remoteHeader)) {
+    return { action: "keep_local", item: local, baseline }
+  }
+  return { action: "conflict", local, remote, baseline, remoteHeader }
 }
 
 export function parseEncryptedVaultItem(value: unknown): EncryptedVaultItemV1 {
@@ -182,6 +272,60 @@ export function parseEncryptedVaultItem(value: unknown): EncryptedVaultItemV1 {
 
 function encodeEncryptedVaultItem(item: EncryptedVaultItemV1): Uint8Array {
   return new TextEncoder().encode(JSON.stringify(item))
+}
+
+function requireItemMatchesHeader(
+  item: EncryptedVaultItemV1,
+  header: OpaqueObjectHeaderV1,
+): void {
+  if (
+    item.object_id !== header.object_id ||
+    item.revision !== header.revision ||
+    item.payload_schema_version !== header.payload_version ||
+    header.envelope_version !== ITEM_ENVELOPE_VERSION
+  ) {
+    throw new SyncClientError(
+      "ciphertext_mismatch",
+      "The encrypted vault item does not match its opaque header.",
+    )
+  }
+}
+
+function itemMatchesHeader(
+  item: EncryptedVaultItemV1,
+  digest: readonly number[],
+  header: OpaqueObjectHeaderV1,
+): boolean {
+  return (
+    item.object_id === header.object_id &&
+    item.revision === header.revision &&
+    item.payload_schema_version === header.payload_version &&
+    header.envelope_version === ITEM_ENVELOPE_VERSION &&
+    sameBytes(digest, header.ciphertext_sha256)
+  )
+}
+
+function sameHeaderVersion(
+  left: OpaqueObjectHeaderV1,
+  right: OpaqueObjectHeaderV1,
+): boolean {
+  return (
+    left.object_id === right.object_id &&
+    left.revision === right.revision &&
+    left.payload_version === right.payload_version &&
+    left.envelope_version === right.envelope_version &&
+    left.ciphertext_size_bytes === right.ciphertext_size_bytes &&
+    left.tombstone === right.tombstone &&
+    sameBytes(left.ciphertext_sha256, right.ciphertext_sha256)
+  )
+}
+
+function sameScope(left: ObjectScopeV1, right: ObjectScopeV1): boolean {
+  return JSON.stringify(left) === JSON.stringify(right)
+}
+
+function sameBytes(left: readonly number[], right: readonly number[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index])
 }
 
 function decodeJson(bytes: Uint8Array): unknown {

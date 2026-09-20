@@ -80,8 +80,10 @@ Rule: cloud integration starts only after the local platform below is stable.
    credential-free durable push outbox/pull cursor coordinator into web/extension
    application mutation and acceptance flows. A strict encrypted-item adapter now
    binds local encrypted records to revision/hash-fenced opaque mutations and
-   verifies pulled record/header identity before acceptance; atomic local enqueue,
-   durable conflict state, and acceptance wiring remain. Then complete bootstrap,
+   verifies pulled record/header identity before acceptance. Fail-closed three-way
+   reconciliation now separates safe fast-forwards, replays, local-ahead state,
+   and concurrent edits; atomic local enqueue, durable baseline/conflict state,
+   and acceptance wiring remain. Then complete bootstrap,
    household membership, attachment transport, offline queues, exact-revision conflicts,
    tombstones, revocation, key rotation, pagination, and web/extension
    convergence.

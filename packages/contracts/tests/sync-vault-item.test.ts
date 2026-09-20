@@ -6,6 +6,7 @@ import {
   decodePulledVaultItem,
   parseEncryptedVaultItem,
   prepareVaultItemMutation,
+  reconcilePulledVaultItem,
   type EncryptedVaultItemV1,
 } from "../src/sync-vault-item"
 
@@ -128,5 +129,80 @@ test("download validation rejects non-item objects and modified bodies", async (
     ),
     (error: unknown) =>
       error instanceof SyncClientError && error.code === "ciphertext_mismatch",
+  )
+})
+
+async function pulled(next: EncryptedVaultItemV1) {
+  const prepared = await prepareVaultItemMutation(next, null, scope, OPERATION_ID)
+  return decodePulledVaultItem(
+    { object: prepared.mutation.object, change_seq: next.revision, etag: `item-${next.revision}` },
+    prepared.ciphertext,
+  )
+}
+
+test("three-way reconciliation fast-forwards only an unchanged local baseline", async () => {
+  const first = await pulled(item(1))
+  const second = await pulled(item(2))
+
+  const bootstrap = await reconcilePulledVaultItem(null, null, first)
+  assert.equal(bootstrap.action, "apply_remote")
+
+  const fastForward = await reconcilePulledVaultItem(item(1), first.metadata.object, second)
+  assert.equal(fastForward.action, "apply_remote")
+  if (fastForward.action === "apply_remote") {
+    assert.equal(fastForward.item.revision, 2)
+    assert.equal(fastForward.baseline.revision, 2)
+  }
+
+  const replay = await reconcilePulledVaultItem(item(2), second.metadata.object, second)
+  assert.equal(replay.action, "unchanged")
+})
+
+test("three-way reconciliation preserves local-ahead and concurrent ciphertext", async () => {
+  const baseline = await pulled(item(1))
+  const remote = await pulled({ ...item(2), ciphertext: [9, 8, 7, 20] })
+  const local = { ...item(2), ciphertext: [9, 8, 7, 21] }
+
+  const localAhead = await reconcilePulledVaultItem(local, baseline.metadata.object, baseline)
+  assert.equal(localAhead.action, "keep_local")
+
+  const conflict = await reconcilePulledVaultItem(local, baseline.metadata.object, remote)
+  assert.equal(conflict.action, "conflict")
+  if (conflict.action === "conflict") {
+    assert.deepEqual(conflict.local, local)
+    assert.deepEqual(conflict.remote, remote.encryptedItem)
+    assert.equal(conflict.baseline?.revision, 1)
+  }
+
+  const unknownAncestry = await reconcilePulledVaultItem(local, null, remote)
+  assert.equal(unknownAncestry.action, "conflict")
+})
+
+test("three-way reconciliation rejects baseline rollback, substitution, and scope moves", async () => {
+  const first = await pulled(item(1))
+  const second = await pulled(item(2))
+
+  await assert.rejects(
+    reconcilePulledVaultItem(item(2), second.metadata.object, first),
+    /predates its accepted server baseline/,
+  )
+  await assert.rejects(
+    reconcilePulledVaultItem(
+      item(1),
+      { ...first.metadata.object, ciphertext_sha256: Array(32).fill(0) },
+      first,
+    ),
+    /substituted a vault item/,
+  )
+  await assert.rejects(
+    reconcilePulledVaultItem(
+      item(1),
+      {
+        ...first.metadata.object,
+        scope: { ...scope, space_id: "99999999-9999-4999-8999-999999999999" },
+      },
+      second,
+    ),
+    /changed an existing vault item's sync scope/,
   )
 })
