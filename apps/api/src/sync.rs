@@ -23,21 +23,24 @@ use crate::{
     AppState,
     auth::{
         bearer_token, constant_time_eq, device_token_hash, generate_device_token, hex_encode,
-        parse_public_key_hex, registration_token_hash,
+        is_valid_device_token, parse_public_key_hex, registration_token_hash,
     },
     model::{
         DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT, ObjectMetadataResponse, OperationOutcome, PolicyError,
         StoredObject, WritePrecondition, strong_etag, validate_write_policy,
     },
     store::{
-        AccountCreateError, AuthContext, CommitError, DeviceCreateError, DeviceRevokeError,
-        StoreError, TopologyWriteError, TopologyWriteOutcome,
+        AccountCreateError, AuthContext, CommitError, DeviceCreateError, DeviceEnrollment,
+        DeviceEnrollmentActivateError, DeviceEnrollmentPrepareError, DeviceEnrollmentStatus,
+        DeviceRevokeError, NewDeviceEnrollment, StoreError, TopologyWriteError,
+        TopologyWriteOutcome,
     },
 };
 
 pub(crate) const MAX_CIPHERTEXT_OBJECT_BYTES: usize =
     vault_sync::MAX_SYNC_CIPHERTEXT_BYTES as usize;
 pub(crate) const MAX_TOPOLOGY_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_DEVICE_ENROLLMENT_BYTES: usize = 8 * 1024;
 const MUTATION_HEADER: &str = "x-safeory-mutation";
 const CHANGE_SEQ_HEADER: &str = "x-safeory-change-seq";
 const MAX_MUTATION_HEADER_BYTES: usize = 8 * 1024;
@@ -55,6 +58,25 @@ struct DeviceCredentialsResponse {
     account_id: Uuid,
     device_id: Uuid,
     device_token: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PrepareDeviceEnrollmentRequest {
+    request_id: Uuid,
+    device_id: Uuid,
+    encryption_public_key: String,
+    signing_public_key: String,
+    device_token: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct DeviceEnrollmentResponse {
+    account_id: Uuid,
+    request_id: Uuid,
+    device_id: Uuid,
+    expires_at_unix_seconds: i64,
+    status: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -131,6 +153,84 @@ pub(crate) async fn create_device(
     ))
 }
 
+pub(crate) async fn prepare_device_enrollment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<PrepareDeviceEnrollmentRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let auth = authenticate_device(&state, &headers).await?;
+    if request.request_id.is_nil() {
+        return Err(ApiError::BadRequest("request_id must be a non-nil UUID"));
+    }
+    let (device_id, encryption_public_key, signing_public_key) = parse_device_registration_fields(
+        request.device_id,
+        &request.encryption_public_key,
+        &request.signing_public_key,
+    )?;
+    if !is_valid_device_token(&request.device_token) {
+        return Err(ApiError::BadRequest("device_token has an invalid format"));
+    }
+    let token_hash = device_token_hash(&request.device_token);
+    let enrollment = state
+        .metadata
+        .prepare_device_enrollment(NewDeviceEnrollment {
+            account_id: auth.account_id,
+            approved_by_device_id: auth.device_id,
+            request_id: request.request_id,
+            device_id,
+            encryption_public_key: &encryption_public_key,
+            signing_public_key: &signing_public_key,
+            token_hash: &token_hash,
+        })
+        .await
+        .map_err(device_enrollment_prepare_error)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(device_enrollment_response(enrollment)),
+    ))
+}
+
+pub(crate) async fn activate_device_enrollment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(request_id): Path<Uuid>,
+) -> Result<Json<DeviceEnrollmentResponse>, ApiError> {
+    if request_id.is_nil() {
+        return Err(ApiError::NotFound);
+    }
+    let token = bearer_token(&headers).ok_or(ApiError::Unauthorized)?;
+    if !is_valid_device_token(token) {
+        return Err(ApiError::Unauthorized);
+    }
+    let token_hash = device_token_hash(token);
+    let enrollment = state
+        .metadata
+        .activate_device_enrollment(request_id, &token_hash)
+        .await
+        .map_err(device_enrollment_activate_error)?;
+    Ok(Json(device_enrollment_response(enrollment)))
+}
+
+pub(crate) async fn cancel_device_enrollment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(request_id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let auth = authenticate_device(&state, &headers).await?;
+    if request_id.is_nil() {
+        return Err(ApiError::NotFound);
+    }
+    let cancelled = state
+        .metadata
+        .cancel_device_enrollment(auth.account_id, auth.device_id, request_id)
+        .await
+        .map_err(|error| backend_store_error("cancel device enrollment", error))?;
+    if !cancelled {
+        return Err(ApiError::NotFound);
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub(crate) async fn list_devices(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -162,7 +262,7 @@ pub(crate) async fn revoke_device(
     let auth = authenticate_device(&state, &headers).await?;
     let revoked = state
         .metadata
-        .revoke_device(auth.account_id, device_id)
+        .revoke_device(auth.account_id, auth.device_id, device_id)
         .await
         .map_err(device_revoke_error)?;
     if !revoked {
@@ -572,16 +672,41 @@ fn authorize_registration(state: &AppState, headers: &HeaderMap) -> Result<(), A
 fn parse_device_registration(
     request: &RegisterDeviceRequest,
 ) -> Result<(Uuid, [u8; 32], [u8; 32]), ApiError> {
-    if request.device_id.is_nil() {
+    parse_device_registration_fields(
+        request.device_id,
+        &request.encryption_public_key,
+        &request.signing_public_key,
+    )
+}
+
+fn parse_device_registration_fields(
+    device_id: Uuid,
+    encryption_public_key: &str,
+    signing_public_key: &str,
+) -> Result<(Uuid, [u8; 32], [u8; 32]), ApiError> {
+    if device_id.is_nil() {
         return Err(ApiError::BadRequest("device_id must be a non-nil UUID"));
     }
-    let encryption_public_key = parse_public_key_hex(&request.encryption_public_key).ok_or(
+    let encryption_public_key = parse_public_key_hex(encryption_public_key).ok_or(
         ApiError::BadRequest("encryption_public_key must be 32-byte hex"),
     )?;
-    let signing_public_key = parse_public_key_hex(&request.signing_public_key).ok_or(
+    let signing_public_key = parse_public_key_hex(signing_public_key).ok_or(
         ApiError::BadRequest("signing_public_key must be 32-byte hex"),
     )?;
-    Ok((request.device_id, encryption_public_key, signing_public_key))
+    Ok((device_id, encryption_public_key, signing_public_key))
+}
+
+fn device_enrollment_response(enrollment: DeviceEnrollment) -> DeviceEnrollmentResponse {
+    DeviceEnrollmentResponse {
+        account_id: enrollment.account_id,
+        request_id: enrollment.request_id,
+        device_id: enrollment.device_id,
+        expires_at_unix_seconds: enrollment.expires_at_unix_seconds,
+        status: match enrollment.status {
+            DeviceEnrollmentStatus::Pending => "pending",
+            DeviceEnrollmentStatus::Active => "active",
+        },
+    }
 }
 
 fn require_octet_stream(headers: &HeaderMap) -> Result<(), ApiError> {
@@ -691,6 +816,37 @@ fn device_create_error(error: DeviceCreateError) -> ApiError {
     }
 }
 
+fn device_enrollment_prepare_error(error: DeviceEnrollmentPrepareError) -> ApiError {
+    match error {
+        DeviceEnrollmentPrepareError::LimitReached => ApiError::LimitReached,
+        DeviceEnrollmentPrepareError::IdentifierConflict => ApiError::IdentifierConflict,
+        DeviceEnrollmentPrepareError::OperationConflict => ApiError::OperationConflict,
+        DeviceEnrollmentPrepareError::Expired | DeviceEnrollmentPrepareError::Cancelled => {
+            ApiError::EnrollmentUnavailable
+        }
+        DeviceEnrollmentPrepareError::Database(_) | DeviceEnrollmentPrepareError::Store(_) => {
+            warn!("prepare device enrollment persistence failed");
+            ApiError::Unavailable
+        }
+    }
+}
+
+fn device_enrollment_activate_error(error: DeviceEnrollmentActivateError) -> ApiError {
+    match error {
+        DeviceEnrollmentActivateError::NotFound => ApiError::NotFound,
+        DeviceEnrollmentActivateError::Unauthorized => ApiError::Unauthorized,
+        DeviceEnrollmentActivateError::LimitReached => ApiError::LimitReached,
+        DeviceEnrollmentActivateError::IdentifierConflict => ApiError::IdentifierConflict,
+        DeviceEnrollmentActivateError::Expired | DeviceEnrollmentActivateError::Cancelled => {
+            ApiError::EnrollmentUnavailable
+        }
+        DeviceEnrollmentActivateError::Database(_) | DeviceEnrollmentActivateError::Store(_) => {
+            warn!("activate device enrollment persistence failed");
+            ApiError::Unavailable
+        }
+    }
+}
+
 fn account_create_error(error: AccountCreateError) -> ApiError {
     match error {
         AccountCreateError::IdentifierConflict => ApiError::IdentifierConflict,
@@ -706,6 +862,7 @@ fn device_revoke_error(error: DeviceRevokeError) -> ApiError {
         DeviceRevokeError::Database(error) => {
             backend_store_error("revoke device", StoreError::Database(error))
         }
+        DeviceRevokeError::Store(error) => backend_store_error("revoke device", error),
     }
 }
 
@@ -732,6 +889,7 @@ pub(crate) enum ApiError {
     IdentifierConflict,
     LimitReached,
     LastActiveDevice,
+    EnrollmentUnavailable,
     Unavailable,
     Internal,
 }
@@ -760,6 +918,7 @@ impl IntoResponse for ApiError {
             Self::IdentifierConflict => (StatusCode::CONFLICT, "device_identifier_conflict"),
             Self::LimitReached => (StatusCode::UNPROCESSABLE_ENTITY, "device_limit_reached"),
             Self::LastActiveDevice => (StatusCode::CONFLICT, "last_active_device"),
+            Self::EnrollmentUnavailable => (StatusCode::GONE, "enrollment_unavailable"),
             Self::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, "backend_unavailable"),
             Self::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
         };

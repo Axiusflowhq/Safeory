@@ -141,6 +141,19 @@ pub fn router(state: AppState) -> Router {
             "/v1/devices/{device_id}",
             axum::routing::delete(sync::revoke_device),
         )
+        .route(
+            "/v1/device-enrollments",
+            post(sync::prepare_device_enrollment)
+                .layer(DefaultBodyLimit::max(sync::MAX_DEVICE_ENROLLMENT_BYTES)),
+        )
+        .route(
+            "/v1/device-enrollments/{request_id}",
+            axum::routing::delete(sync::cancel_device_enrollment),
+        )
+        .route(
+            "/v1/device-enrollments/{request_id}/activate",
+            post(sync::activate_device_enrollment),
+        )
         .route("/v1/objects", get(sync::list_objects))
         .route(
             "/v1/households/{household_id}/topology",

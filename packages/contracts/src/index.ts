@@ -57,6 +57,7 @@ export {
   OPAQUE_OBJECT_CLASSES,
   SyncClient,
   SyncClientError,
+  generateDeviceToken,
   normalizeSyncApiBaseUrl,
   parseOpaqueMutation,
   parseOpaqueObjectHeader,
@@ -193,6 +194,7 @@ export type {
 export type {
   OpaqueMutationV1,
   DeviceCredentialsV1,
+  DeviceEnrollmentV1,
   DeviceInventoryEntryV1,
   DeviceInventoryV1,
   OpaqueObjectClassV1,

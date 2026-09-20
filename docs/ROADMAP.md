@@ -202,9 +202,11 @@ gates are green, including the generated-WASM Node smoke test.**
   enrollment now re-authenticate the local root, confirm the generated Account
   Secret, and durably publish that singleton before topology. Complete
   production identity and recovery/new-device approval. ADR 0007 now defines
-  and implements the signed, recipient-encrypted device-credential handoff core;
-  durable pending activation, application UX, external review, and server-dump
-  resistance validation remain. Cognito
+  and implements the signed, recipient-encrypted device-credential handoff core.
+  The API now isolates bounded pending bearers, expires/cancels them, activates
+  atomically, and records minimal enrollment events. Durable client approval
+  coordination, application UX, external review, and server-dump resistance
+  validation remain. Cognito
   authentication alone remains insufficient.
 - Add minimal security-event and encrypted activity-event formats.
 

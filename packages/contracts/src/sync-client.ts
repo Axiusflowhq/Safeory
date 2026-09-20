@@ -113,6 +113,27 @@ export interface DeviceInventoryV1 {
   devices: DeviceInventoryEntryV1[]
 }
 
+export interface DeviceEnrollmentV1 {
+  account_id: string
+  request_id: string
+  device_id: string
+  expires_at_unix_seconds: number
+  status: "pending" | "active"
+}
+
+export function generateDeviceToken(): string {
+  const random = globalThis.crypto?.getRandomValues
+  if (random === undefined) {
+    throw new SyncClientError(
+      "invalid_configuration",
+      "Secure random generation is unavailable.",
+    )
+  }
+  const bytes = new Uint8Array(32)
+  globalThis.crypto.getRandomValues(bytes)
+  return `sfo_dev_v1_${Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")}`
+}
+
 export class SyncClient {
   private constructor(
     private readonly baseUrl: URL,
@@ -215,6 +236,102 @@ export class SyncClient {
       )
     }
     return credentials
+  }
+
+  async prepareDeviceEnrollment(
+    requestIdValue: string,
+    registration: DeviceRegistrationV1,
+    deviceToken: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<DeviceEnrollmentV1> {
+    const requestId = uuid(requestIdValue, "enrollment request ID")
+    if (!DEVICE_TOKEN.test(deviceToken)) {
+      throw new SyncClientError(
+        "invalid_contract",
+        "The pending device credential has an invalid format.",
+      )
+    }
+    const registrationPayload = deviceRegistrationPayload(registration)
+    const payload = {
+      request_id: requestId,
+      ...registrationPayload,
+      device_token: deviceToken,
+    }
+    const response = await this.request(this.endpoint("v1/device-enrollments"), {
+      method: "POST",
+      headers: this.headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify(payload),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    })
+    const enrollment = parseDeviceEnrollment(
+      await boundedJson(response, MAX_DEVICE_CREDENTIAL_BYTES),
+      requestId,
+      registrationPayload.device_id,
+    )
+    if (enrollment.account_id !== this.accountId) {
+      return invalidResponse("The enrollment response changed the authenticated account.")
+    }
+    return enrollment
+  }
+
+  static async activateDeviceEnrollment(
+    apiBaseUrl: string,
+    requestIdValue: string,
+    expectedDeviceIdValue: string,
+    deviceToken: string,
+    options: { fetcher?: typeof fetch; signal?: AbortSignal } = {},
+  ): Promise<DeviceCredentialsV1> {
+    const baseUrl = syncBaseUrl(apiBaseUrl)
+    const requestId = uuid(requestIdValue, "enrollment request ID")
+    const expectedDeviceId = uuid(expectedDeviceIdValue, "device ID")
+    if (!DEVICE_TOKEN.test(deviceToken)) {
+      throw new SyncClientError(
+        "invalid_contract",
+        "The pending device credential has an invalid format.",
+      )
+    }
+    const fetcher = options.fetcher ?? globalThis.fetch
+    await fetchSyncCompatibility(baseUrl.href, {
+      fetcher,
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    })
+    const response = await performSyncRequest(
+      fetcher,
+      new URL(`v1/device-enrollments/${encodeURIComponent(requestId)}/activate`, baseUrl),
+      {
+        method: "POST",
+        headers: authenticatedJsonHeaders(deviceToken),
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+      },
+    )
+    const enrollment = parseDeviceEnrollment(
+      await boundedJson(response, MAX_DEVICE_CREDENTIAL_BYTES),
+      requestId,
+      expectedDeviceId,
+    )
+    if (enrollment.status !== "active") {
+      return invalidResponse("The activated enrollment response is not active.")
+    }
+    return {
+      account_id: enrollment.account_id,
+      device_id: enrollment.device_id,
+      device_token: deviceToken,
+    }
+  }
+
+  async cancelDeviceEnrollment(
+    requestIdValue: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<void> {
+    const requestId = uuid(requestIdValue, "enrollment request ID")
+    await this.request(
+      this.endpoint(`v1/device-enrollments/${encodeURIComponent(requestId)}`),
+      {
+        method: "DELETE",
+        headers: this.headers({ Accept: "application/json" }),
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+      },
+    )
   }
 
   async revokeDevice(
@@ -575,6 +692,45 @@ function parseDeviceInventory(value: unknown): DeviceInventoryV1 {
   return { current_device_id: currentDeviceId, devices }
 }
 
+function parseDeviceEnrollment(
+  value: unknown,
+  expectedRequestId: string,
+  expectedDeviceId: string,
+): DeviceEnrollmentV1 {
+  const record = responseRecord(
+    value,
+    ["account_id", "request_id", "device_id", "expires_at_unix_seconds", "status"],
+    "device enrollment",
+  )
+  let accountId: string
+  let requestId: string
+  let deviceId: string
+  try {
+    accountId = uuid(record.account_id, "account ID")
+    requestId = uuid(record.request_id, "enrollment request ID")
+    deviceId = uuid(record.device_id, "device ID")
+  } catch {
+    return invalidResponse("The device enrollment response is invalid.")
+  }
+  if (
+    requestId !== expectedRequestId ||
+    deviceId !== expectedDeviceId ||
+    typeof record.expires_at_unix_seconds !== "number" ||
+    !Number.isSafeInteger(record.expires_at_unix_seconds) ||
+    record.expires_at_unix_seconds <= 0 ||
+    (record.status !== "pending" && record.status !== "active")
+  ) {
+    return invalidResponse("The device enrollment response is invalid.")
+  }
+  return {
+    account_id: accountId,
+    request_id: requestId,
+    device_id: deviceId,
+    expires_at_unix_seconds: record.expires_at_unix_seconds,
+    status: record.status,
+  }
+}
+
 function responseRecord(
   value: unknown,
   keys: readonly string[],
@@ -652,6 +808,12 @@ async function performSyncRequest(
   }
   if (response.status === 422) {
     throw new SyncClientError("limit_reached", "The device limit was reached.")
+  }
+  if (response.status === 410) {
+    throw new SyncClientError(
+      "enrollment_unavailable",
+      "The device enrollment expired or was cancelled.",
+    )
   }
   throw new SyncClientError("request_failed", "The sync endpoint returned an error.")
 }

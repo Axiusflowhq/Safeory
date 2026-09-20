@@ -190,9 +190,11 @@ coordinator remain.
 6. The joining device supplies its master passphrase and Account Secret to open
    the account bootstrap inside WASM and install a new device-local root wrap.
 
-The request/grant cryptographic core and browser secure-key-store adapter are
-implemented. Durable pending-device server state, expiry/cancellation,
-application coordination, and reviewed UX remain.
+The request/grant cryptographic core, browser secure-key-store adapter, and
+durable server state machine are implemented. Pending bearers are isolated from
+ordinary authentication, reserve bounded slots, expire, can be cancelled, and
+activate atomically with a minimal event. Durable client approval coordination,
+post-activation inventory confirmation, and reviewed UX remain.
 
 Email or Cognito access alone cannot deliver usable vault keys.
 

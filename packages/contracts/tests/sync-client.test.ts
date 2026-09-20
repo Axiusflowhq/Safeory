@@ -5,6 +5,7 @@ import { CURRENT_SYNC_COMPATIBILITY } from "../src/sync-compatibility"
 import {
   SyncClient,
   SyncClientError,
+  generateDeviceToken,
   parseOpaqueMutation,
   parseOpaqueObjectHeader,
   parseSyncObjectPage,
@@ -24,6 +25,8 @@ const HOUSEHOLD_ID = "44444444-4444-4444-8444-444444444444"
 const MEMBERSHIP_ID = "55555555-5555-4555-8555-555555555555"
 const DEVICE_ID = "66666666-6666-4666-8666-666666666666"
 const SECOND_DEVICE_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+const ENROLLMENT_REQUEST_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+const PENDING_DEVICE_TOKEN = `sfo_dev_v1_${"b".repeat(64)}`
 const SPACE_ID = "77777777-7777-4777-8777-777777777777"
 
 function deviceRegistration(deviceId = DEVICE_ID): DeviceRegistrationV1 {
@@ -34,6 +37,14 @@ function deviceRegistration(deviceId = DEVICE_ID): DeviceRegistrationV1 {
     signing_public_key_hex: "22".repeat(32),
   }
 }
+
+test("device bearer generation uses canonical independent 256-bit material", () => {
+  const first = generateDeviceToken()
+  const second = generateDeviceToken()
+  assert.match(first, /^sfo_dev_v1_[0-9a-f]{64}$/)
+  assert.match(second, /^sfo_dev_v1_[0-9a-f]{64}$/)
+  assert.notEqual(first, second)
+})
 
 function topology(): HouseholdTopologyV1 {
   return {
@@ -377,6 +388,110 @@ test("authenticated client creates and revokes a bound device", async () => {
     "POST /v1/devices",
     `DELETE /v1/devices/${SECOND_DEVICE_ID}`,
   ])
+})
+
+test("approved-device enrollment prepares, activates, and cancels through bounded contracts", async () => {
+  const requests: Array<{ url: string; init: RequestInit }> = []
+  const fetcher: typeof fetch = async (input, init = {}) => {
+    const url = String(input)
+    if (url.endsWith("/v1/compatibility")) {
+      return Response.json(CURRENT_SYNC_COMPATIBILITY)
+    }
+    requests.push({ url, init })
+    if (init.method === "DELETE") return new Response(null, { status: 204 })
+    return Response.json({
+      account_id: ACCOUNT_ID,
+      request_id: ENROLLMENT_REQUEST_ID,
+      device_id: SECOND_DEVICE_ID,
+      expires_at_unix_seconds: 2_000_000_000,
+      status: url.endsWith("/activate") ? "active" : "pending",
+    }, { status: url.endsWith("/activate") ? 200 : 201 })
+  }
+  const client = await SyncClient.connect(
+    "https://sync.example.test",
+    ACCOUNT_ID,
+    DEVICE_TOKEN,
+    { fetcher, deviceId: DEVICE_ID },
+  )
+
+  const pending = await client.prepareDeviceEnrollment(
+    ENROLLMENT_REQUEST_ID,
+    deviceRegistration(SECOND_DEVICE_ID),
+    PENDING_DEVICE_TOKEN,
+  )
+  const credentials = await SyncClient.activateDeviceEnrollment(
+    "https://sync.example.test",
+    ENROLLMENT_REQUEST_ID,
+    SECOND_DEVICE_ID,
+    PENDING_DEVICE_TOKEN,
+    { fetcher },
+  )
+  await client.cancelDeviceEnrollment(ENROLLMENT_REQUEST_ID)
+
+  assert.equal(pending.status, "pending")
+  assert.deepEqual(credentials, {
+    account_id: ACCOUNT_ID,
+    device_id: SECOND_DEVICE_ID,
+    device_token: PENDING_DEVICE_TOKEN,
+  })
+  assert.deepEqual(
+    JSON.parse(String(requests[0]?.init.body)),
+    {
+      request_id: ENROLLMENT_REQUEST_ID,
+      device_id: SECOND_DEVICE_ID,
+      encryption_public_key: "11".repeat(32),
+      signing_public_key: "22".repeat(32),
+      device_token: PENDING_DEVICE_TOKEN,
+    },
+  )
+  assert.equal(
+    new Headers(requests[1]?.init.headers).get("authorization"),
+    `Bearer ${PENDING_DEVICE_TOKEN}`,
+  )
+  assert.equal(requests[2]?.init.method, "DELETE")
+})
+
+test("device enrollment rejects substituted identity and maps terminal state", async () => {
+  let unavailable = false
+  const fetcher: typeof fetch = async (input) => {
+    if (String(input).endsWith("/v1/compatibility")) {
+      return Response.json(CURRENT_SYNC_COMPATIBILITY)
+    }
+    if (unavailable) {
+      return Response.json({ error: "enrollment_unavailable" }, { status: 410 })
+    }
+    return Response.json({
+      account_id: ACCOUNT_ID,
+      request_id: ENROLLMENT_REQUEST_ID,
+      device_id: DEVICE_ID,
+      expires_at_unix_seconds: 2_000_000_000,
+      status: "active",
+    })
+  }
+
+  await assert.rejects(
+    SyncClient.activateDeviceEnrollment(
+      "https://sync.example.test",
+      ENROLLMENT_REQUEST_ID,
+      SECOND_DEVICE_ID,
+      PENDING_DEVICE_TOKEN,
+      { fetcher },
+    ),
+    (error: unknown) =>
+      error instanceof SyncClientError && error.code === "invalid_response",
+  )
+  unavailable = true
+  await assert.rejects(
+    SyncClient.activateDeviceEnrollment(
+      "https://sync.example.test",
+      ENROLLMENT_REQUEST_ID,
+      SECOND_DEVICE_ID,
+      PENDING_DEVICE_TOKEN,
+      { fetcher },
+    ),
+    (error: unknown) =>
+      error instanceof SyncClientError && error.code === "enrollment_unavailable",
+  )
 })
 
 test("client validates the bounded active-device inventory", async () => {

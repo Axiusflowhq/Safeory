@@ -34,6 +34,32 @@ pub(crate) struct RegisteredDevice {
     pub signing_public_key: Option<[u8; 32]>,
 }
 
+pub(crate) const DEVICE_ENROLLMENT_TTL_SECONDS: i64 = 30 * 60;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DeviceEnrollmentStatus {
+    Pending,
+    Active,
+}
+
+pub(crate) struct DeviceEnrollment {
+    pub account_id: Uuid,
+    pub request_id: Uuid,
+    pub device_id: Uuid,
+    pub expires_at_unix_seconds: i64,
+    pub status: DeviceEnrollmentStatus,
+}
+
+pub(crate) struct NewDeviceEnrollment<'a> {
+    pub account_id: Uuid,
+    pub approved_by_device_id: Uuid,
+    pub request_id: Uuid,
+    pub device_id: Uuid,
+    pub encryption_public_key: &'a [u8; 32],
+    pub signing_public_key: &'a [u8; 32],
+    pub token_hash: &'a [u8; 32],
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TopologyWriteOutcome {
     Created,
@@ -83,6 +109,19 @@ impl MetadataStore {
             .bind(account_id.to_string())
             .execute(&mut *transaction)
             .await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(device_id.to_string())
+            .execute(&mut *transaction)
+            .await?;
+        let pending_identifier = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM device_enrollments WHERE device_id = $1::uuid)",
+        )
+        .bind(device_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if pending_identifier {
+            return Err(AccountCreateError::IdentifierConflict);
+        }
         let insert = sqlx::query(
             "INSERT INTO devices( \
                 device_id, account_id, device_public_key, signing_public_key, auth_token_sha256 \
@@ -118,14 +157,32 @@ impl MetadataStore {
             .bind(account_id.to_string())
             .fetch_one(&mut *transaction)
             .await?;
-        let active_devices = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM devices WHERE account_id = $1::uuid AND revoked_at IS NULL",
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(device_id.to_string())
+            .execute(&mut *transaction)
+            .await?;
+        let reserved_devices = sqlx::query_scalar::<_, i64>(
+            "SELECT \
+                (SELECT COUNT(*) FROM devices \
+                 WHERE account_id = $1::uuid AND revoked_at IS NULL) + \
+                (SELECT COUNT(*) FROM device_enrollments \
+                 WHERE account_id = $1::uuid AND activated_at IS NULL \
+                   AND cancelled_at IS NULL AND expires_at > now())",
         )
         .bind(account_id.to_string())
         .fetch_one(&mut *transaction)
         .await?;
-        if active_devices >= i64::try_from(MAX_DEVICES_PER_ACCOUNT).unwrap_or(i64::MAX) {
+        if reserved_devices >= i64::try_from(MAX_DEVICES_PER_ACCOUNT).unwrap_or(i64::MAX) {
             return Err(DeviceCreateError::LimitReached);
+        }
+        let pending_identifier = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM device_enrollments WHERE device_id = $1::uuid)",
+        )
+        .bind(device_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if pending_identifier {
+            return Err(DeviceCreateError::IdentifierConflict);
         }
         let insert = sqlx::query(
             "INSERT INTO devices( \
@@ -149,6 +206,302 @@ impl MetadataStore {
         Ok(device_id)
     }
 
+    pub(crate) async fn prepare_device_enrollment(
+        &self,
+        input: NewDeviceEnrollment<'_>,
+    ) -> Result<DeviceEnrollment, DeviceEnrollmentPrepareError> {
+        let NewDeviceEnrollment {
+            account_id,
+            approved_by_device_id,
+            request_id,
+            device_id,
+            encryption_public_key,
+            signing_public_key,
+            token_hash,
+        } = input;
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SELECT account_id FROM accounts WHERE account_id = $1::uuid FOR UPDATE")
+            .bind(account_id.to_string())
+            .fetch_one(&mut *transaction)
+            .await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(request_id.to_string())
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(device_id.to_string())
+            .execute(&mut *transaction)
+            .await?;
+
+        let existing = sqlx::query(
+            "SELECT account_id::text AS account_id, \
+                    approved_by_device_id::text AS approved_by_device_id, \
+                    request_id::text AS request_id, \
+                    device_id::text AS device_id, device_public_key, signing_public_key, \
+                    auth_token_sha256, \
+                    EXTRACT(EPOCH FROM expires_at)::bigint AS expires_at_unix_seconds, \
+                    activated_at IS NOT NULL AS activated, cancelled_at IS NOT NULL AS cancelled, \
+                    expires_at <= now() AS expired \
+             FROM device_enrollments WHERE request_id = $1::uuid FOR UPDATE",
+        )
+        .bind(request_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if let Some(row) = existing {
+            let enrollment = row_to_device_enrollment(&row)?;
+            let stored_encryption_key = parse_32_bytes(&row, "device_public_key")?;
+            let stored_signing_key = parse_32_bytes(&row, "signing_public_key")?;
+            let stored_token_hash = parse_32_bytes(&row, "auth_token_sha256")?;
+            if enrollment.account_id != account_id
+                || parse_uuid_column(&row, "approved_by_device_id")? != approved_by_device_id
+                || enrollment.device_id != device_id
+                || stored_encryption_key != *encryption_public_key
+                || stored_signing_key != *signing_public_key
+                || stored_token_hash != *token_hash
+            {
+                return Err(DeviceEnrollmentPrepareError::OperationConflict);
+            }
+            if row.get::<bool, _>("cancelled") {
+                return Err(DeviceEnrollmentPrepareError::Cancelled);
+            }
+            if row.get::<bool, _>("expired") && enrollment.status == DeviceEnrollmentStatus::Pending
+            {
+                return Err(DeviceEnrollmentPrepareError::Expired);
+            }
+            transaction.commit().await?;
+            return Ok(enrollment);
+        }
+
+        // Terminal attempts retain their request/audit history without burning a
+        // client-generated device identity forever. The partial unique indexes
+        // stop reserving these rows once expiry is materialized as terminal.
+        sqlx::query(
+            "UPDATE device_enrollments SET cancelled_at = expires_at \
+             WHERE activated_at IS NULL AND cancelled_at IS NULL AND expires_at <= now() \
+               AND (device_id = $1::uuid OR auth_token_sha256 = $2)",
+        )
+        .bind(device_id.to_string())
+        .bind(token_hash.as_slice())
+        .execute(&mut *transaction)
+        .await?;
+
+        let identifier_exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS( \
+                SELECT 1 FROM devices \
+                WHERE device_id = $1::uuid OR auth_token_sha256 = $2 \
+             )",
+        )
+        .bind(device_id.to_string())
+        .bind(token_hash.as_slice())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if identifier_exists {
+            return Err(DeviceEnrollmentPrepareError::IdentifierConflict);
+        }
+        let reserved_devices = sqlx::query_scalar::<_, i64>(
+            "SELECT \
+                (SELECT COUNT(*) FROM devices \
+                 WHERE account_id = $1::uuid AND revoked_at IS NULL) + \
+                (SELECT COUNT(*) FROM device_enrollments \
+                 WHERE account_id = $1::uuid AND activated_at IS NULL \
+                   AND cancelled_at IS NULL AND expires_at > now())",
+        )
+        .bind(account_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if reserved_devices >= i64::try_from(MAX_DEVICES_PER_ACCOUNT).unwrap_or(i64::MAX) {
+            return Err(DeviceEnrollmentPrepareError::LimitReached);
+        }
+
+        let row = sqlx::query(
+            "INSERT INTO device_enrollments( \
+                request_id, account_id, approved_by_device_id, device_id, \
+                device_public_key, signing_public_key, \
+                auth_token_sha256, expires_at \
+             ) VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7, \
+                       now() + make_interval(secs => $8::double precision)) \
+             RETURNING account_id::text AS account_id, request_id::text AS request_id, \
+                       device_id::text AS device_id, \
+                       EXTRACT(EPOCH FROM expires_at)::bigint AS expires_at_unix_seconds, \
+                       false AS activated",
+        )
+        .bind(request_id.to_string())
+        .bind(account_id.to_string())
+        .bind(approved_by_device_id.to_string())
+        .bind(device_id.to_string())
+        .bind(encryption_public_key.as_slice())
+        .bind(signing_public_key.as_slice())
+        .bind(token_hash.as_slice())
+        .bind(DEVICE_ENROLLMENT_TTL_SECONDS)
+        .fetch_one(&mut *transaction)
+        .await;
+        let row = match row {
+            Ok(row) => row,
+            Err(error) if is_unique_violation(&error) => {
+                return Err(DeviceEnrollmentPrepareError::IdentifierConflict);
+            }
+            Err(error) => return Err(DeviceEnrollmentPrepareError::Database(error)),
+        };
+        let enrollment = row_to_device_enrollment(&row)?;
+        transaction.commit().await?;
+        Ok(enrollment)
+    }
+
+    pub(crate) async fn activate_device_enrollment(
+        &self,
+        request_id: Uuid,
+        token_hash: &[u8; 32],
+    ) -> Result<DeviceEnrollment, DeviceEnrollmentActivateError> {
+        let identity = sqlx::query(
+            "SELECT account_id::text AS account_id, device_id::text AS device_id \
+             FROM device_enrollments \
+             WHERE request_id = $1::uuid",
+        )
+        .bind(request_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .map(|row| {
+            Ok::<(Uuid, Uuid), StoreError>((
+                parse_uuid_column(&row, "account_id")?,
+                parse_uuid_column(&row, "device_id")?,
+            ))
+        })
+        .transpose()?
+        .ok_or(DeviceEnrollmentActivateError::NotFound)?;
+        let (account_id, device_id) = identity;
+
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SELECT account_id FROM accounts WHERE account_id = $1::uuid FOR UPDATE")
+            .bind(account_id.to_string())
+            .fetch_one(&mut *transaction)
+            .await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(device_id.to_string())
+            .execute(&mut *transaction)
+            .await?;
+        let row = sqlx::query(
+            "SELECT account_id::text AS account_id, \
+                    approved_by_device_id::text AS approved_by_device_id, \
+                    request_id::text AS request_id, \
+                    device_id::text AS device_id, device_public_key, signing_public_key, \
+                    auth_token_sha256, \
+                    EXTRACT(EPOCH FROM expires_at)::bigint AS expires_at_unix_seconds, \
+                    activated_at IS NOT NULL AS activated, cancelled_at IS NOT NULL AS cancelled, \
+                    expires_at <= now() AS expired \
+             FROM device_enrollments WHERE request_id = $1::uuid FOR UPDATE",
+        )
+        .bind(request_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(DeviceEnrollmentActivateError::NotFound)?;
+        let stored_token_hash = parse_32_bytes(&row, "auth_token_sha256")?;
+        if !crate::auth::constant_time_eq(&stored_token_hash, token_hash) {
+            return Err(DeviceEnrollmentActivateError::Unauthorized);
+        }
+        if row.get::<bool, _>("cancelled") {
+            return Err(DeviceEnrollmentActivateError::Cancelled);
+        }
+        let mut enrollment = row_to_device_enrollment(&row)?;
+        if enrollment.status == DeviceEnrollmentStatus::Active {
+            transaction.commit().await?;
+            return Ok(enrollment);
+        }
+        if row.get::<bool, _>("expired") {
+            return Err(DeviceEnrollmentActivateError::Expired);
+        }
+        let active_devices = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM devices WHERE account_id = $1::uuid AND revoked_at IS NULL",
+        )
+        .bind(account_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if active_devices >= i64::try_from(MAX_DEVICES_PER_ACCOUNT).unwrap_or(i64::MAX) {
+            return Err(DeviceEnrollmentActivateError::LimitReached);
+        }
+        let encryption_public_key = parse_32_bytes(&row, "device_public_key")?;
+        let signing_public_key = parse_32_bytes(&row, "signing_public_key")?;
+        let insert = sqlx::query(
+            "INSERT INTO devices( \
+                device_id, account_id, device_public_key, signing_public_key, auth_token_sha256 \
+             ) VALUES ($1::uuid, $2::uuid, $3, $4, $5)",
+        )
+        .bind(enrollment.device_id.to_string())
+        .bind(account_id.to_string())
+        .bind(encryption_public_key.as_slice())
+        .bind(signing_public_key.as_slice())
+        .bind(token_hash.as_slice())
+        .execute(&mut *transaction)
+        .await;
+        if let Err(error) = insert {
+            if is_unique_violation(&error) {
+                return Err(DeviceEnrollmentActivateError::IdentifierConflict);
+            }
+            return Err(DeviceEnrollmentActivateError::Database(error));
+        }
+        sqlx::query(
+            "UPDATE device_enrollments SET activated_at = now() WHERE request_id = $1::uuid",
+        )
+        .bind(request_id.to_string())
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO device_enrollment_events( \
+                event_id, account_id, request_id, actor_device_id, subject_device_id, event_type \
+             ) VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, 'activated')",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(account_id.to_string())
+        .bind(request_id.to_string())
+        .bind(parse_uuid_column(&row, "approved_by_device_id")?.to_string())
+        .bind(enrollment.device_id.to_string())
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        enrollment.status = DeviceEnrollmentStatus::Active;
+        Ok(enrollment)
+    }
+
+    pub(crate) async fn cancel_device_enrollment(
+        &self,
+        account_id: Uuid,
+        actor_device_id: Uuid,
+        request_id: Uuid,
+    ) -> Result<bool, StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SELECT account_id FROM accounts WHERE account_id = $1::uuid FOR UPDATE")
+            .bind(account_id.to_string())
+            .fetch_one(&mut *transaction)
+            .await?;
+        let row = sqlx::query(
+            "UPDATE device_enrollments SET cancelled_at = now() \
+             WHERE account_id = $1::uuid AND request_id = $2::uuid \
+               AND activated_at IS NULL AND cancelled_at IS NULL AND expires_at > now() \
+             RETURNING device_id::text AS device_id",
+        )
+        .bind(account_id.to_string())
+        .bind(request_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(row) = row else {
+            return Ok(false);
+        };
+        let subject_device_id = parse_uuid_column(&row, "device_id")?;
+        sqlx::query(
+            "INSERT INTO device_enrollment_events( \
+                event_id, account_id, request_id, actor_device_id, subject_device_id, event_type \
+             ) VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, 'cancelled')",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(account_id.to_string())
+        .bind(request_id.to_string())
+        .bind(actor_device_id.to_string())
+        .bind(subject_device_id.to_string())
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(true)
+    }
+
     pub(crate) async fn list_active_devices(
         &self,
         account_id: Uuid,
@@ -168,6 +521,7 @@ impl MetadataStore {
     pub(crate) async fn revoke_device(
         &self,
         account_id: Uuid,
+        actor_device_id: Uuid,
         device_id: Uuid,
     ) -> Result<bool, DeviceRevokeError> {
         let mut transaction = self.pool.begin().await?;
@@ -205,6 +559,30 @@ impl MetadataStore {
         .bind(device_id.to_string())
         .execute(&mut *transaction)
         .await?;
+        let cancelled_enrollments = sqlx::query(
+            "UPDATE device_enrollments SET cancelled_at = now() \
+             WHERE account_id = $1::uuid AND approved_by_device_id = $2::uuid \
+               AND activated_at IS NULL AND cancelled_at IS NULL \
+             RETURNING request_id::text AS request_id, device_id::text AS device_id",
+        )
+        .bind(account_id.to_string())
+        .bind(device_id.to_string())
+        .fetch_all(&mut *transaction)
+        .await?;
+        for enrollment in cancelled_enrollments {
+            sqlx::query(
+                "INSERT INTO device_enrollment_events( \
+                    event_id, account_id, request_id, actor_device_id, subject_device_id, event_type \
+                 ) VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, 'cancelled')",
+            )
+            .bind(Uuid::new_v4().to_string())
+            .bind(account_id.to_string())
+            .bind(parse_uuid_column(&enrollment, "request_id")?.to_string())
+            .bind(actor_device_id.to_string())
+            .bind(parse_uuid_column(&enrollment, "device_id")?.to_string())
+            .execute(&mut *transaction)
+            .await?;
+        }
         transaction.commit().await?;
         Ok(result.rows_affected() == 1)
     }
@@ -710,6 +1088,20 @@ fn row_to_registered_device(row: sqlx::postgres::PgRow) -> Result<RegisteredDevi
     })
 }
 
+fn row_to_device_enrollment(row: &sqlx::postgres::PgRow) -> Result<DeviceEnrollment, StoreError> {
+    Ok(DeviceEnrollment {
+        account_id: parse_uuid_column(row, "account_id")?,
+        request_id: parse_uuid_column(row, "request_id")?,
+        device_id: parse_uuid_column(row, "device_id")?,
+        expires_at_unix_seconds: row.get("expires_at_unix_seconds"),
+        status: if row.get::<bool, _>("activated") {
+            DeviceEnrollmentStatus::Active
+        } else {
+            DeviceEnrollmentStatus::Pending
+        },
+    })
+}
+
 fn principal_sets_match(
     expected_accounts: &HashSet<String>,
     expected_devices: &HashMap<String, String>,
@@ -739,6 +1131,16 @@ fn parse_optional_32_bytes(
                 .map_err(|_| StoreError::InvalidDevicePublicKey)
         })
         .transpose()
+}
+
+fn parse_32_bytes(
+    row: &sqlx::postgres::PgRow,
+    column: &'static str,
+) -> Result<[u8; 32], StoreError> {
+    let value: Vec<u8> = row.get(column);
+    value
+        .try_into()
+        .map_err(|_| StoreError::InvalidDevicePublicKey)
 }
 
 fn parse_header(value: String) -> Result<vault_sync::OpaqueObjectHeaderV1, StoreError> {
@@ -791,9 +1193,49 @@ pub(crate) enum DeviceCreateError {
 }
 
 #[derive(Debug, Error)]
+pub(crate) enum DeviceEnrollmentPrepareError {
+    #[error("PostgreSQL operation failed")]
+    Database(#[from] sqlx::Error),
+    #[error("stored enrollment metadata is invalid")]
+    Store(#[from] StoreError),
+    #[error("the device limit was reached")]
+    LimitReached,
+    #[error("the device identifier is already registered")]
+    IdentifierConflict,
+    #[error("the enrollment request ID was reused for different input")]
+    OperationConflict,
+    #[error("the enrollment request expired")]
+    Expired,
+    #[error("the enrollment request was cancelled")]
+    Cancelled,
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum DeviceEnrollmentActivateError {
+    #[error("PostgreSQL operation failed")]
+    Database(#[from] sqlx::Error),
+    #[error("stored enrollment metadata is invalid")]
+    Store(#[from] StoreError),
+    #[error("the enrollment request was not found")]
+    NotFound,
+    #[error("the pending bearer was rejected")]
+    Unauthorized,
+    #[error("the device limit was reached")]
+    LimitReached,
+    #[error("the device identifier is already registered")]
+    IdentifierConflict,
+    #[error("the enrollment request expired")]
+    Expired,
+    #[error("the enrollment request was cancelled")]
+    Cancelled,
+}
+
+#[derive(Debug, Error)]
 pub(crate) enum DeviceRevokeError {
     #[error("PostgreSQL operation failed")]
     Database(#[from] sqlx::Error),
+    #[error("stored enrollment metadata is invalid")]
+    Store(#[from] StoreError),
     #[error("the account must retain an active device")]
     LastActiveDevice,
 }

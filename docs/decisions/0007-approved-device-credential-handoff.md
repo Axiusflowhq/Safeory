@@ -4,8 +4,9 @@ Date: 2026-09-20
 
 ## Status
 
-Accepted for implementation. The cryptographic request/grant format is
-implemented; durable pending-device activation and product UX remain.
+Accepted and partially implemented. The cryptographic request/grant format and
+durable pending-device API state machine are implemented; durable client-side
+approval coordination, inventory confirmation, and product UX remain.
 
 ## Context
 
@@ -104,6 +105,7 @@ Revocation and cancellation invalidate pending bearers. The existing immediate
 - Web and extension coordinators must persist approval drafts before network
   mutation, consume joining requests/grants once, and verify server inventory
   before saving credentials.
-- The API and database need bounded pending-device creation, activation,
-  cancellation, expiry, idempotency, and security-event state before the flow is
-  production-ready.
+- The API and database implement bounded pending-device creation, activation,
+  cancellation, expiry, exact-input idempotency, approver-revocation
+  invalidation, and minimal security-event state. Client approval drafts and UX
+  still need to consume that state machine before the flow is production-ready.

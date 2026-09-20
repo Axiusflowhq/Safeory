@@ -71,6 +71,20 @@ attempts beyond the canonical 64-active-device limit.
 Revocation uses the same account lock and refuses to revoke the final active
 device, preventing an account from becoming permanently inaccessible.
 
+The production approved-device path is separate from immediate development
+registration. An active device sends a client-generated pending bearer and the
+joining device's bound public identity to `POST /v1/device-enrollments`, keyed
+idempotently by the cryptographic request UUID. PostgreSQL stores only the
+domain-separated bearer hash. Pending records reserve a device slot, expire
+after 30 minutes, and are never consulted by ordinary device authentication.
+The joining device presents that bearer only to
+`POST /v1/device-enrollments/{request_id}/activate`; one transaction inserts the
+active device, consumes the pending state, and records the approving device in
+a minimal security event. Active devices may cancel a pending request with
+`DELETE /v1/device-enrollments/{request_id}`. Revoking an approver also cancels
+every still-pending request it approved. Exact preparation and activation
+retries are idempotent; changed input, expiry, and cancellation fail closed.
+
 The server does not parse vault records or encrypted tombstones. Account scope
 comes only from the authenticated device, never from a client-supplied account
 ID. Object IDs, revisions, sizes, hashes, and change cursors are server-visible;

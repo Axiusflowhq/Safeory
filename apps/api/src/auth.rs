@@ -24,6 +24,16 @@ pub(crate) fn device_token_hash(token: &str) -> [u8; 32] {
     hash_secret(DEVICE_TOKEN_DOMAIN, token)
 }
 
+pub(crate) fn is_valid_device_token(token: &str) -> bool {
+    let Some(material) = token.strip_prefix(DEVICE_TOKEN_PREFIX) else {
+        return false;
+    };
+    material.len() == 64
+        && material
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
 pub(crate) fn registration_token_hash(token: &str) -> [u8; 32] {
     hash_secret(REGISTRATION_TOKEN_DOMAIN, token)
 }
@@ -106,6 +116,22 @@ mod tests {
     fn token_hash_domains_are_separate() {
         let token = "same-high-entropy-input";
         assert_ne!(device_token_hash(token), registration_token_hash(token));
+    }
+
+    #[test]
+    fn device_token_format_requires_canonical_256_bit_material() {
+        assert!(is_valid_device_token(&format!(
+            "{DEVICE_TOKEN_PREFIX}{}",
+            "ab".repeat(32)
+        )));
+        assert!(!is_valid_device_token(&format!(
+            "{DEVICE_TOKEN_PREFIX}{}",
+            "AB".repeat(32)
+        )));
+        assert!(!is_valid_device_token(&format!(
+            "{DEVICE_TOKEN_PREFIX}{}",
+            "ab".repeat(31)
+        )));
     }
 
     #[test]

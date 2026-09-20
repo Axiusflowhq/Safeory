@@ -12,6 +12,7 @@ export class SyncClientError extends Error {
       | "identifier_conflict"
       | "limit_reached"
       | "last_active_device"
+      | "enrollment_unavailable"
       | "invalid_response"
       | "ciphertext_mismatch",
     message: string,
