@@ -176,10 +176,17 @@ public sealed class PasswordManagerServerBehaviorTests : IClassFixture<ApiApplic
         Assert.NotNull(deactivated);
         Assert.False(deactivated.Active);
 
-        // Probe the existing access token after deactivation. Phase 0.4 does not close its stronger
-        // revocation gate until this observed status is explicitly required to be unauthorized/forbidden.
+        // The Safeory adapter rejects the already-issued JWT for the inactive device without
+        // invalidating the still-active first device.
         var revokedTokenProbe = await deviceA2.GetAsync("/sync");
-        _output.WriteLine("post-deactivation /sync status: {0}", (int)revokedTokenProbe.StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, revokedTokenProbe.StatusCode);
+
+        var activeDeviceProbe = await deviceA1.GetAsync("/sync");
+        activeDeviceProbe.EnsureSuccessStatusCode();
+        _output.WriteLine(
+            "post-deactivation status: revoked={0}, active={1}",
+            (int)revokedTokenProbe.StatusCode,
+            (int)activeDeviceProbe.StatusCode);
     }
 
     public void Dispose()

@@ -195,6 +195,11 @@ jobs:
           node scripts/prepare-bitwarden-server-proof.mjs .proof/bitwarden-server-behavior
           node scripts/check-bitwarden-server-proof.mjs .proof/bitwarden-server-behavior
 
+      - name: Apply and verify Safeory server behavior adapters
+        run: |
+          node scripts/prepare-safeory-server-adapter-proof.mjs .proof/bitwarden-server-behavior
+          node scripts/check-safeory-server-adapter-proof.mjs .proof/bitwarden-server-behavior
+
       - name: Install Safeory-owned foundation behavior harness
         run: node scripts/prepare-bitwarden-server-behavior-proof.mjs .proof/bitwarden-server-behavior
 
@@ -205,7 +210,9 @@ jobs:
           dotnet test test/Safeory.Foundation.ServerBehavior/Safeory.Foundation.ServerBehavior.csproj --configuration Debug --no-restore --logger "console;verbosity=detailed"
 
       - name: Re-check server boundary after behavior proof
-        run: node scripts/check-bitwarden-server-proof.mjs .proof/bitwarden-server-behavior --require-restored
+        run: |
+          node scripts/check-bitwarden-server-proof.mjs .proof/bitwarden-server-behavior --require-restored
+          node scripts/check-safeory-server-adapter-proof.mjs .proof/bitwarden-server-behavior
 
   foundation-server-postgres:
     runs-on: ubuntu-latest

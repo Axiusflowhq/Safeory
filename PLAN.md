@@ -417,9 +417,9 @@ Phase 0.4 implementation evidence (2026-09-21):
 - Device deactivation is deliberately followed by a probe of the already-issued
   device access token rather than an assumed assertion. The cleaned server marks
   the device inactive but does not rotate the user security stamp in that method;
-  the stronger revocation checkboxes above remain open until the observed
-  token/refresh behavior proves the required semantics or identifies an adapter
-  requirement.
+  source review confirmed that the upstream API bearer validator does not consult
+  `Device.Active` for an already-issued JWT. This is therefore a concrete
+  foundation behavior gap rather than a test ambiguity.
 - Added CI job `foundation-server-behavior`, dependent on the cleaned server build
   proof, to compile and execute this Safeory-owned harness on Linux and re-run the
   restricted dependency boundary afterward.
@@ -445,6 +445,17 @@ Phase 0.4 implementation evidence (2026-09-21):
   complete Safeory SDK behavior harness now passes 3/3 tests locally against the
   cleaned pinned SDK. This closes the 1Password fixture gate without adopting any
   Bitwarden frontend/import UI.
+- Added a separate Safeory server adapter proof layer rather than modifying the
+  pure cleaned-OSS proof. `prepare-safeory-server-adapter-proof.mjs` adds a JWT
+  `OnTokenValidated` guard for device-bound user tokens: it resolves the token's
+  signed `sub` + `device` claims through `IDeviceRepository` and rejects the token
+  when that exact device is missing or inactive. Tokens with no device claim are
+  left unchanged, preserving service-account/organization/internal token flows.
+  `check-safeory-server-adapter-proof.mjs` fails closed if the guard disappears.
+- The server behavior fixture now requires selective revocation: after device A2
+  is deactivated, its already-issued access token must receive HTTP 401 on `/sync`
+  while device A1 for the same account must continue to succeed. The revocation
+  checkbox remains open until this adapted path passes Linux CI.
 
 **Exit gate:** Safeory can rely on the adapted backend/core password-manager
 foundation without adopting Bitwarden's frontend.
