@@ -533,7 +533,7 @@ Use the existing `SafeoryEnvelopeV1` fixture:
 
 - [x] Choose the least-invasive foundation encrypted-record carrier.
 - [ ] Persist one representative insurance/life record.
-- [ ] Render it through one temporary Safeory client route.
+- [x] Render it through one temporary Safeory client route.
 - [ ] Edit and revision-sync it.
 - [ ] Attach/download/rename/delete a file.
 - [ ] Trash and restore the record.
@@ -582,6 +582,19 @@ Phase 0.5 implementation evidence (2026-09-21):
   revision-fenced blob update, attempts a current-revision legacy overwrite and
   requires HTTP 400, then verifies the opaque blob remains intact. This downgrade
   gate remains unchecked above until the new Linux CI run passes.
+- Extracted the representative insurance `SafeoryEnvelopeV1` into a shared product-
+  domain fixture consumed by both the strict validator tests and the temporary
+  Safeory client route at `/foundation-envelope-proof`. The route is a static Next
+  16 Server Component, validates marker/version/outer record identity before
+  rendering, and uses only Safeory-owned UI plus the approved Hugeicons library.
+  It renders insurance fields, the envelope reminder/relationship binding,
+  continuity disposition, and preserved future-extension metadata without
+  touching vault runtime state or importing any Bitwarden frontend code.
+- Web typecheck and lint pass, all 9 product-domain envelope tests still pass after
+  the shared-fixture extraction, and the production static export successfully
+  prerenders `/foundation-envelope-proof` with the representative insurance
+  record. This closes the temporary-client-route gate independently of the pending
+  Linux server persistence proof.
 
 **Exit gate:** Safeory structured records round-trip over foundation transport
 without creating a parallel generic sync protocol.
