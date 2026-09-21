@@ -82,4 +82,7 @@ actually completed.
 The sign-off verifier validates artifact/commit integrity, required fields,
 conclusion shape, and condition status. It does **not** authenticate that the named
 reviewer is legally qualified; that remains an external human/organizational
-control.
+control. During Phase 0 closure it also requires committed and uncommitted review
+scope to contain only `PLAN.md` and
+`docs/provenance/QUALIFIED_LICENSE_REVIEW_SIGNOFF.json`; unrelated staged,
+unstaged, or untracked files invalidate the closure check.

@@ -419,10 +419,11 @@ completed in run `35571550793`):
   hashed as one canonical all-file manifest. `prepare:license-review` creates a
   draft bound to that artifact/run/commit and `check:license-review` rejects a
   mismatched Safeory revision, any foundation change after the reviewed commit
-  other than the sign-off record/`PLAN.md` closure, altered artifact files,
-  blocking conclusions, or unsatisfied conditions. CI's provenance job exercises
-  this tooling only with a clearly synthetic fixture; it does **not** constitute
-  qualified legal approval or authenticate reviewer credentials.
+  other than the sign-off record/`PLAN.md` closure, unrelated staged/unstaged/
+  untracked worktree paths, altered artifact files, blocking conclusions, or
+  unsatisfied conditions. CI's provenance job exercises this tooling only with a
+  clearly synthetic fixture; it does **not** constitute qualified legal approval
+  or authenticate reviewer credentials.
 
 **Exit gate:** provenance/SBOM/license/notices pipeline is reproducible; qualified
 license review remains the separate public-distribution gate.

@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { execFileSync, spawnSync } from "node:child_process";
+import { reviewClosureViolations } from "./license-review-git-scope.mjs";
 
 const artifactArg = process.argv[2];
 if (!artifactArg) {
@@ -41,6 +42,26 @@ function expectFailure(script, args, pattern, label) {
 }
 
 try {
+  const allowedScope = reviewClosureViolations([
+    "PLAN.md",
+    "docs/provenance/QUALIFIED_LICENSE_REVIEW_SIGNOFF.json",
+  ]);
+  if (allowedScope.length !== 0) {
+    throw new Error(`allowed review-closure scope was rejected: ${allowedScope}`);
+  }
+  const disallowedScope = reviewClosureViolations([
+    "PLAN.md",
+    "src/Foundation/changed.rs",
+  ]);
+  if (
+    disallowedScope.length !== 1 ||
+    disallowedScope[0] !== "src/Foundation/changed.rs"
+  ) {
+    throw new Error(
+      `review-closure scope failed to reject unrelated changes: ${disallowedScope}`,
+    );
+  }
+
   const draft = path.join(tempRoot, "draft.json");
   runNode("scripts/prepare-license-review-signoff.mjs", [
     artifactRoot,

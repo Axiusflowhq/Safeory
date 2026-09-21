@@ -7,6 +7,10 @@ import {
   HEADLINE_ARTIFACT_FILES,
   sha256,
 } from "./license-review-artifact.mjs";
+import {
+  reviewClosureViolations,
+  worktreeReviewClosureViolations,
+} from "./license-review-git-scope.mjs";
 
 function fail(message) {
   console.error(`check-qualified-license-review: ${message}`);
@@ -119,17 +123,14 @@ if (signoff.safeory_commit !== head) {
   )
     .split(/\r?\n/)
     .filter(Boolean);
-  const allowedAfterReview = new Set([
-    "PLAN.md",
-    "docs/provenance/QUALIFIED_LICENSE_REVIEW_SIGNOFF.json",
-  ]);
-  for (const changed of changedAfterReview) {
-    if (!allowedAfterReview.has(changed.replaceAll("\\", "/"))) {
-      fail(
-        `reviewed foundation changed after sign-off subject commit: ${changed}`,
-      );
-    }
+  const committedViolations = reviewClosureViolations(changedAfterReview);
+  for (const changed of committedViolations) {
+    fail(`reviewed foundation changed after sign-off subject commit: ${changed}`);
   }
+}
+
+for (const changed of worktreeReviewClosureViolations(repoRoot)) {
+  fail(`uncommitted review-closure scope contains unrelated path: ${changed}`);
 }
 
 const generationSummaryPath = path.join(

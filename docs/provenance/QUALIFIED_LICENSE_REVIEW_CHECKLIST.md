@@ -106,6 +106,12 @@ sign-off record plus `PLAN.md` gate closure after the reviewed commit.
 It validates integrity and record structure; it does not independently authenticate
 the reviewer's professional qualification.
 
+Before running the verifier, ensure the worktree contains no other staged,
+unstaged, or untracked files. The closure check intentionally rejects any path
+besides `PLAN.md` and
+`docs/provenance/QUALIFIED_LICENSE_REVIEW_SIGNOFF.json` so unrelated work cannot
+ride along with legal sign-off.
+
 - Reviewer / organization:
 - Review date:
 - Safeory commit reviewed:
