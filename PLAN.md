@@ -765,8 +765,8 @@ Phase 0.7 implementation evidence (2026-09-21):
   has a dedicated `foundation-continuity-proof` job that recreates the cleaned
   pinned SDK, reapplies/checks the continuity adapter, enforces the JS/WASM and
   lock-union boundaries, runs the trustee capsule proof, and runs the opaque
-  timed-release proof. The Phase 0 final selected-key gate remains open until
-  that Linux job is green.
+  timed-release proof. GitHub Actions run `35569832911` completed that job
+  successfully on Linux, closing the Phase 0 selected-key continuity gate.
 
 ## 0.8 Phase 0 final gate
 
@@ -781,7 +781,7 @@ Phase 0 is complete only when:
       cleaned server/SDK foundation;
 - [ ] Safeory envelope round-trip passes;
 - [ ] 32-Space isolation/rotation test passes;
-- [ ] selected-key continuity spike passes;
+- [x] selected-key continuity spike passes;
 - [ ] legal/provenance review has no blocking issue.
 
 ---
