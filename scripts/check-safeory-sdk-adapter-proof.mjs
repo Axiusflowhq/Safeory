@@ -54,6 +54,50 @@ const sealedBlob = path.join(
   "blob",
   "sealed.rs",
 );
+const createClient = path.join(
+  checkout,
+  "crates",
+  "bitwarden-vault",
+  "src",
+  "cipher",
+  "cipher_client",
+  "create.rs",
+);
+const editClient = path.join(
+  checkout,
+  "crates",
+  "bitwarden-vault",
+  "src",
+  "cipher",
+  "cipher_client",
+  "edit.rs",
+);
+const getClient = path.join(
+  checkout,
+  "crates",
+  "bitwarden-vault",
+  "src",
+  "cipher",
+  "cipher_client",
+  "get.rs",
+);
+const cipherModel = path.join(
+  checkout,
+  "crates",
+  "bitwarden-vault",
+  "src",
+  "cipher",
+  "cipher.rs",
+);
+const blobEncryption = path.join(
+  checkout,
+  "crates",
+  "bitwarden-vault",
+  "src",
+  "cipher",
+  "blob",
+  "encryption.rs",
+);
 
 try {
   const actualCommit = execFileSync(
@@ -74,13 +118,16 @@ for (const [file, requirements] of [
   [
     cipherClient,
     [
-      "decrypt_blob_cipher, encrypt_blob_cipher, is_blob_encrypted",
-      "self.should_use_blob_encryption(cipher_view.organization_id)",
+      "encrypt_blob_cipher",
+      "is_blob_encrypted",
+      "decrypt_blob_cipher_list",
+      "matches!(cipher_view.r#type, CipherType::SecureNote)",
       "encrypt_blob_cipher(&mut cipher_view, &mut ctx)",
       "if is_blob_encrypted(&cipher)",
       "decrypt_blob_cipher(&cipher, &mut ctx)",
       "contexts.push(self.encrypt(cipher_view).await?)",
       "match self.decrypt(cipher.clone()).await",
+      "decrypt_blob_cipher_list(&cipher, &mut ctx)",
     ],
   ],
   [
@@ -102,6 +149,58 @@ for (const [file, requirements] of [
       "JsonDecoding",
     ],
   ],
+  [
+    createClient,
+    [
+      "BLOB_SECURITY_VERSION",
+      "matches!(view.r#type, CipherType::SecureNote)",
+      "encrypt_blob_cipher(&mut view, &mut ctx)",
+      "CreateCipherError::Blob(error.to_string())",
+      "if is_blob_encrypted(&cipher)",
+      "decrypt_blob_cipher(&cipher, &mut ctx)",
+    ],
+  ],
+  [
+    editClient,
+    [
+      "BLOB_SECURITY_VERSION",
+      "let original_is_blob = is_blob_encrypted(&original_cipher)",
+      "let use_blob = original_is_blob",
+      "matches!(view.r#type, CipherType::SecureNote)",
+      "encrypt_blob_cipher(&mut view, &mut ctx)",
+      "EditCipherError::Blob(error.to_string())",
+      "if is_blob_encrypted(&cipher)",
+      "decrypt_blob_cipher(&cipher, &mut ctx)",
+    ],
+  ],
+  [
+    getClient,
+    [
+      "decrypt_blob_cipher, decrypt_blob_cipher_list, is_blob_encrypted",
+      "GetCipherError::Blob(error.to_string())",
+      "decrypt_blob_cipher_list(&cipher, &mut ctx)",
+      "decrypt_blob_cipher(&cipher, &mut ctx)",
+    ],
+  ],
+  [
+    cipherModel,
+    [
+      "is_some_and(crate::cipher::blob::is_blob_data)",
+      "None if is_blob => EncString::Cose_Encrypt0_B64 { data: Vec::new() }",
+      "let fallback_name = cipher.as_ref().map(|existing| existing.name.clone())",
+      "let local_data = cipher",
+    ],
+  ],
+  [
+    blobEncryption,
+    [
+      "pub(crate) fn is_blob_data(data: &str) -> bool",
+      "Blob list projection only supports SecureNote carriers",
+      "pub(crate) fn decrypt_blob_cipher_list(",
+      "CipherListViewType::SecureNote",
+      "CopyableCipherFields::SecureNotes",
+    ],
+  ],
 ]) {
   if (!fs.existsSync(file)) {
     fail(`adapted SDK source is missing: ${path.relative(checkout, file)}`);
@@ -119,5 +218,5 @@ for (const [file, requirements] of [
 
 if (failed) process.exit(1);
 console.log(
-  "check-safeory-sdk-adapter-proof: OK (public blob cipher paths + server-compatible JSON container present)",
+  "check-safeory-sdk-adapter-proof: OK (SecureNote blob create/edit/sync/state paths + server-compatible JSON container present)",
 );

@@ -2,6 +2,7 @@
 mod tests {
     use std::{fs, path::Path};
 
+    use bitwarden_api_api::models::CipherDetailsResponseModel;
     use bitwarden_core::{
         Client, client::test_accounts::test_bitwarden_com_account,
         key_management::BLOB_SECURITY_VERSION,
@@ -10,8 +11,9 @@ mod tests {
     use bitwarden_exporters::ExportFormat;
     use bitwarden_pm::PasswordManagerClient;
     use bitwarden_vault::{
-        AttachmentView, CipherRepromptType, CipherType, CipherView, Fido2CredentialFullView,
-        LoginUriView, LoginView, SecureNoteType, SecureNoteView, UriMatchType, generate_totp,
+        AttachmentView, CipherListViewType, CipherRepromptType, CipherType, CipherView,
+        Fido2CredentialFullView, LoginUriView, LoginView, SecureNoteType, SecureNoteView,
+        UriMatchType, generate_totp,
     };
 
     const TEST_FIDO_P256_KEY: &[u8] = &[
@@ -366,6 +368,71 @@ mod tests {
             batch.successes[0].notes.as_deref(),
             Some(serialized.as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn server_blob_response_without_legacy_fields_decrypts_and_lists() {
+        let client = client().await;
+        client
+            .0
+            .internal
+            .get_key_store()
+            .set_security_state_version(BLOB_SECURITY_VERSION);
+        let vault = client.vault();
+        let envelope = serde_json::json!({
+            "marker": "safeory.life_record",
+            "schema_version": 1,
+            "record_id": "11111111-1111-4111-8111-111111111111",
+            "record_kind": "insurance",
+            "data": { "title": "Family health policy" },
+            "links": [],
+            "relationships": [],
+            "reminders": [],
+            "continuity": {
+                "legacy_disposition": "private_forever",
+                "policy_ref": null
+            },
+            "extensions": {}
+        });
+        let serialized = serde_json::to_string(&envelope).unwrap();
+        let encrypted = vault
+            .ciphers()
+            .encrypt(safeory_envelope_view(serialized.clone()))
+            .await
+            .unwrap()
+            .cipher;
+
+        let request: bitwarden_api_api::models::CipherRequestModel =
+            encrypted.clone().try_into().unwrap();
+        assert_eq!(request.data.as_deref(), encrypted.data.as_deref());
+        assert!(request.notes.is_none());
+        assert!(request.secure_note.is_none());
+
+        let response = CipherDetailsResponseModel {
+            r#type: Some(CipherType::SecureNote.into()),
+            data: encrypted.data.clone(),
+            key: encrypted.key.as_ref().map(ToString::to_string),
+            favorite: Some(encrypted.favorite),
+            edit: Some(true),
+            view_password: Some(true),
+            organization_use_totp: Some(false),
+            revision_date: Some("2026-09-21T00:00:01Z".to_owned()),
+            creation_date: Some("2026-09-21T00:00:00Z".to_owned()),
+            ..Default::default()
+        };
+        assert!(response.name.is_none());
+        assert!(response.notes.is_none());
+        assert!(response.secure_note.is_none());
+
+        let synced: bitwarden_vault::Cipher = response.try_into().unwrap();
+        let decrypted = vault.ciphers().decrypt(synced.clone()).await.unwrap();
+        assert_eq!(decrypted.name, "Safeory insurance record");
+        assert_eq!(decrypted.notes.as_deref(), Some(serialized.as_str()));
+
+        let list = vault.ciphers().decrypt_list(vec![synced]).await.unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].name, "Safeory insurance record");
+        assert_eq!(list[0].r#type, CipherListViewType::SecureNote);
     }
 
     #[tokio::test]

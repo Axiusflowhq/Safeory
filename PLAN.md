@@ -563,18 +563,33 @@ Phase 0.5 implementation evidence (2026-09-21):
   while the pinned server recognizes the same logical fields only in a JSON object
   with top-level `format_version`, `wrapped_cek`, and `envelope`.
 - Added a separate Safeory SDK adapter proof rather than changing the pure cleaned-
-  OSS preparation. It wires qualifying individual-vault public encrypt/decrypt and
-  full-list paths to the existing blob implementation, writes the existing sealed
-  container as the server-compatible JSON shape, and retains read compatibility
-  for the SDK's earlier base64-CBOR representation. Organization ciphers remain on
-  the inherited path because the pinned SDK explicitly excludes them from blob
-  selection.
-- The adapted SDK behavior harness now passes 6/6 tests locally. Its carrier test
+  OSS preparation. New blob writes are intentionally limited to qualifying
+  individual-vault `SecureNote` records, which is the selected Safeory carrier;
+  password-manager Login/Card/Identity/etc. writes remain on the inherited
+  field-level path. Blob reads remain generic for compatibility. The adapter wires
+  public encrypt/decrypt, create/edit, sync/details parsing, repository-backed
+  get/get-all/list, and list/search projection to the existing blob implementation,
+  writes the existing sealed container as the server-compatible JSON shape, and
+  retains read compatibility for the SDK's earlier base64-CBOR representation.
+  Organization ciphers remain on the inherited path.
+- Server blob responses intentionally omit obsolete legacy fields such as `name`,
+  `notes`, and `secureNote`. The adapted SDK now accepts a missing legacy name only
+  when `Data` parses as a valid sealed blob; ordinary responses still fail closed.
+  List/search projection decrypts the blob directly into a SecureNote list view
+  rather than touching that obsolete encrypted-name slot.
+- The adapted SDK behavior harness now passes 7/7 tests locally. Its carrier test
   serializes a representative insurance envelope above 230 KiB but within the
   256 KiB Safeory limit, verifies public encryption produces JSON blob `Data`
   below the server's 500,000-character limit with no legacy notes/type payload,
   decrypts it through both single and full-list public APIs, and confirms unknown
   future extension data survives byte-for-byte at the JSON-value level.
+- A second carrier transport test converts the encrypted carrier into the actual
+  API request model and verifies opaque `data` is present while legacy
+  `notes`/`secureNote` are absent. It then simulates the full server/sync response
+  shape with `data` + key + metadata but no legacy name/type payload, converts that
+  response back into SDK state, and proves both full decrypt and list/search
+  projection recover `Safeory insurance record`. The adapted `bitwarden-vault`
+  crate also passes native and `wasm`-feature checks.
 - Added a paired server downgrade invariant for the normal personal-vault PUT
   path: once an item is blob-encrypted, an incoming legacy field-level replacement
   is rejected before the stored cipher is mutated. The Linux behavior harness now

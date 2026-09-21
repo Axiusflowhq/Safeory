@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+bitwarden-api-api = { path = "../../crates/bitwarden-api-api" }
 bitwarden-core = { path = "../../crates/bitwarden-core", features = ["internal", "test-fixtures"] }
 bitwarden-encoding = { path = "../../crates/bitwarden-encoding" }
 bitwarden-exporters = { path = "../../crates/bitwarden-exporters" }
