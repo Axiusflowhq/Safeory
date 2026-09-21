@@ -49,6 +49,16 @@ public sealed class PasswordManagerServerBehaviorTests : IClassFixture<ApiApplic
         await _factory.LoginWithNewAccount(accountA, MasterPasswordHash);
         var accountBTokens = await _factory.LoginWithNewAccount(accountB, MasterPasswordHash);
 
+        // Personal attachments are a premium upstream capability. Provision entitlement only on
+        // this disposable behavior-test account instead of weakening the production server gate.
+        var users = _factory.GetService<IUserRepository>();
+        var accountAUser = await users.GetByEmailAsync(accountA);
+        Assert.NotNull(accountAUser);
+        accountAUser.Premium = true;
+        accountAUser.MaxStorageGb = 1;
+        accountAUser.Storage = 0;
+        await users.UpsertAsync(accountAUser);
+
         var accountADevice1Tokens = await _factory.Identity.TokenFromPasswordAsync(
             accountA,
             MasterPasswordHash,
@@ -168,10 +178,6 @@ public sealed class PasswordManagerServerBehaviorTests : IClassFixture<ApiApplic
         Assert.Equal(HttpStatusCode.NotFound, deletedAttachmentMetadata.StatusCode);
 
         // Revoke the second device and prove the durable server-side device state changes.
-        var users = _factory.GetService<IUserRepository>();
-        var accountAUser = await users.GetByEmailAsync(accountA);
-        Assert.NotNull(accountAUser);
-
         var devices = _factory.GetService<IDeviceRepository>();
         var deviceA2Record = await devices.GetByIdentifierAsync(deviceA2Identifier, accountAUser.Id);
         Assert.NotNull(deviceA2Record);
