@@ -52,6 +52,7 @@ for (const relative of [
   "QUALIFIED_LICENSE_REVIEW_CHECKLIST.md",
   "LICENSE_REVIEW_SIGNOFF.example.json",
   "nuget-license-review-evidence.json",
+  "review-sensitive-dependency-scope.json",
   "license-inventory.json",
   "restricted-removals.json",
   "generation-summary.json",
@@ -217,6 +218,7 @@ const inventory = readJson("license-inventory.json");
 const generatedNugetReviewEvidence = readJson(
   "nuget-license-review-evidence.json",
 );
+const generatedReviewScope = readJson("review-sensitive-dependency-scope.json");
 const trackedNugetReviewEvidence = JSON.parse(
   fs.readFileSync(
     path.join(
@@ -228,12 +230,31 @@ const trackedNugetReviewEvidence = JSON.parse(
     "utf8",
   ),
 );
+const trackedReviewScope = JSON.parse(
+  fs.readFileSync(
+    path.join(
+      safeoryRoot,
+      "docs",
+      "provenance",
+      "review-sensitive-dependency-scope.json",
+    ),
+    "utf8",
+  ),
+);
 if (
   generatedNugetReviewEvidence &&
   JSON.stringify(generatedNugetReviewEvidence) !==
     JSON.stringify(trackedNugetReviewEvidence)
 ) {
   fail("generated NuGet review evidence does not match the tracked review map");
+}
+if (
+  generatedReviewScope &&
+  JSON.stringify(generatedReviewScope) !== JSON.stringify(trackedReviewScope)
+) {
+  fail(
+    "generated review-sensitive dependency scope does not match the tracked scope map",
+  );
 }
 if (inventory) {
   if (!Array.isArray(inventory.packages)) {
@@ -256,6 +277,60 @@ if (inventory) {
             `license inventory contains restricted component evidence: ${fragment}`,
           );
           break;
+        }
+      }
+    }
+    if (generatedReviewScope) {
+      if (
+        generatedReviewScope.schema_version !== 1 ||
+        generatedReviewScope.sdk_commit !== seed.sources.sdk.commit ||
+        generatedReviewScope.server_commit !== seed.sources.server.commit ||
+        !Array.isArray(generatedReviewScope.entries)
+      ) {
+        fail("review-sensitive dependency scope has invalid schema or commits");
+      } else {
+        const scopeKey = (entry) =>
+          `${entry.ecosystem}:${entry.package.toLowerCase()}@${entry.version.toLowerCase()}`;
+        const scopeKeys = new Set();
+        for (const scopeEntry of generatedReviewScope.entries) {
+          if (
+            !["cargo", "nuget"].includes(scopeEntry?.ecosystem) ||
+            !scopeEntry?.package ||
+            !scopeEntry?.version ||
+            !scopeEntry?.scope ||
+            !Array.isArray(scopeEntry?.evidence) ||
+            scopeEntry.evidence.length === 0
+          ) {
+            fail(
+              "review-sensitive dependency scope contains a malformed entry",
+            );
+            continue;
+          }
+          const key = scopeKey(scopeEntry);
+          if (scopeKeys.has(key)) {
+            fail(`review-sensitive dependency scope contains duplicate ${key}`);
+          }
+          scopeKeys.add(key);
+        }
+        const sensitiveEntries = inventory.packages.filter(
+          (entry) =>
+            entry.license === "UNKNOWN" ||
+            /(?:^|[^A-Z])(?:A?GPL|LGPL)(?:-|\b)/i.test(entry.license) ||
+            /EULA/i.test(entry.license),
+        );
+        const sensitiveKeys = new Set(sensitiveEntries.map(scopeKey));
+        for (const key of sensitiveKeys) {
+          if (!scopeKeys.has(key)) {
+            fail(
+              `review-sensitive inventory entry has no scope evidence: ${key}`,
+            );
+          }
+        }
+        for (const scopeEntry of generatedReviewScope.entries) {
+          const key = scopeKey(scopeEntry);
+          if (sensitiveKeys.has(key)) continue;
+          if (sourceOnly && scopeEntry.ecosystem === "nuget") continue;
+          fail(`review-sensitive scope entry is stale or unmatched: ${key}`);
         }
       }
     }
@@ -323,6 +398,19 @@ if (inventory && fs.existsSync(legalReviewSummaryPath)) {
     const marker = `${entry.ecosystem}:${entry.package}@${entry.version}`;
     if (!legalReviewSummary.includes(marker)) {
       fail(`legal review summary omits review-sensitive entry ${marker}`);
+      break;
+    }
+    const scopeEntry = generatedReviewScope?.entries?.find(
+      (candidate) =>
+        candidate.ecosystem === entry.ecosystem &&
+        candidate.package === entry.package &&
+        candidate.version === entry.version,
+    );
+    if (
+      scopeEntry?.scope &&
+      !legalReviewSummary.includes(`scope: \`${scopeEntry.scope}\``)
+    ) {
+      fail(`legal review summary omits technical scope for ${marker}`);
       break;
     }
   }

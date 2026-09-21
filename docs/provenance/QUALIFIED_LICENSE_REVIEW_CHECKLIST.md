@@ -31,6 +31,9 @@ provenance bundle.
       `LEGAL_REVIEW_SUMMARY.md`.
 - [ ] `nuget-license-review-evidence.json` matches the tracked review evidence and
       is treated as evidence only, not as an automatic legal determination.
+- [ ] `review-sensitive-dependency-scope.json` covers every review-sensitive
+      inventory row. Use its direct/transitive/target-gated context when deciding
+      obligations, but do not treat technical scope as a license conclusion.
 - [ ] Repository-level files under `licenses/sdk/` and `licenses/server/` are
       reviewed, including GPL/AGPL, Bitwarden-specific license/FAQ, disclaimer,
       and trademark materials.

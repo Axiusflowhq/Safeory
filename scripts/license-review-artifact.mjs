@@ -8,6 +8,7 @@ export const HEADLINE_ARTIFACT_FILES = Object.freeze([
   "LEGAL_REVIEW_SUMMARY.md",
   "QUALIFIED_LICENSE_REVIEW_CHECKLIST.md",
   "nuget-license-review-evidence.json",
+  "review-sensitive-dependency-scope.json",
 ]);
 
 export function sha256(bytes) {

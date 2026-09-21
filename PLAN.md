@@ -407,6 +407,17 @@ completed in run `35571550793`):
   LGPL alternatives, and `AdaptiveCards` with `SEE-FILE:EULA-Windows.txt`. The
   provenance checker requires the generated review-evidence map to match the
   tracked map and rejects tampering with that handoff.
+- Added `review-sensitive-dependency-scope.json`, pinned to the same SDK/server
+  commits, so qualified review can see why each of those 10 packages is present
+  without inferring from a flat SBOM. The map records direct/transitive/target-
+  gated scope and concrete source/lock evidence: the rate-limit packages and
+  Braintree are direct retained `Core` dependencies, Bitwarden Server SDK packages
+  are direct retained server dependencies, AdaptiveCards is transitive through
+  `Microsoft.Bot.Schema`, `ansi_colours` is transitive through the retained `bw`
+  CLI's `bat` dependency, and both `r-efi` versions are gated behind getrandom's
+  `target_os = "uefi"` + `efi_rng` condition and are absent from Linux/WASM reverse
+  graphs. The checker requires one matching scope entry for every sensitive
+  inventory row; this remains technical context, not a license determination.
 - Added `docs/provenance/QUALIFIED_LICENSE_REVIEW_CHECKLIST.md` with the exact
   pinned source scope, required artifact checks, the three unresolved NuGet
   determinations, review-sensitive dependency categories, distribution-model

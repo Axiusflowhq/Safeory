@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "sdk_commit": "7fd530e4852639d7391d062760891631ee9c15c1",
+  "server_commit": "6fcd3b71f5f2eb0881dd4a3b587fa8afe5957da1",
+  "entries": [
+    {
+      "ecosystem": "cargo",
+      "package": "ansi_colours",
+      "version": "1.2.3",
+      "scope": "transitive CLI dependency",
+      "evidence": [
+        "cargo tree --locked -i ansi_colours@1.2.3: bw@0.0.2 -> bat@0.26.1 -> ansi_colours@1.2.3"
+      ]
+    },
+    {
+      "ecosystem": "cargo",
+      "package": "r-efi",
+      "version": "5.3.0",
+      "scope": "target-gated transitive dependency",
+      "evidence": [
+        "getrandom@0.3.4 -> r-efi@5.3.0",
+        "getrandom Cargo.toml gate: cfg(all(target_os = \"uefi\", getrandom_backend = \"efi_rng\"))",
+        "cargo tree reverse lookup is empty for x86_64-unknown-linux-gnu and wasm32-unknown-unknown"
+      ]
+    },
+    {
+      "ecosystem": "cargo",
+      "package": "r-efi",
+      "version": "6.0.0",
+      "scope": "target-gated transitive dependency",
+      "evidence": [
+        "getrandom@0.4.2 -> r-efi@6.0.0",
+        "getrandom Cargo.toml gate: cfg(all(target_os = \"uefi\", getrandom_backend = \"efi_rng\"))",
+        "cargo tree reverse lookup is empty for x86_64-unknown-linux-gnu and wasm32-unknown-unknown"
+      ]
+    },
+    {
+      "ecosystem": "nuget",
+      "package": "AdaptiveCards",
+      "version": "3.1.0",
+      "scope": "transitive retained-server dependency",
+      "evidence": [
+        "src/Core/packages.lock.json: Microsoft.Bot.Schema@4.23.0 -> AdaptiveCards@3.1.0",
+        "src/Core/packages.lock.json classifies AdaptiveCards@3.1.0 as Transitive"
+      ]
+    },
+    {
+      "ecosystem": "nuget",
+      "package": "AspNetCoreRateLimit",
+      "version": "5.0.0",
+      "scope": "direct retained Core dependency",
+      "evidence": [
+        "src/Core/Core.csproj directly pins AspNetCoreRateLimit [5.0.0]",
+        "src/Core/Utilities/CustomIpRateLimitMiddleware.cs imports AspNetCoreRateLimit"
+      ]
+    },
+    {
+      "ecosystem": "nuget",
+      "package": "AspNetCoreRateLimit.Redis",
+      "version": "2.0.0",
+      "scope": "direct retained Core dependency",
+      "evidence": [
+        "src/Core/Core.csproj directly pins AspNetCoreRateLimit.Redis [2.0.0]",
+        "src/Core/Utilities/CustomRedisProcessingStrategy.cs imports AspNetCoreRateLimit.Redis"
+      ]
+    },
+    {
+      "ecosystem": "nuget",
+      "package": "Bitwarden.Server.Sdk.Environment",
+      "version": "0.1.0",
+      "scope": "direct retained server SDK dependency",
+      "evidence": [
+        "src/Core/packages.lock.json classifies Environment@0.1.0 as Direct",
+        "src/Api/packages.lock.json, src/SharedWeb/packages.lock.json, and src/Identity/packages.lock.json also classify Environment@0.1.0 as Direct",
+        "src/Libraries/GlobalSettingsBridge/GlobalSettingsBridgeServiceCollectionExtensions.cs imports Bitwarden.Server.Sdk.Environment.Setup"
+      ]
+    },
+    {
+      "ecosystem": "nuget",
+      "package": "Bitwarden.Server.Sdk.Features",
+      "version": "1.4.0",
+      "scope": "direct retained server SDK dependency",
+      "evidence": [
+        "src/Core/packages.lock.json, src/Api/packages.lock.json, src/SharedWeb/packages.lock.json, and src/Identity/packages.lock.json classify Features@1.4.0 as Direct",
+        "src/Core/Services/Implementations/ServerContextBuilder.cs imports Bitwarden.Server.Sdk.Features"
+      ]
+    },
+    {
+      "ecosystem": "nuget",
+      "package": "Bitwarden.Server.Sdk.WebEssentials",
+      "version": "0.5.0",
+      "scope": "direct retained API/Identity dependency",
+      "evidence": [
+        "src/Api/packages.lock.json and src/Identity/packages.lock.json classify WebEssentials@0.5.0 as Direct"
+      ]
+    },
+    {
+      "ecosystem": "nuget",
+      "package": "Braintree",
+      "version": "5.36.0",
+      "scope": "direct retained Core dependency",
+      "evidence": [
+        "src/Core/Core.csproj directly pins Braintree [5.36.0]",
+        "src/Core/Services/Implementations/BraintreeService.cs imports and calls Braintree APIs"
+      ]
+    }
+  ]
+}

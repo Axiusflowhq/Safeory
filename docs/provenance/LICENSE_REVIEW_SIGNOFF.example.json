@@ -23,7 +23,8 @@
     "license-inventory.json": "REPLACE_WITH_SHA256",
     "LEGAL_REVIEW_SUMMARY.md": "REPLACE_WITH_SHA256",
     "QUALIFIED_LICENSE_REVIEW_CHECKLIST.md": "REPLACE_WITH_SHA256",
-    "nuget-license-review-evidence.json": "REPLACE_WITH_SHA256"
+    "nuget-license-review-evidence.json": "REPLACE_WITH_SHA256",
+    "review-sensitive-dependency-scope.json": "REPLACE_WITH_SHA256"
   },
   "conclusion": "approved",
   "conditions": [],

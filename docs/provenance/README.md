@@ -40,6 +40,10 @@ The generated directory is intentionally ignored by Git. CI publishes it as the
 - `nuget-license-review-evidence.json` — version-bound upstream evidence for
   unresolved NuGet metadata. Candidate licenses in this file are review aids;
   the corresponding inventory rows remain `UNKNOWN` until qualified review.
+- `review-sensitive-dependency-scope.json` — pinned technical context for every
+  review-sensitive dependency, including direct/transitive classification,
+  retained project/code evidence, and target gating where applicable. It is
+  review context only, not a license conclusion.
 - `licenses/` — upstream repository-level license, disclaimer, FAQ, and trademark
   notice files kept verbatim for review.
 - `source-manifests/` — every retained tracked upstream file with its SHA-256
@@ -69,7 +73,9 @@ The generated directory is intentionally ignored by Git. CI publishes it as the
 `scripts/check-foundation-provenance.mjs` validates the generated bundle before
 CI uploads it. It verifies the pinned commits, source-manifest hashes/shape,
 CycloneDX version and component uniqueness, inventory counts, and rejects known
-restricted paths/packages if they reappear in the generated evidence.
+restricted paths/packages if they reappear in the generated evidence. It also
+requires the technical scope map to match the full review-sensitive inventory set
+in full mode.
 
 For Windows/local validation where the pinned .NET SDK is unavailable, the
 generator supports `--source-only`. That mode still proves source boundaries and

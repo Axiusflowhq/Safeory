@@ -56,6 +56,49 @@ for (const entry of nugetReviewEvidence.entries) {
   nugetReviewEvidenceByPackage.set(key, entry);
 }
 const usedNugetReviewEvidence = new Set();
+const reviewScopePath = path.join(
+  safeoryRoot,
+  "docs",
+  "provenance",
+  "review-sensitive-dependency-scope.json",
+);
+const reviewScope = JSON.parse(fs.readFileSync(reviewScopePath, "utf8"));
+if (
+  reviewScope.schema_version !== 1 ||
+  !Array.isArray(reviewScope.entries) ||
+  reviewScope.sdk_commit !== seed.sources.sdk.commit ||
+  reviewScope.server_commit !== seed.sources.server.commit
+) {
+  fail(
+    "invalid or stale docs/provenance/review-sensitive-dependency-scope.json",
+  );
+}
+const reviewScopeByPackage = new Map();
+function reviewScopeKey(ecosystem, packageName, version) {
+  return `${ecosystem}:${packageName.toLowerCase()}@${version.toLowerCase()}`;
+}
+for (const entry of reviewScope.entries) {
+  if (
+    !["cargo", "nuget"].includes(entry?.ecosystem) ||
+    !entry?.package ||
+    !entry?.version ||
+    !entry?.scope ||
+    !Array.isArray(entry?.evidence) ||
+    entry.evidence.length === 0 ||
+    entry.evidence.some(
+      (value) => typeof value !== "string" || value.trim() === "",
+    )
+  ) {
+    fail(
+      `review-sensitive scope evidence is incomplete for ${entry?.ecosystem ?? "<unknown>"}:${entry?.package ?? "<unknown>"}@${entry?.version ?? "<unknown>"}`,
+    );
+  }
+  const key = reviewScopeKey(entry.ecosystem, entry.package, entry.version);
+  if (reviewScopeByPackage.has(key)) {
+    fail(`duplicate review-sensitive scope entry ${key}`);
+  }
+  reviewScopeByPackage.set(key, entry);
+}
 
 function fail(message) {
   console.error(`generate-foundation-provenance: ${message}`);
@@ -538,6 +581,19 @@ const reviewSensitiveRows = licenseRows
       `${right.license}:${right.ecosystem}:${right.package}:${right.version}`,
     ),
   );
+const usedReviewScopeKeys = new Set();
+for (const row of reviewSensitiveRows) {
+  const key = reviewScopeKey(row.ecosystem, row.package, row.version);
+  if (!reviewScopeByPackage.has(key)) {
+    fail(`review-sensitive dependency is missing scope evidence: ${key}`);
+  }
+  usedReviewScopeKeys.add(key);
+}
+for (const [key, entry] of reviewScopeByPackage) {
+  if (usedReviewScopeKeys.has(key)) continue;
+  if (sourceOnly && entry.ecosystem === "nuget") continue;
+  fail(`stale review-sensitive dependency scope entry: ${key}`);
+}
 
 function reviewHints(row) {
   const hints = [];
@@ -555,6 +611,10 @@ function reviewHints(row) {
     hints.push(`license: \`${row.review.curated.license_url}\``);
   if (row.review?.curated?.license_sha256)
     hints.push(`sha256: \`${row.review.curated.license_sha256}\``);
+  const scopeEntry = reviewScopeByPackage.get(
+    reviewScopeKey(row.ecosystem, row.package, row.version),
+  );
+  if (scopeEntry) hints.push(`scope: \`${scopeEntry.scope}\``);
   return hints.length === 0 ? "" : `; ${hints.join("; ")}`;
 }
 writeJson("license-inventory.json", {
@@ -565,6 +625,7 @@ writeJson("license-inventory.json", {
   packages: licenseRows,
 });
 writeJson("nuget-license-review-evidence.json", nugetReviewEvidence);
+writeJson("review-sensitive-dependency-scope.json", reviewScope);
 
 const legalReviewSummary = `# Foundation legal review summary
 
@@ -682,6 +743,9 @@ review.
 - Version-bound unresolved NuGet review evidence is recorded in
   \`nuget-license-review-evidence.json\` without changing those inventory rows
   from \`UNKNOWN\`.
+- Technical direct/transitive/target-gated scope evidence for every
+  review-sensitive dependency is recorded in
+  \`review-sensitive-dependency-scope.json\`.
 - Reviewer-facing unresolved-license details are summarized in
   \`LEGAL_REVIEW_SUMMARY.md\`.
 - Qualified review steps and sign-off fields are included in
