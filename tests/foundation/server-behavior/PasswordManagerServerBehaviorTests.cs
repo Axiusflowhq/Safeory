@@ -22,16 +22,17 @@ public sealed class PasswordManagerServerBehaviorTests : IClassFixture<ApiApplic
         "2.3Uk+WNBIoU5xzmVFNcoWzz==|1MsPIYuRfdOHfu/0uY6H2Q==|/98sp4wb6pHP1VTZ9JcNCYgQjEUMFPlqJgCwRk1YXKg=";
     private const string BlobData =
         "{\"format_version\":1,\"wrapped_cek\":\"safeory-wrapped-cek\",\"envelope\":\"safeory-envelope\"}";
+    private static readonly string AttachmentDirectory =
+        Path.Combine(Path.GetTempPath(), $"safeory-foundation-attachments-{Guid.NewGuid():N}");
 
     private readonly ApiApplicationFactory _factory;
     private readonly ITestOutputHelper _output;
-    private readonly string _attachmentDirectory;
+    private readonly string _attachmentDirectory = AttachmentDirectory;
 
     public PasswordManagerServerBehaviorTests(ApiApplicationFactory factory, ITestOutputHelper output)
     {
         _factory = factory;
         _output = output;
-        _attachmentDirectory = Path.Combine(Path.GetTempPath(), $"safeory-foundation-attachments-{Guid.NewGuid():N}");
         _factory.UpdateConfiguration("globalSettings:attachment:baseDirectory", _attachmentDirectory);
         _factory.UpdateConfiguration("globalSettings:baseServiceUri:api", "http://localhost");
     }
@@ -297,6 +298,26 @@ public sealed class PasswordManagerServerBehaviorTests : IClassFixture<ApiApplic
         initialDownload.EnsureSuccessStatusCode();
         Assert.Equal(attachmentBytes, await initialDownload.Content.ReadAsByteArrayAsync());
 
+        var corruptedRenameRequest = BlobRequest(uploadedRevision, favorite: true);
+        corruptedRenameRequest.Attachments2 = new Dictionary<string, CipherAttachmentModel>
+        {
+            [attachmentId!] = new CipherAttachmentModel
+            {
+                FileName = "plain-text-file-name",
+                Key = EncryptedValue,
+            },
+        };
+        var corruptedRenameResponse =
+            await device1.PutAsJsonAsync($"/ciphers/{cipherId}", corruptedRenameRequest);
+        Assert.Equal(HttpStatusCode.BadRequest, corruptedRenameResponse.StatusCode);
+
+        using var metadataAfterCorruptRename =
+            await device2.GetAsync($"/ciphers/{cipherId}/attachment/{attachmentId}");
+        metadataAfterCorruptRename.EnsureSuccessStatusCode();
+        using var unchangedMetadata =
+            JsonDocument.Parse(await metadataAfterCorruptRename.Content.ReadAsStringAsync());
+        Assert.Equal("proof.bin", unchangedMetadata.RootElement.GetProperty("fileName").GetString());
+
         var renameRequest = BlobRequest(uploadedRevision, favorite: true);
         renameRequest.Attachments2 = new Dictionary<string, CipherAttachmentModel>
         {
@@ -334,6 +355,22 @@ public sealed class PasswordManagerServerBehaviorTests : IClassFixture<ApiApplic
 
         using var deletedMetadata = await device2.GetAsync($"/ciphers/{cipherId}/attachment/{attachmentId}");
         Assert.Equal(HttpStatusCode.NotFound, deletedMetadata.StatusCode);
+
+        var deleteCarrier = await device1.PutAsync($"/ciphers/{cipherId}/delete", null);
+        deleteCarrier.EnsureSuccessStatusCode();
+        var secondDeviceAfterDelete = await Sync(device2);
+        var deletedCarrier = FindCipher(secondDeviceAfterDelete.RootElement, cipherId);
+        Assert.NotEqual(JsonValueKind.Null, deletedCarrier.GetProperty("deletedDate").ValueKind);
+        Assert.Equal(BlobData, deletedCarrier.GetProperty("data").GetString());
+
+        var restoreCarrier = await device1.PutAsync($"/ciphers/{cipherId}/restore", null);
+        restoreCarrier.EnsureSuccessStatusCode();
+        var secondDeviceAfterRestore = await Sync(device2);
+        var restoredCarrier = FindCipher(secondDeviceAfterRestore.RootElement, cipherId);
+        Assert.True(
+            !restoredCarrier.TryGetProperty("deletedDate", out var restoredDeleted) ||
+            restoredDeleted.ValueKind == JsonValueKind.Null);
+        Assert.Equal(BlobData, restoredCarrier.GetProperty("data").GetString());
     }
 
     public void Dispose()
