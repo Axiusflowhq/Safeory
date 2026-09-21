@@ -9,7 +9,8 @@
     "typecheck": "tsc -b --pretty false",
     "lint": "oxlint src vite.config.ts vite.background.config.ts vite.content.config.ts",
     "test": "node --test tests/credential-capture.test.ts tests/mutation.test.ts tests/sync-configuration.test.ts tests/sync-request.test.ts tests/sync-session.test.ts",
-    "test:chromium": "node tests/browser-chromium.mjs"
+    "test:chromium": "node tests/browser-chromium.mjs",
+    "test:firefox": "node tests/browser-firefox.mjs"
   },
   "dependencies": {
     "@safeory/contracts": "workspace:*",
@@ -26,6 +27,7 @@
     "@vitejs/plugin-react": "6.1.1",
     "oxlint": "1.83.0",
     "playwright": "1.63.0",
+    "selenium-webdriver": "^4.49.0",
     "tailwindcss": "4.3.3",
     "typescript": "7.0.2",
     "vite": "8.3.0",

@@ -397,7 +397,7 @@ through Safeory-owned test clients/harnesses rather than Bitwarden's frontend:
 - [x] Update an existing login using the Safeory extension.
 - [x] Autofill only the correct origin in Chromium using Safeory-owned extension
       UI/integration code.
-- [ ] Autofill only the correct origin in Firefox using Safeory-owned extension
+- [x] Autofill only the correct origin in Firefox using Safeory-owned extension
       UI/integration code.
 - [x] Revoke a session/device.
 - [ ] Prove the revoked context stops receiving/using future authenticated
@@ -476,6 +476,18 @@ Phase 0.4 implementation evidence (2026-09-21):
   After that fix the Chromium behavior proof passes end to end locally. The main
   `quality` CI job now installs Playwright Chromium and runs the same proof after
   the production frontend build.
+- Firefox required one additional production packaging change: Firefox MV3 still
+  uses `background.scripts` while Chromium uses `background.service_worker`, so
+  the shared manifest now declares both background forms and includes a stable
+  Gecko extension ID. FirefoxDriver installs the unsigned production build as a
+  temporary add-on, launches the Playwright-managed Firefox binary, and uses a
+  fixed test-profile WebExtension UUID only to address the real popup page.
+- The Firefox behavior proof then repeats the same product flow as Chromium:
+  actual popup vault creation, page-driven credential capture, CAS update,
+  autofill of the updated password on the exact origin, and no offered/filled
+  credential on a second localhost port. It passes locally with
+  `selenium-webdriver` 4.49.0. The main `quality` job now installs both Playwright
+  Chromium and Firefox and executes both extension behavior proofs.
 
 **Exit gate:** Safeory can rely on the adapted backend/core password-manager
 foundation without adopting Bitwarden's frontend.

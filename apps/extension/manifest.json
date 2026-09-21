@@ -7,6 +7,7 @@
   "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
   "optional_host_permissions": ["https://*/*"],
   "background": {
+    "scripts": ["background.js"],
     "service_worker": "background.js",
     "type": "module"
   },
@@ -24,5 +25,10 @@
   ],
   "content_security_policy": {
     "extension_pages": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; connect-src 'self' https: http://127.0.0.1:* http://localhost:*; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "safeory@safeory.local"
+    }
   }
 }

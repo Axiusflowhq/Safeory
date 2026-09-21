@@ -421,10 +421,12 @@ jobs:
       - name: Frontend build
         run: bun run build
 
-      - name: Install Playwright Chromium
-        run: bunx playwright install --with-deps chromium
+      - name: Install Playwright browsers
+        run: bunx playwright install --with-deps chromium firefox
       - name: Chromium extension behavior proof
         run: bun run --filter @safeory/extension test:chromium
+      - name: Firefox extension behavior proof
+        run: bun run --filter @safeory/extension test:firefox
 
       - name: Install Rust security tools
         run: |
