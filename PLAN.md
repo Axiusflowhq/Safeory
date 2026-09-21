@@ -661,19 +661,56 @@ Create:
 
 Prove:
 
-- [ ] Each Space uses a real independent key/sharing boundary.
-- [ ] Collection/folder/tag/group membership alone never defines isolation.
-- [ ] Bob cannot decrypt Advisor Space ciphertext.
-- [ ] Carol cannot decrypt Family Space ciphertext.
-- [ ] Ciphertext copied between Space contexts fails authentication/decryption.
+- [x] Each Space uses a real independent key/sharing boundary.
+- [x] Collection/folder/tag/group membership alone never defines isolation.
+- [x] Bob cannot decrypt Advisor Space ciphertext.
+- [x] Carol cannot decrypt Family Space ciphertext.
+- [x] Ciphertext copied between Space contexts fails authentication/decryption.
 - [ ] Removing Bob stops future Family Space key/data delivery.
-- [ ] Family Space rotation protects future writes.
-- [ ] Moving an item between Spaces rewraps correctly.
-- [ ] Personal Space remains inaccessible to Household organizer role alone.
+- [x] Family Space rotation protects future writes.
+- [x] Moving an item between Spaces rewraps correctly.
+- [x] Personal Space remains inaccessible to Household organizer role alone.
 - [ ] 32 Spaces stay within agreed unlock/sync/memory/navigation budgets.
 - [ ] If the inherited organization model cannot satisfy this safely or
       efficiently, implement the smallest reviewed client/core key-domain
       extension instead of weakening isolation.
+
+Phase 0.6 crypto evidence (2026-09-21):
+
+- Added a Safeory-owned 32-Space SDK behavior test using the inherited key-store
+  primitives directly. Personal uses Alice's user-key slot; Family, Advisor,
+  Travel, and 28 additional Spaces each receive a separately generated
+  `SymmetricKeySlotId::Organization(OrganizationId)` key. The harness therefore
+  exercises 32 actual cryptographic domains rather than 32 UI labels.
+- Alice receives all 31 organization keys, Bob receives only Family, and Carol
+  receives only Advisor. Bob decrypts Family but not Advisor/Travel; Carol decrypts
+  Advisor but not Family/Travel; possession of the Family key does not decrypt
+  Alice Personal because Personal is wrapped under Alice's user key.
+- Each test item first receives a random per-cipher key wrapped by its Space key.
+  Reassigning Family ciphertext's `organization_id` to Advisor without rewrapping
+  therefore fails authenticated key unwrap even in Alice's context, which contains
+  both Space keys. A legitimate Family -> Advisor move instead uses the SDK's
+  `move_to_organization`/`reencrypt_cipher_keys` path; Carol can decrypt the moved
+  item and Family-only Bob cannot.
+- Rotating Family replaces Alice's Family slot with a fresh K2. Bob intentionally
+  retains only historical K1: he can still open historical Family ciphertext but
+  cannot decrypt future Family writes produced under K2. This proves the future-
+  write rotation boundary without making the false claim that rotation erases a
+  key an already-authorized device previously possessed.
+- Folder encryption explicitly identifies the user-key slot, while a cipher's key
+  identifier depends only on `organization_id`; changing folder and collection
+  metadata leaves the Space key slot unchanged. Tags/groups are not key slots in
+  the inherited `KeySlotIds` model, so metadata membership is not treated as a
+  cryptographic isolation boundary.
+- The full adapted SDK behavior harness now passes 9/9 tests locally; the focused
+  32-Space crypto test completes in roughly 0.01s on this development host. No
+  numeric unlock/sync/memory/navigation budgets are defined in the repository yet,
+  so the aggregate resource-budget gate remains open rather than inventing a
+  threshold after the measurement.
+- The remaining Bob-removal gate is intentionally still open: the crypto proof
+  establishes that a removed member without K2 cannot read future writes, but the
+  server still needs to prove that membership removal actually stops future
+  Family key/data delivery to Bob.
 
 **Exit gate:** Safeory Space isolation is cryptographically demonstrated, not
 inferred from UI permissions.

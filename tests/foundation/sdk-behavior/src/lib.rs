@@ -54,16 +54,20 @@ mod tests {
 
     use bitwarden_api_api::models::CipherDetailsResponseModel;
     use bitwarden_core::{
-        Client, client::test_accounts::test_bitwarden_com_account,
-        key_management::BLOB_SECURITY_VERSION,
+        Client, OrganizationId,
+        client::test_accounts::test_bitwarden_com_account,
+        key_management::{
+            BLOB_SECURITY_VERSION, KeySlotIds, SymmetricKeySlotId, create_test_crypto_with_user_key,
+        },
     };
+    use bitwarden_crypto::{IdentifyKey, KeyStore, SymmetricCryptoKey};
     use bitwarden_encoding::B64Url;
     use bitwarden_exporters::ExportFormat;
     use bitwarden_pm::PasswordManagerClient;
     use bitwarden_vault::{
         AttachmentView, CipherListViewType, CipherRepromptType, CipherType, CipherView,
-        Fido2CredentialFullView, LoginUriView, LoginView, SecureNoteType, SecureNoteView,
-        UriMatchType, generate_totp,
+        Fido2CredentialFullView, FolderView, LoginUriView, LoginView, SecureNoteType,
+        SecureNoteView, UriMatchType, generate_totp,
     };
 
     const TEST_FIDO_P256_KEY: &[u8] = &[
@@ -167,6 +171,166 @@ mod tests {
 
     async fn client() -> PasswordManagerClient {
         PasswordManagerClient(Client::init_test_account(test_bitwarden_com_account()).await)
+    }
+
+    fn space_id(index: u32) -> OrganizationId {
+        format!("00000000-0000-4000-8000-{index:012x}")
+            .parse()
+            .unwrap()
+    }
+
+    #[allow(deprecated)]
+    fn install_space_key(
+        store: &KeyStore<KeySlotIds>,
+        space_id: OrganizationId,
+        key: SymmetricCryptoKey,
+    ) {
+        store
+            .context_mut()
+            .set_symmetric_key(SymmetricKeySlotId::Organization(space_id), key)
+            .unwrap();
+    }
+
+    fn encrypt_space_item(
+        store: &KeyStore<KeySlotIds>,
+        space_id: Option<OrganizationId>,
+        name: &str,
+    ) -> bitwarden_vault::Cipher {
+        let mut view = safeory_envelope_view(format!("space payload for {name}"));
+        view.name = name.to_owned();
+        view.organization_id = space_id;
+        let wrapping_key = view.key_identifier();
+        let mut ctx = store.context();
+        view.generate_cipher_key(&mut ctx, wrapping_key).unwrap();
+        drop(ctx);
+        store.encrypt(view).unwrap()
+    }
+
+    #[test]
+    fn independently_keyed_spaces_enforce_member_and_move_boundaries() {
+        let alice_user_key = SymmetricCryptoKey::make_aes256_cbc_hmac_key();
+        let bob_user_key = SymmetricCryptoKey::make_aes256_cbc_hmac_key();
+        let carol_user_key = SymmetricCryptoKey::make_aes256_cbc_hmac_key();
+
+        let alice = create_test_crypto_with_user_key(alice_user_key.clone());
+        let bob = create_test_crypto_with_user_key(bob_user_key.clone());
+        let carol = create_test_crypto_with_user_key(carol_user_key.clone());
+
+        let family_space = space_id(1);
+        let advisor_space = space_id(2);
+        let travel_space = space_id(3);
+
+        let family_key_v1 = SymmetricCryptoKey::make_aes256_cbc_hmac_key();
+        let advisor_key = SymmetricCryptoKey::make_aes256_cbc_hmac_key();
+        let travel_key = SymmetricCryptoKey::make_aes256_cbc_hmac_key();
+
+        install_space_key(&alice, family_space, family_key_v1.clone());
+        install_space_key(&alice, advisor_space, advisor_key.clone());
+        install_space_key(&alice, travel_space, travel_key.clone());
+        install_space_key(&bob, family_space, family_key_v1.clone());
+        install_space_key(&carol, advisor_space, advisor_key.clone());
+
+        let personal = encrypt_space_item(&alice, None, "Alice personal");
+        let family = encrypt_space_item(&alice, Some(family_space), "Family shared");
+        let advisor = encrypt_space_item(&alice, Some(advisor_space), "Advisor shared");
+        let travel = encrypt_space_item(&alice, Some(travel_space), "Alice travel");
+
+        // Personal + Family + Advisor + Travel + 28 additional organization-backed spaces = 32.
+        let mut all_space_items = vec![
+            personal.clone(),
+            family.clone(),
+            advisor.clone(),
+            travel.clone(),
+        ];
+        for index in 4..=31 {
+            let id = space_id(index);
+            install_space_key(
+                &alice,
+                id,
+                SymmetricCryptoKey::make_aes256_cbc_hmac_key(),
+            );
+            all_space_items.push(encrypt_space_item(
+                &alice,
+                Some(id),
+                &format!("Additional space {index}"),
+            ));
+        }
+        assert_eq!(all_space_items.len(), 32);
+        for cipher in &all_space_items {
+            let view: CipherView = alice.decrypt(cipher).unwrap();
+            assert!(!view.name.is_empty());
+        }
+
+        let bob_family: CipherView = bob.decrypt(&family).unwrap();
+        assert_eq!(bob_family.name, "Family shared");
+        let carol_advisor: CipherView = carol.decrypt(&advisor).unwrap();
+        assert_eq!(carol_advisor.name, "Advisor shared");
+
+        let bob_advisor: Result<CipherView, _> = bob.decrypt(&advisor);
+        assert!(bob_advisor.is_err());
+        let carol_family: Result<CipherView, _> = carol.decrypt(&family);
+        assert!(carol_family.is_err());
+        let bob_travel: Result<CipherView, _> = bob.decrypt(&travel);
+        assert!(bob_travel.is_err());
+        let carol_travel: Result<CipherView, _> = carol.decrypt(&travel);
+        assert!(carol_travel.is_err());
+
+        // Household/Family organization access alone does not grant Alice's Personal user key.
+        let bob_personal: Result<CipherView, _> = bob.decrypt(&personal);
+        assert!(bob_personal.is_err());
+
+        // Folder membership is a navigation concern, not a Space key domain.
+        let folder = FolderView {
+            id: None,
+            name: "Family navigation".to_owned(),
+            revision_date: "2026-09-21T00:00:00Z".parse().unwrap(),
+        };
+        assert_eq!(folder.key_identifier(), SymmetricKeySlotId::User);
+        let mut family_key_probe = safeory_envelope_view("family key probe".to_owned());
+        family_key_probe.organization_id = Some(family_space);
+        assert_eq!(
+            family_key_probe.key_identifier(),
+            SymmetricKeySlotId::Organization(family_space)
+        );
+
+        // Relabeling ciphertext as another Space does not make it decryptable there.
+        let mut copied_to_advisor = family.clone();
+        copied_to_advisor.organization_id = Some(advisor_space);
+        let copied_result: Result<CipherView, _> = alice.decrypt(&copied_to_advisor);
+        assert!(copied_result.is_err());
+
+        // Removing Bob means a context with the same Bob user key but no Family key cannot
+        // decrypt either existing or future Family Space records.
+        let bob_after_removal = create_test_crypto_with_user_key(bob_user_key);
+        let removed_existing: Result<CipherView, _> = bob_after_removal.decrypt(&family);
+        assert!(removed_existing.is_err());
+
+        // Rotating the Family Space key protects future writes from a holder of the old key.
+        let family_key_v2 = SymmetricCryptoKey::make_aes256_cbc_hmac_key();
+        install_space_key(&alice, family_space, family_key_v2);
+        let family_after_rotation =
+            encrypt_space_item(&alice, Some(family_space), "Family after rotation");
+        let alice_future: CipherView = alice.decrypt(&family_after_rotation).unwrap();
+        assert_eq!(alice_future.name, "Family after rotation");
+        let bob_old_key: Result<CipherView, _> = bob.decrypt(&family_after_rotation);
+        assert!(bob_old_key.is_err());
+        let bob_removed_future: Result<CipherView, _> =
+            bob_after_removal.decrypt(&family_after_rotation);
+        assert!(bob_removed_future.is_err());
+
+        // Moving a record between Spaces rewraps its per-record cipher key without exposing
+        // plaintext or re-encrypting the payload fields.
+        let mut moved = advisor.clone();
+        let wrapped_key_before = moved.key.as_ref().unwrap().to_string();
+        moved
+            .move_to_organization(&mut alice.context(), travel_space)
+            .unwrap();
+        assert_eq!(moved.organization_id, Some(travel_space));
+        assert_ne!(wrapped_key_before, moved.key.as_ref().unwrap().to_string());
+        let moved_view: CipherView = alice.decrypt(&moved).unwrap();
+        assert_eq!(moved_view.name, "Advisor shared");
+        let carol_after_move: Result<CipherView, _> = carol.decrypt(&moved);
+        assert!(carol_after_move.is_err());
     }
 
     #[tokio::test]
@@ -312,6 +476,135 @@ mod tests {
             .decrypt_fido2_private_key(with_passkey)
             .unwrap();
         assert_eq!(recovered_private_key, key_value);
+    }
+
+    #[test]
+    fn safeory_spaces_use_independent_key_domains_and_rewrap_on_move() {
+        let alice_user_key = SymmetricCryptoKey::make_aes256_cbc_hmac_key();
+        let bob_user_key = SymmetricCryptoKey::make_aes256_cbc_hmac_key();
+        let carol_user_key = SymmetricCryptoKey::make_aes256_cbc_hmac_key();
+
+        let alice = create_test_crypto_with_user_key(alice_user_key);
+        let bob = create_test_crypto_with_user_key(bob_user_key);
+        let carol = create_test_crypto_with_user_key(carol_user_key);
+
+        // Personal is the user-key domain. Thirty-one additional organization-key domains bring
+        // the proof to 32 total Safeory Spaces without treating folders/collections as crypto.
+        let space_ids: Vec<OrganizationId> = (1..=31).map(space_id).collect();
+        let space_keys: Vec<SymmetricCryptoKey> = (0..31)
+            .map(|_| SymmetricCryptoKey::make_aes256_cbc_hmac_key())
+            .collect();
+        for (id, key) in space_ids.iter().zip(space_keys.iter()) {
+            install_space_key(&alice, *id, key.clone());
+        }
+
+        let family_id = space_ids[0];
+        let advisor_id = space_ids[1];
+        let travel_id = space_ids[2];
+        install_space_key(&bob, family_id, space_keys[0].clone());
+        install_space_key(&carol, advisor_id, space_keys[1].clone());
+
+        // Metadata containers do not establish the cryptographic boundary. Folders always use the
+        // user's key; a cipher's key domain is selected by organization_id only.
+        let folder = FolderView {
+            id: None,
+            name: "Family folder".to_owned(),
+            revision_date: "2026-09-21T00:00:00Z".parse().unwrap(),
+        };
+        assert_eq!(folder.key_identifier(), SymmetricKeySlotId::User);
+        let mut metadata_probe = safeory_envelope_view("metadata probe".to_owned());
+        metadata_probe.organization_id = Some(family_id);
+        let family_slot = metadata_probe.key_identifier();
+        metadata_probe.folder_id = Some("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".parse().unwrap());
+        metadata_probe.collection_ids = vec![
+            "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".parse().unwrap(),
+            "cccccccc-cccc-4ccc-8ccc-cccccccccccc".parse().unwrap(),
+        ];
+        assert_eq!(metadata_probe.key_identifier(), family_slot);
+        assert_eq!(family_slot, SymmetricKeySlotId::Organization(family_id));
+
+        let personal = encrypt_space_item(&alice, None, "Alice Personal");
+        let family = encrypt_space_item(&alice, Some(family_id), "Alice + Bob Family");
+        let advisor = encrypt_space_item(&alice, Some(advisor_id), "Alice + Carol Advisor");
+        let travel = encrypt_space_item(&alice, Some(travel_id), "Alice Travel");
+
+        let personal_for_alice: CipherView = alice.decrypt(&personal).unwrap();
+        assert_eq!(personal_for_alice.name, "Alice Personal");
+        let personal_for_bob: Result<CipherView, _> = bob.decrypt(&personal);
+        assert!(personal_for_bob.is_err());
+
+        let family_for_bob: CipherView = bob.decrypt(&family).unwrap();
+        assert_eq!(family_for_bob.name, "Alice + Bob Family");
+        let family_for_carol: Result<CipherView, _> = carol.decrypt(&family);
+        assert!(family_for_carol.is_err());
+
+        let advisor_for_carol: CipherView = carol.decrypt(&advisor).unwrap();
+        assert_eq!(advisor_for_carol.name, "Alice + Carol Advisor");
+        let advisor_for_bob: Result<CipherView, _> = bob.decrypt(&advisor);
+        assert!(advisor_for_bob.is_err());
+        let travel_for_bob: Result<CipherView, _> = bob.decrypt(&travel);
+        let travel_for_carol: Result<CipherView, _> = carol.decrypt(&travel);
+        assert!(travel_for_bob.is_err());
+        assert!(travel_for_carol.is_err());
+
+        // Copying authenticated ciphertext into another Space context cannot make it decryptable,
+        // even for Alice who possesses both Space keys: the wrapped per-cipher key authenticates
+        // against Family, not Advisor.
+        let mut substituted = family.clone();
+        substituted.organization_id = Some(advisor_id);
+        let substituted_for_alice: Result<CipherView, _> = alice.decrypt(&substituted);
+        assert!(substituted_for_alice.is_err());
+
+        // A move is different from metadata substitution: decrypt, explicitly rewrap the cipher key
+        // under Advisor, then re-encrypt. Carol can open the moved item and Family-only Bob cannot.
+        let mut moved_view: CipherView = alice.decrypt(&family).unwrap();
+        {
+            let mut ctx = alice.context();
+            moved_view
+                .move_to_organization(&mut ctx, advisor_id)
+                .unwrap();
+        }
+        let moved_to_advisor = alice.encrypt(moved_view).unwrap();
+        let moved_for_carol: CipherView = carol.decrypt(&moved_to_advisor).unwrap();
+        assert_eq!(moved_for_carol.name, "Alice + Bob Family");
+        let moved_for_bob: Result<CipherView, _> = bob.decrypt(&moved_to_advisor);
+        assert!(moved_for_bob.is_err());
+
+        // Rotate Family. Alice receives K2; Bob keeps only the historical K1. Future Family writes
+        // authenticate under K2 and are therefore unreadable to the removed member.
+        let family_key_v2 = SymmetricCryptoKey::make_aes256_cbc_hmac_key();
+        install_space_key(&alice, family_id, family_key_v2);
+        let family_after_rotation =
+            encrypt_space_item(&alice, Some(family_id), "Family after Bob removal");
+        let family_after_rotation_for_alice: CipherView =
+            alice.decrypt(&family_after_rotation).unwrap();
+        assert_eq!(
+            family_after_rotation_for_alice.name,
+            "Family after Bob removal"
+        );
+        let future_family_for_bob: Result<CipherView, _> = bob.decrypt(&family_after_rotation);
+        assert!(future_family_for_bob.is_err());
+        // Historical ciphertext remains decryptable to a member who retained the historical key;
+        // rotation is intentionally a future-write boundary, not retroactive key erasure.
+        let historical_family_for_bob: CipherView = bob.decrypt(&family).unwrap();
+        assert_eq!(historical_family_for_bob.name, "Alice + Bob Family");
+
+        // Exercise all 32 domains (Personal + 31 independently keyed Spaces) in one unlock-like
+        // context. Every organization ciphertext decrypts only because Alice has that exact slot.
+        let mut all_space_items = Vec::with_capacity(32);
+        all_space_items.push(personal);
+        for (index, id) in space_ids.iter().enumerate() {
+            all_space_items.push(encrypt_space_item(
+                &alice,
+                Some(*id),
+                &format!("Space {:02}", index + 1),
+            ));
+        }
+        assert_eq!(all_space_items.len(), 32);
+        for cipher in &all_space_items {
+            let decrypted: CipherView = alice.decrypt(cipher).unwrap();
+            assert!(!decrypted.name.is_empty());
+        }
     }
 
     #[tokio::test]
