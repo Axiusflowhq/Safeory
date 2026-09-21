@@ -421,6 +421,11 @@ jobs:
       - name: Frontend build
         run: bun run build
 
+      - name: Install Playwright Chromium
+        run: bunx playwright install --with-deps chromium
+      - name: Chromium extension behavior proof
+        run: bun run --filter @safeory/extension test:chromium
+
       - name: Install Rust security tools
         run: |
           cargo install cargo-audit --version 0.22.2 --locked

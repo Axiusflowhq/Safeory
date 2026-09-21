@@ -72,9 +72,9 @@ let syncStatus: ExtensionSyncStatus = { ...INITIAL_SYNC_STATUS };
 let syncAbortController: AbortController | null = null;
 
 function ensureInit(): Promise<void> {
-  initPromise ??= (init as unknown as (a?: unknown) => Promise<unknown>)().then(
-    () => undefined,
-  );
+  initPromise ??= init({
+    module_or_path: chrome.runtime.getURL("vault_wasm_bg.wasm"),
+  }).then(() => undefined);
   return initPromise;
 }
 

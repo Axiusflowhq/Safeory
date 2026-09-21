@@ -393,9 +393,9 @@ through Safeory-owned test clients/harnesses rather than Bitwarden's frontend:
 - [x] Sync the same account across two devices.
 - [x] Import representative standard password-manager fixtures.
 - [x] Import a representative 1Password fixture.
-- [ ] Capture a new login using the Safeory extension.
-- [ ] Update an existing login using the Safeory extension.
-- [ ] Autofill only the correct origin in Chromium using Safeory-owned extension
+- [x] Capture a new login using the Safeory extension.
+- [x] Update an existing login using the Safeory extension.
+- [x] Autofill only the correct origin in Chromium using Safeory-owned extension
       UI/integration code.
 - [ ] Autofill only the correct origin in Firefox using Safeory-owned extension
       UI/integration code.
@@ -462,6 +462,20 @@ Phase 0.4 implementation evidence (2026-09-21):
   is deactivated, its already-issued access token must receive HTTP 401 on `/sync`
   while device A1 for the same account must continue to succeed. The revocation
   checkbox remains open until this adapted path passes Linux CI.
+- Added a real Chromium MV3 integration proof with Playwright 1.63.0. The test
+  launches the production-built Safeory extension in a persistent Chromium
+  context, creates the vault through the actual popup, captures a new login from a
+  live HTTP page, updates that credential through the content/background CAS path,
+  autofills the updated password on the matching origin, then navigates to a
+  second localhost port and verifies that no credential is offered or filled.
+- The first real-browser run exposed a packaging defect rather than an autofill
+  defect: wasm-bindgen's default initializer fetched `vault_wasm_bg.wasm`, but the
+  extension build did not copy that binary into `dist/`. The extension packaging
+  step now copies the generated WASM beside `background.js`, and background init
+  resolves it explicitly through `chrome.runtime.getURL("vault_wasm_bg.wasm")`.
+  After that fix the Chromium behavior proof passes end to end locally. The main
+  `quality` CI job now installs Playwright Chromium and runs the same proof after
+  the production frontend build.
 
 **Exit gate:** Safeory can rely on the adapted backend/core password-manager
 foundation without adopting Bitwarden's frontend.
