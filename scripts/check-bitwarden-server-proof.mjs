@@ -88,6 +88,16 @@ if (
   fail("cleaned server checkout does not force the OSS compilation constant");
 }
 
+const rustSdkCargo = fs.readFileSync(
+  path.join(checkout, "util", "RustSdk", "rust", "Cargo.toml"),
+  "utf8",
+);
+if (!/^\[workspace\]\s*$/m.test(rustSdkCargo)) {
+  fail(
+    "standalone util/RustSdk Cargo package is not isolated from the host repository workspace",
+  );
+}
+
 const buildFiles = walk(
   checkout,
   (file) =>

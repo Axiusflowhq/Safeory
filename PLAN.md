@@ -277,7 +277,7 @@ foundation still contains no Bitwarden frontend.
       code and Safeory tests around adapted behavior.
 - [x] Add Docker-backed integration services for the environment-dependent
       server tests that matter to Safeory.
-- [ ] Ensure PostgreSQL migration tests run against a real PostgreSQL service.
+- [x] Ensure PostgreSQL migration tests run against a real PostgreSQL service.
 
 Phase 0.2 implementation evidence (2026-09-21; Linux execution gates still
 pending CI):
@@ -316,8 +316,16 @@ pending CI):
   service. It injects the disposable connection string through the upstream
   `bitwarden-Api` user-secrets mechanism, runs the pinned `dotnet-ef 8.0.8`
   PostgreSQL migration chain, then runs the existing EF repository integration
-  suite against that database. The checkbox above remains open until this job has
-  actually passed in Linux CI.
+  suite against that database. GitHub Actions run `35554080600` completed this
+  job successfully on 2026-09-21, closing the real-PostgreSQL migration gate.
+- The same run exposed a proof-checkout isolation defect while building
+  `util/RustSdk`: its standalone Cargo package walked upward into Safeory's parent
+  workspace because `.proof/` is nested inside this repository. The server
+  preparation script now adds an empty `[workspace]` marker to that nested Cargo
+  manifest, reproducing the standalone semantics of an upstream server clone.
+  A fresh pinned checkout passes the corrected structural checker and standalone
+  Cargo metadata probe; the corrected Linux server build remains pending the next
+  CI run.
 - Phase 0.1 selected no Bitwarden client source for porting, so there is currently
   no isolated client-code proof job to add. Safeory-owned web/extension builds
   remain in the existing Ubuntu `quality` job; their "against adapted foundation"
@@ -394,6 +402,27 @@ through Safeory-owned test clients/harnesses rather than Bitwarden's frontend:
 - [ ] Revoke a session/device.
 - [ ] Prove the revoked context stops receiving/using future authenticated
       operations.
+
+Phase 0.4 implementation evidence (2026-09-21; first Linux behavior run pending):
+
+- Added a Safeory-owned .NET behavior harness under
+  `tests/foundation/server-behavior/`. It is copied into the disposable cleaned
+  server checkout at test time and references only the upstream server test-host
+  infrastructure; no Bitwarden frontend application or UI code is imported.
+- The first scenario drives the real in-process API/Identity HTTP contracts and
+  covers two accounts, two explicit browser device identifiers for account A,
+  opaque encrypted login creation with username/password/TOTP/URI data,
+  revision-fenced edit, account isolation, second-device sync, soft-delete,
+  restore, and durable server-side device deactivation.
+- Device deactivation is deliberately followed by a probe of the already-issued
+  device access token rather than an assumed assertion. The cleaned server marks
+  the device inactive but does not rotate the user security stamp in that method;
+  the stronger revocation checkboxes above remain open until the observed
+  token/refresh behavior proves the required semantics or identifies an adapter
+  requirement.
+- Added CI job `foundation-server-behavior`, dependent on the cleaned server build
+  proof, to compile and execute this Safeory-owned harness on Linux and re-run the
+  restricted dependency boundary afterward.
 
 **Exit gate:** Safeory can rely on the adapted backend/core password-manager
 foundation without adopting Bitwarden's frontend.

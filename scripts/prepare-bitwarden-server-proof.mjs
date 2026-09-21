@@ -86,6 +86,23 @@ if (!fs.existsSync(licensedRoot)) {
 }
 fs.rmSync(licensedRoot, { recursive: true, force: false });
 
+// Upstream builds util/RustSdk/rust as a standalone Cargo package. Because our
+// disposable checkout lives under Safeory's repository, Cargo would otherwise
+// walk upward and accidentally adopt Safeory's root workspace. Make that
+// standalone boundary explicit without changing the package or its dependencies.
+const rustSdkCargo = path.join(
+  checkout,
+  "util",
+  "RustSdk",
+  "rust",
+  "Cargo.toml",
+);
+replaceExact(
+  rustSdkCargo,
+  "[profile.release]\ncodegen-units = 1\nlto = true\nopt-level = 3\n",
+  "[profile.release]\ncodegen-units = 1\nlto = true\nopt-level = 3\n\n[workspace]\n",
+);
+
 const directoryBuildProps = path.join(checkout, "Directory.Build.props");
 replaceExact(
   directoryBuildProps,

@@ -76,8 +76,9 @@ jobs:
         with:
           dotnet-version: 10.0.103
 
-      - name: Install server Rust toolchain
+      - name: Install server Rust toolchains
         run: |
+          rustup toolchain install 1.94.1 --profile minimal
           rustup toolchain install 1.97.1 --profile minimal
           rustup default 1.97.1
 
@@ -150,6 +151,54 @@ jobs:
 
       - name: Verify restored server dependency boundary
         run: node scripts/check-bitwarden-server-proof.mjs .proof/bitwarden-server-ci --require-restored
+
+  foundation-server-behavior:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    needs:
+      - foundation-server-proof
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Node 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Install .NET 10.0.103
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.103
+
+      - name: Install server Rust toolchains
+        run: |
+          rustup toolchain install 1.94.1 --profile minimal
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup default 1.97.1
+
+      - name: Clone and prepare pinned Bitwarden server
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .proof
+          SERVER_REPOSITORY="$(node -p "require('./docs/provenance/foundation-seed.json').sources.server.repository")"
+          SERVER_COMMIT="$(node -p "require('./docs/provenance/foundation-seed.json').sources.server.commit")"
+          git clone --no-checkout "$SERVER_REPOSITORY" .proof/bitwarden-server-behavior
+          git -C .proof/bitwarden-server-behavior checkout --detach "$SERVER_COMMIT"
+          node scripts/prepare-bitwarden-server-proof.mjs .proof/bitwarden-server-behavior
+          node scripts/check-bitwarden-server-proof.mjs .proof/bitwarden-server-behavior
+
+      - name: Install Safeory-owned foundation behavior harness
+        run: node scripts/prepare-bitwarden-server-behavior-proof.mjs .proof/bitwarden-server-behavior
+
+      - name: Run password-manager server behavior proof
+        working-directory: .proof/bitwarden-server-behavior
+        run: |
+          dotnet restore test/Safeory.Foundation.ServerBehavior/Safeory.Foundation.ServerBehavior.csproj --force-evaluate
+          dotnet test test/Safeory.Foundation.ServerBehavior/Safeory.Foundation.ServerBehavior.csproj --configuration Debug --no-restore --logger "console;verbosity=detailed"
+
+      - name: Re-check server boundary after behavior proof
+        run: node scripts/check-bitwarden-server-proof.mjs .proof/bitwarden-server-behavior --require-restored
 
   foundation-server-postgres:
     runs-on: ubuntu-latest
