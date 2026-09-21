@@ -6,8 +6,9 @@ publish = false
 
 [dependencies]
 bitwarden-core = { path = "../../crates/bitwarden-core", features = ["internal", "test-fixtures"] }
+bitwarden-encoding = { path = "../../crates/bitwarden-encoding" }
 bitwarden-exporters = { path = "../../crates/bitwarden-exporters" }
-bitwarden-pm = { path = "../../crates/bitwarden-pm" }
+bitwarden-pm = { path = "../../crates/bitwarden-pm", features = ["wasm"] }
 bitwarden-vault = { path = "../../crates/bitwarden-vault" }
 serde_json = "=1.0.149"
 tokio = { version = "=1.52.0", features = ["macros", "rt-multi-thread"] }

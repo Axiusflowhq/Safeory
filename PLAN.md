@@ -388,7 +388,7 @@ through Safeory-owned test clients/harnesses rather than Bitwarden's frontend:
 - [x] Log in from two separate client/device contexts.
 - [x] Create/edit/delete/restore a login.
 - [x] Add TOTP.
-- [ ] Add a passkey where browser automation permits it.
+- [x] Add a passkey where browser automation permits it.
 - [ ] Add/download/delete an attachment.
 - [x] Sync the same account across two devices.
 - [x] Import representative standard password-manager fixtures.
@@ -500,6 +500,21 @@ Phase 0.4 implementation evidence (2026-09-21):
   credential on a second localhost port. It passes locally with
   `selenium-webdriver` 4.49.0. The main `quality` job now installs both Playwright
   Chromium and Firefox and executes both extension behavior proofs.
+- Passkey coverage now spans both relevant retained boundaries. The Safeory SDK
+  behavior harness enables the coherent `bitwarden-pm/wasm` feature bundle, uses
+  Bitwarden's own valid PKCS#8 P-256 test key, attaches a discoverable FIDO2
+  credential to a real per-cipher encrypted login, verifies that credential ID and
+  private-key material are ciphertext in `LoginView`, then explicitly decrypts
+  the FIDO metadata and private key through public vault APIs. The locked/subset
+  guard remains intact at 469 pinned SDK packages and the harness passes 5/5 tests
+  locally.
+- The Chromium behavior proof also provisions a CDP virtual CTAP2 platform
+  authenticator with resident-key and user-verification support, creates a real
+  WebAuthn P-256 resident credential on a trustworthy localhost origin, and
+  verifies the browser authenticator retained exactly one resident credential for
+  that relying party. Browser automation therefore proves creation while the SDK
+  proof proves encrypted password-manager storage/recovery; no Bitwarden frontend
+  passkey provider code is imported.
 
 **Exit gate:** Safeory can rely on the adapted backend/core password-manager
 foundation without adopting Bitwarden's frontend.

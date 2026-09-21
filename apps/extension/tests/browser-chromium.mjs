@@ -46,6 +46,7 @@ async function startLoginServer(title) {
     throw new Error("test server did not bind");
   return {
     url: `http://127.0.0.1:${address.port}/login`,
+    localhostUrl: `http://localhost:${address.port}/login`,
     close: () =>
       new Promise((resolve, reject) =>
         server.close((error) => (error ? reject(error) : resolve())),
@@ -152,6 +153,74 @@ try {
   await page.getByText("No Safeory credentials found for this site.").waitFor();
   assert.equal(await page.locator("#username").inputValue(), "");
   assert.equal(await page.locator("#password").inputValue(), "");
+
+  // Chromium exposes a virtual authenticator through CDP. Use it to prove a
+  // browser-created resident P-256 passkey can be registered on a trustworthy
+  // localhost origin; the SDK behavior harness separately proves that the same
+  // class of passkey material is encrypted and recoverable through the retained
+  // Bitwarden vault/FIDO boundary.
+  const passkeyPage = await context.newPage();
+  const cdp = await context.newCDPSession(passkeyPage);
+  await cdp.send("WebAuthn.enable");
+  const { authenticatorId } = await cdp.send(
+    "WebAuthn.addVirtualAuthenticator",
+    {
+      options: {
+        protocol: "ctap2",
+        transport: "internal",
+        hasResidentKey: true,
+        hasUserVerification: true,
+        isUserVerified: true,
+        automaticPresenceSimulation: true,
+      },
+    },
+  );
+  try {
+    await passkeyPage.goto(target.localhostUrl);
+    const createdPasskey = await passkeyPage.evaluate(async () => {
+      const credential = await navigator.credentials.create({
+        publicKey: {
+          challenge: crypto.getRandomValues(new Uint8Array(32)),
+          rp: { id: "localhost", name: "Safeory Foundation RP" },
+          user: {
+            id: new TextEncoder().encode("safeory-user"),
+            name: "safeory-user",
+            displayName: "Safeory User",
+          },
+          pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+          authenticatorSelection: {
+            authenticatorAttachment: "platform",
+            residentKey: "required",
+            userVerification: "required",
+          },
+          timeout: 10_000,
+          attestation: "none",
+        },
+      });
+      if (!(credential instanceof PublicKeyCredential)) {
+        throw new Error("browser did not create a public-key credential");
+      }
+      return {
+        id: credential.id,
+        rawIdLength: credential.rawId.byteLength,
+        type: credential.type,
+      };
+    });
+    assert.equal(createdPasskey.type, "public-key");
+    assert.ok(createdPasskey.id.length > 0);
+    assert.ok(createdPasskey.rawIdLength > 0);
+
+    const virtualCredentials = await cdp.send("WebAuthn.getCredentials", {
+      authenticatorId,
+    });
+    assert.equal(virtualCredentials.credentials.length, 1);
+    assert.equal(virtualCredentials.credentials[0].rpId, "localhost");
+    assert.equal(virtualCredentials.credentials[0].isResidentCredential, true);
+  } finally {
+    await cdp.send("WebAuthn.removeVirtualAuthenticator", { authenticatorId });
+    await cdp.send("WebAuthn.disable");
+    await passkeyPage.close();
+  }
 
   console.log("Chromium extension behavior proof: PASS");
 } finally {

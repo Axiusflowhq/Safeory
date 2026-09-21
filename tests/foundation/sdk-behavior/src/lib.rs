@@ -3,12 +3,26 @@ mod tests {
     use std::{fs, path::Path};
 
     use bitwarden_core::{Client, client::test_accounts::test_bitwarden_com_account};
+    use bitwarden_encoding::B64Url;
     use bitwarden_exporters::ExportFormat;
     use bitwarden_pm::PasswordManagerClient;
     use bitwarden_vault::{
-        AttachmentView, CipherRepromptType, CipherType, CipherView, LoginUriView, LoginView,
-        UriMatchType, generate_totp,
+        AttachmentView, CipherRepromptType, CipherType, CipherView, Fido2CredentialFullView,
+        LoginUriView, LoginView, UriMatchType, generate_totp,
     };
+
+    const TEST_FIDO_P256_KEY: &[u8] = &[
+        0x30, 0x81, 0x87, 0x02, 0x01, 0x00, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d,
+        0x02, 0x01, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x04, 0x6d, 0x30,
+        0x6b, 0x02, 0x01, 0x01, 0x04, 0x20, 0x06, 0x76, 0x5e, 0x85, 0xe0, 0x7f, 0xef, 0x43, 0xaa,
+        0x17, 0xe0, 0x7a, 0xd7, 0x85, 0x63, 0x01, 0x80, 0x70, 0x8c, 0x6c, 0x61, 0x43, 0x7d, 0xc3,
+        0xb1, 0xe6, 0xf9, 0x09, 0x24, 0xeb, 0x1f, 0xf5, 0xa1, 0x44, 0x03, 0x42, 0x00, 0x04, 0x35,
+        0x9a, 0x52, 0xf3, 0x82, 0x44, 0x66, 0x5f, 0x3f, 0xe2, 0xc4, 0x0b, 0x1c, 0x16, 0x34, 0xc5,
+        0x60, 0x07, 0x3a, 0x25, 0xfe, 0x7e, 0x7f, 0x7f, 0xda, 0xd4, 0x1c, 0x36, 0x90, 0x00, 0xee,
+        0xb1, 0x8e, 0x92, 0xb3, 0xac, 0x91, 0x7f, 0xb1, 0x8c, 0xa4, 0x85, 0xe7, 0x03, 0x07, 0xd1,
+        0xf5, 0x5b, 0xd3, 0x7b, 0xc3, 0x56, 0x11, 0xdf, 0xbc, 0x7a, 0x97, 0x70, 0x32, 0x4b, 0x3c,
+        0x84, 0x05, 0x71,
+    ];
 
     fn login_view() -> CipherView {
         CipherView {
@@ -116,6 +130,7 @@ mod tests {
                     size_name: None,
                     file_name: Some("proof.txt".to_owned()),
                     key: None,
+                    decrypted_key: None,
                 },
                 plaintext,
             )
@@ -139,6 +154,71 @@ mod tests {
             .decrypt_buffer(encrypted_cipher, attachment, &encrypted_attachment.contents)
             .unwrap();
         assert_eq!(decrypted, plaintext);
+    }
+
+    #[tokio::test]
+    async fn passkey_material_is_encrypted_under_the_cipher_key() {
+        let client = client().await;
+        let vault = client.vault();
+        let encrypted = vault.ciphers().encrypt(login_view()).await.unwrap().cipher;
+        let view = vault.ciphers().decrypt(encrypted).await.unwrap();
+        assert!(view.key.is_some());
+
+        let key_value = B64Url::from(TEST_FIDO_P256_KEY).to_string();
+        let passkey = Fido2CredentialFullView {
+            credential_id: "a36f3d35-5dae-4d07-8b24-f89e11082090".to_owned(),
+            key_type: "public-key".to_owned(),
+            key_algorithm: "ECDSA".to_owned(),
+            key_curve: "P-256".to_owned(),
+            key_value: key_value.clone(),
+            rp_id: "vault.safeory.example".to_owned(),
+            user_handle: Some("YWJjZA".to_owned()),
+            user_name: Some("safeory-user".to_owned()),
+            counter: "0".to_owned(),
+            rp_name: Some("Safeory Foundation RP".to_owned()),
+            user_display_name: Some("Safeory User".to_owned()),
+            discoverable: "true".to_owned(),
+            creation_date: "2024-06-07T14:12:36.150Z".parse().unwrap(),
+        };
+
+        let with_passkey = vault
+            .ciphers()
+            .set_fido2_credentials(view, vec![passkey])
+            .unwrap();
+        let stored = with_passkey
+            .login
+            .as_ref()
+            .unwrap()
+            .fido2_credentials
+            .as_ref()
+            .unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_ne!(
+            stored[0].credential_id.to_string(),
+            "a36f3d35-5dae-4d07-8b24-f89e11082090"
+        );
+        assert_ne!(stored[0].key_value.to_string(), key_value);
+
+        let metadata = vault
+            .ciphers()
+            .decrypt_fido2_credentials(with_passkey.clone())
+            .unwrap();
+        assert_eq!(metadata.len(), 1);
+        assert_eq!(
+            metadata[0].credential_id,
+            "a36f3d35-5dae-4d07-8b24-f89e11082090"
+        );
+        assert_eq!(metadata[0].rp_id, "vault.safeory.example");
+        assert_eq!(metadata[0].user_handle.as_deref(), Some("YWJjZA"));
+        assert_eq!(metadata[0].user_name.as_deref(), Some("safeory-user"));
+        assert_eq!(metadata[0].counter, "0");
+        assert_eq!(metadata[0].discoverable, "true");
+
+        let recovered_private_key = vault
+            .ciphers()
+            .decrypt_fido2_private_key(with_passkey)
+            .unwrap();
+        assert_eq!(recovered_private_key, key_value);
     }
 
     #[tokio::test]
