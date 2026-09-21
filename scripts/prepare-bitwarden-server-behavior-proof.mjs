@@ -21,6 +21,12 @@ const destination = path.join(
   "test",
   "Safeory.Foundation.ServerBehavior",
 );
+const sharedFixtures = path.join(
+  safeoryRoot,
+  "tests",
+  "foundation",
+  "fixtures",
+);
 
 if (
   !fs.existsSync(
@@ -40,6 +46,11 @@ if (
 
 fs.rmSync(destination, { recursive: true, force: true });
 fs.cpSync(source, destination, { recursive: true });
+if (fs.existsSync(sharedFixtures)) {
+  fs.cpSync(sharedFixtures, path.join(destination, "fixtures"), {
+    recursive: true,
+  });
+}
 
 console.log(
   `prepare-bitwarden-server-behavior-proof: copied Safeory harness to ${destination}`,

@@ -16,4 +16,8 @@
   <ItemGroup>
     <ProjectReference Include="..\Api.IntegrationTest\Api.IntegrationTest.csproj" />
   </ItemGroup>
+
+  <ItemGroup>
+    <None Include="fixtures\safeory-insurance-carrier.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>

@@ -18,6 +18,12 @@ if (!checkoutArg) {
 const checkout = path.resolve(checkoutArg);
 const source = path.join(safeoryRoot, "tests", "foundation", "sdk-behavior");
 const destination = path.join(checkout, ".safeory", "sdk-behavior");
+const sharedFixtures = path.join(
+  safeoryRoot,
+  "tests",
+  "foundation",
+  "fixtures",
+);
 const sourceLock = path.join(checkout, "Cargo.lock");
 const harnessLock = path.join(destination, "Cargo.lock");
 
@@ -48,6 +54,11 @@ if (
 fs.rmSync(destination, { recursive: true, force: true });
 fs.mkdirSync(path.dirname(destination), { recursive: true });
 fs.cpSync(source, destination, { recursive: true });
+if (fs.existsSync(sharedFixtures)) {
+  fs.cpSync(sharedFixtures, path.join(destination, "fixtures"), {
+    recursive: true,
+  });
+}
 fs.copyFileSync(sourceLock, harnessLock);
 
 execFileSync(
