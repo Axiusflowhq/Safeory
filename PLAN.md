@@ -537,10 +537,10 @@ Use the existing `SafeoryEnvelopeV1` fixture:
 - [ ] Edit and revision-sync it.
 - [ ] Attach/download/rename/delete a file.
 - [ ] Trash and restore the record.
-- [ ] Export it.
-- [ ] Import it.
+- [x] Export it.
+- [x] Import it.
 - [ ] Sync it to another device.
-- [ ] Confirm unknown Safeory extension data survives losslessly.
+- [x] Confirm unknown Safeory extension data survives losslessly.
 - [ ] Test corrupted marker/version/identity/JSON/size/attachment boundaries.
 - [ ] Prove an older/non-Safeory-compatible client cannot silently rewrite away
       mandatory Safeory data.
@@ -590,6 +590,25 @@ Phase 0.5 implementation evidence (2026-09-21):
   response back into SDK state, and proves both full decrypt and list/search
   projection recover `Safeory insurance record`. The adapted `bitwarden-vault`
   crate also passes native and `wasm`-feature checks.
+- The retained exporter previously bypassed the blob-aware cipher client and used
+  direct `KeyStore` decryption; it also used `flat_map(Result)` for cipher
+  conversion, which could silently omit a record from a backup. The adapter now
+  exposes one hidden vault decryption bridge backed by the same legacy/blob
+  primitives, routes retained exporter conversion through it, and collects cipher
+  conversion as `Result<Vec<_>>` so any corrupt item fails the export instead of
+  disappearing.
+- The server-response behavior test now exports the synced blob carrier that has no
+  legacy name/notes/type payload, verifies the JSON export contains the decrypted
+  Safeory title and envelope, reconstructs the validated envelope through the
+  public SecureNote encryption path, and confirms it becomes a blob carrier again.
+  The same test corrupts blob `Data` and requires export to fail closed.
+- Added canonical Safeory-owned text boundaries
+  `serializeSafeoryEnvelopeV1`/`parseSafeoryEnvelopeV1`. Domain tests now cover
+  malformed JSON, bad marker, unsupported version, outer/inner identity mismatch,
+  byte limits, nesting limits, unsafe keys, duplicate identities, and a full
+  serialize/parse round-trip preserving unknown extension payloads. All 12 domain
+  tests pass locally. Attachment-specific corruption remains part of the still-open
+  aggregate corruption checkbox above until Linux server lifecycle evidence lands.
 - Added a paired server downgrade invariant for the normal personal-vault PUT
   path: once an item is blob-encrypted, an incoming legacy field-level replacement
   is rejected before the stored cipher is mutated. The Linux behavior harness now
@@ -605,7 +624,7 @@ Phase 0.5 implementation evidence (2026-09-21):
   It renders insurance fields, the envelope reminder/relationship binding,
   continuity disposition, and preserved future-extension metadata without
   touching vault runtime state or importing any Bitwarden frontend code.
-- Web typecheck and lint pass, all 9 product-domain envelope tests still pass after
+- Web typecheck and lint pass, the product-domain envelope test suite passes after
   the shared-fixture extraction, and the production static export successfully
   prerenders `/foundation-envelope-proof` with the representative insurance
   record. This closes the temporary-client-route gate independently of the pending

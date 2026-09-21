@@ -39,6 +39,16 @@ export const SAFEORY_ENVELOPE_MARKER: "safeory.life_record"
 export const SAFEORY_ENVELOPE_VERSION: 1
 export const SAFEORY_ENVELOPE_FIXTURE_RECORD_ID: string
 
+export function parseSafeoryEnvelopeV1(
+  serialized: string,
+  expectedRecordId?: string | null
+): SafeoryEnvelopeV1
+
+export function serializeSafeoryEnvelopeV1(
+  value: unknown,
+  expectedRecordId?: string | null
+): string
+
 export function validateSafeoryEnvelopeV1(
   value: unknown,
   expectedRecordId?: string | null

@@ -89,6 +89,14 @@ const cipherModel = path.join(
   "cipher",
   "cipher.rs",
 );
+const cipherMod = path.join(
+  checkout,
+  "crates",
+  "bitwarden-vault",
+  "src",
+  "cipher",
+  "mod.rs",
+);
 const blobEncryption = path.join(
   checkout,
   "crates",
@@ -97,6 +105,20 @@ const blobEncryption = path.join(
   "cipher",
   "blob",
   "encryption.rs",
+);
+const exporterModels = path.join(
+  checkout,
+  "crates",
+  "bitwarden-exporters",
+  "src",
+  "models.rs",
+);
+const exporterExport = path.join(
+  checkout,
+  "crates",
+  "bitwarden-exporters",
+  "src",
+  "export.rs",
 );
 
 try {
@@ -185,12 +207,16 @@ for (const [file, requirements] of [
   [
     cipherModel,
     [
+      "pub fn decrypt_cipher_for_export(",
+      "crate::cipher::blob::decrypt_blob_cipher(cipher, &mut ctx)",
+      "CipherError::Decrypt(DecryptError::Blob(error.to_string()))",
       "is_some_and(crate::cipher::blob::is_blob_data)",
       "None if is_blob => EncString::Cose_Encrypt0_B64 { data: Vec::new() }",
       "let fallback_name = cipher.as_ref().map(|existing| existing.name.clone())",
       "let local_data = cipher",
     ],
   ],
+  [cipherMod, ["ListOrganizationCiphersResult, decrypt_cipher_for_export,"]],
   [
     blobEncryption,
     [
@@ -199,6 +225,17 @@ for (const [file, requirements] of [
       "pub(crate) fn decrypt_blob_cipher_list(",
       "CipherListViewType::SecureNote",
       "CopyableCipherFields::SecureNotes",
+    ],
+  ],
+  [
+    exporterModels,
+    ["bitwarden_vault::decrypt_cipher_for_export(key_store, &cipher)?"],
+  ],
+  [
+    exporterExport,
+    [
+      ".map(|c| crate::Cipher::from_cipher(key_store, c))",
+      ".collect::<Result<Vec<_>, _>>()?;",
     ],
   ],
 ]) {
@@ -218,5 +255,5 @@ for (const [file, requirements] of [
 
 if (failed) process.exit(1);
 console.log(
-  "check-safeory-sdk-adapter-proof: OK (SecureNote blob create/edit/sync/state paths + server-compatible JSON container present)",
+  "check-safeory-sdk-adapter-proof: OK (SecureNote blob create/edit/sync/state/export paths + server-compatible JSON container present)",
 );

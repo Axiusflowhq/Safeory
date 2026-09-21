@@ -18,7 +18,12 @@ const LEGACY_DISPOSITIONS = new Set([
   "destroy_on_death",
 ]);
 const REMINDER_MODES = new Set(["one_time", "recurring"]);
-const RECURRENCE_FREQUENCIES = new Set(["daily", "weekly", "monthly", "yearly"]);
+const RECURRENCE_FREQUENCIES = new Set([
+  "daily",
+  "weekly",
+  "monthly",
+  "yearly",
+]);
 const DANGEROUS_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 const TOP_LEVEL_KEYS = new Set([
   "marker",
@@ -50,14 +55,23 @@ function assertExactKeys(value, allowed, context) {
 }
 
 function assertUuid(value, context) {
-  assert(typeof value === "string" && UUID_RE.test(value), context + " must be a UUID");
+  assert(
+    typeof value === "string" && UUID_RE.test(value),
+    context + " must be a UUID",
+  );
 }
 
 function assertDate(value, context) {
-  assert(typeof value === "string" && DATE_RE.test(value), context + " must be YYYY-MM-DD");
+  assert(
+    typeof value === "string" && DATE_RE.test(value),
+    context + " must be YYYY-MM-DD",
+  );
   const parsed = new Date(value + "T00:00:00Z");
   assert(!Number.isNaN(parsed.valueOf()), context + " must be a valid date");
-  assert(parsed.toISOString().slice(0, 10) === value, context + " must be a valid date");
+  assert(
+    parsed.toISOString().slice(0, 10) === value,
+    context + " must be a valid date",
+  );
 }
 
 function validateJsonTree(value, context, state, depth = 0) {
@@ -80,7 +94,12 @@ function validateJsonTree(value, context, state, depth = 0) {
   if (Array.isArray(value)) {
     assert(value.length <= 1024, context + " contains an oversized array");
     for (let index = 0; index < value.length; index += 1) {
-      validateJsonTree(value[index], context + "[" + index + "]", state, depth + 1);
+      validateJsonTree(
+        value[index],
+        context + "[" + index + "]",
+        state,
+        depth + 1,
+      );
     }
     return;
   }
@@ -116,7 +135,10 @@ function validateReminder(reminder, index) {
     return;
   }
 
-  assert(isRecord(reminder.recurrence), context + ".recurrence must be an object");
+  assert(
+    isRecord(reminder.recurrence),
+    context + ".recurrence must be an object",
+  );
   assertExactKeys(
     reminder.recurrence,
     new Set(["frequency", "interval", "end_date"]),
@@ -137,6 +159,34 @@ function validateReminder(reminder, index) {
   }
 }
 
+export function parseSafeoryEnvelopeV1(serialized, expectedRecordId = null) {
+  assert(
+    typeof serialized === "string",
+    "serialized envelope must be a string",
+  );
+  assert(
+    new TextEncoder().encode(serialized).byteLength <=
+      MAX_SAFEORY_ENVELOPE_BYTES,
+    "serialized envelope exceeds byte limit",
+  );
+
+  let value;
+  try {
+    value = JSON.parse(serialized);
+  } catch {
+    throw new TypeError(
+      "SafeoryEnvelopeV1: serialized envelope is invalid JSON",
+    );
+  }
+
+  return validateSafeoryEnvelopeV1(value, expectedRecordId);
+}
+
+export function serializeSafeoryEnvelopeV1(value, expectedRecordId = null) {
+  validateSafeoryEnvelopeV1(value, expectedRecordId);
+  return JSON.stringify(value);
+}
+
 export function validateSafeoryEnvelopeV1(value, expectedRecordId = null) {
   assert(isRecord(value), "envelope must be an object");
 
@@ -144,21 +194,30 @@ export function validateSafeoryEnvelopeV1(value, expectedRecordId = null) {
   try {
     serialized = JSON.stringify(value);
   } catch {
-    throw new TypeError("SafeoryEnvelopeV1: envelope must be JSON serializable");
+    throw new TypeError(
+      "SafeoryEnvelopeV1: envelope must be JSON serializable",
+    );
   }
   assert(typeof serialized === "string", "envelope must be JSON serializable");
   assert(
-    new TextEncoder().encode(serialized).byteLength <= MAX_SAFEORY_ENVELOPE_BYTES,
+    new TextEncoder().encode(serialized).byteLength <=
+      MAX_SAFEORY_ENVELOPE_BYTES,
     "serialized envelope exceeds byte limit",
   );
 
   assertExactKeys(value, TOP_LEVEL_KEYS, "envelope");
   assert(value.marker === SAFEORY_ENVELOPE_MARKER, "marker is invalid");
-  assert(value.schema_version === SAFEORY_ENVELOPE_VERSION, "schema_version is unsupported");
+  assert(
+    value.schema_version === SAFEORY_ENVELOPE_VERSION,
+    "schema_version is unsupported",
+  );
   assertUuid(value.record_id, "record_id");
   if (expectedRecordId !== null) {
     assertUuid(expectedRecordId, "expectedRecordId");
-    assert(value.record_id === expectedRecordId, "record_id does not match outer foundation record");
+    assert(
+      value.record_id === expectedRecordId,
+      "record_id does not match outer foundation record",
+    );
   }
   assert(
     typeof value.record_kind === "string" && KIND_RE.test(value.record_kind),
@@ -179,12 +238,19 @@ export function validateSafeoryEnvelopeV1(value, expectedRecordId = null) {
   }
 
   assert(Array.isArray(value.relationships), "relationships must be an array");
-  assert(value.relationships.length <= MAX_SAFEORY_RELATIONSHIPS, "too many relationships");
+  assert(
+    value.relationships.length <= MAX_SAFEORY_RELATIONSHIPS,
+    "too many relationships",
+  );
   for (let index = 0; index < value.relationships.length; index += 1) {
     const relationship = value.relationships[index];
     const context = "relationships[" + index + "]";
     assert(isRecord(relationship), context + " must be an object");
-    assertExactKeys(relationship, new Set(["target_record_id", "relation"]), context);
+    assertExactKeys(
+      relationship,
+      new Set(["target_record_id", "relation"]),
+      context,
+    );
     assertUuid(relationship.target_record_id, context + ".target_record_id");
     assert(
       typeof relationship.relation === "string" &&
@@ -201,12 +267,19 @@ export function validateSafeoryEnvelopeV1(value, expectedRecordId = null) {
   for (let index = 0; index < value.reminders.length; index += 1) {
     validateReminder(value.reminders[index], index);
     const reminderId = value.reminders[index].reminder_id;
-    assert(!reminderIds.has(reminderId), "reminders contains duplicate reminder_id");
+    assert(
+      !reminderIds.has(reminderId),
+      "reminders contains duplicate reminder_id",
+    );
     reminderIds.add(reminderId);
   }
 
   assert(isRecord(value.continuity), "continuity must be an object");
-  assertExactKeys(value.continuity, new Set(["legacy_disposition", "policy_ref"]), "continuity");
+  assertExactKeys(
+    value.continuity,
+    new Set(["legacy_disposition", "policy_ref"]),
+    "continuity",
+  );
   assert(
     LEGACY_DISPOSITIONS.has(value.continuity.legacy_disposition),
     "continuity.legacy_disposition is unsupported",

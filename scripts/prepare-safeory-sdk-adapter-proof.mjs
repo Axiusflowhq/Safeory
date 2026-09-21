@@ -102,6 +102,14 @@ const cipherModel = path.join(
   "cipher",
   "cipher.rs",
 );
+const cipherMod = path.join(
+  checkout,
+  "crates",
+  "bitwarden-vault",
+  "src",
+  "cipher",
+  "mod.rs",
+);
 const blobEncryption = path.join(
   checkout,
   "crates",
@@ -120,6 +128,20 @@ const blobMod = path.join(
   "blob",
   "mod.rs",
 );
+const exporterModels = path.join(
+  checkout,
+  "crates",
+  "bitwarden-exporters",
+  "src",
+  "models.rs",
+);
+const exporterExport = path.join(
+  checkout,
+  "crates",
+  "bitwarden-exporters",
+  "src",
+  "export.rs",
+);
 
 if (
   !fs.existsSync(cipherClient) ||
@@ -129,8 +151,11 @@ if (
   !fs.existsSync(editClient) ||
   !fs.existsSync(getClient) ||
   !fs.existsSync(cipherModel) ||
+  !fs.existsSync(cipherMod) ||
   !fs.existsSync(blobEncryption) ||
-  !fs.existsSync(blobMod)
+  !fs.existsSync(blobMod) ||
+  !fs.existsSync(exporterModels) ||
+  !fs.existsSync(exporterExport)
 ) {
   fail(`prepared Bitwarden SDK checkout is missing: ${checkout}`);
 }
@@ -634,6 +659,109 @@ replaceExact(
 replaceExact(
   cipherModel,
   lines(
+    "use bitwarden_crypto::{",
+    "    CompositeEncryptable, CryptoError, Decryptable, EncString, IdentifyKey, KeyStoreContext,",
+    "    PrimitiveEncryptable,",
+    "};",
+  ),
+  lines(
+    "use bitwarden_crypto::{",
+    "    CompositeEncryptable, CryptoError, Decryptable, EncString, IdentifyKey, KeyStore,",
+    "    KeyStoreContext, PrimitiveEncryptable,",
+    "};",
+  ),
+);
+replaceExact(
+  cipherModel,
+  lines(
+    "    pub archived_date: Option<DateTime<Utc>>,",
+    "    pub data: Option<String>,",
+    "}",
+    "",
+    "/// Represents the result of re-wrapping a cipher key, which can be needed when changing the",
+  ),
+  lines(
+    "    pub archived_date: Option<DateTime<Utc>>,",
+    "    pub data: Option<String>,",
+    "}",
+    "",
+    "/// Internal cross-crate bridge used by retained exporters so blob carriers and legacy ciphers",
+    "/// share the same decryption implementation.",
+    "#[doc(hidden)]",
+    "pub fn decrypt_cipher_for_export(",
+    "    key_store: &KeyStore<KeySlotIds>,",
+    "    cipher: &Cipher,",
+    ") -> Result<CipherView, CipherError> {",
+    "    if crate::cipher::blob::is_blob_encrypted(cipher) {",
+    "        let mut ctx = key_store.context();",
+    "        crate::cipher::blob::decrypt_blob_cipher(cipher, &mut ctx)",
+    "            .map_err(|error| CipherError::Decrypt(DecryptError::Blob(error.to_string())))",
+    "    } else {",
+    "        Ok(key_store.decrypt(cipher)?)",
+    "    }",
+    "}",
+    "",
+    "/// Represents the result of re-wrapping a cipher key, which can be needed when changing the",
+  ),
+);
+replaceExact(
+  cipherMod,
+  lines(
+    "pub use cipher::{",
+    "    Cipher, CipherError, CipherId, CipherListView, CipherListViewType, CipherRepromptType,",
+    "    CipherType, CipherView, DecryptCipherListResult, DecryptCipherResult, EncryptionContext,",
+    "    ListOrganizationCiphersResult,",
+    "};",
+  ),
+  lines(
+    "pub use cipher::{",
+    "    Cipher, CipherError, CipherId, CipherListView, CipherListViewType, CipherRepromptType,",
+    "    CipherType, CipherView, DecryptCipherListResult, DecryptCipherResult, EncryptionContext,",
+    "    ListOrganizationCiphersResult, decrypt_cipher_for_export,",
+    "};",
+  ),
+);
+replaceExact(
+  exporterModels,
+  lines("        let view: CipherView = key_store.decrypt(&cipher)?;"),
+  lines(
+    "        let view: CipherView = bitwarden_vault::decrypt_cipher_for_export(key_store, &cipher)?;",
+  ),
+);
+replaceExact(
+  exporterExport,
+  lines(
+    "    let ciphers: Vec<crate::Cipher> = ciphers",
+    "        .into_iter()",
+    "        .flat_map(|c| crate::Cipher::from_cipher(key_store, c))",
+    "        .collect();",
+  ),
+  lines(
+    "    let ciphers: Vec<crate::Cipher> = ciphers",
+    "        .into_iter()",
+    "        .map(|c| crate::Cipher::from_cipher(key_store, c))",
+    "        .collect::<Result<Vec<_>, _>>()?;",
+  ),
+);
+replaceExact(
+  exporterExport,
+  lines(
+    "    let mut ciphers: Vec<crate::Cipher> = ciphers",
+    "        .into_iter()",
+    "        .flat_map(|c| crate::Cipher::from_cipher(key_store, c))",
+    "        .collect();",
+  ),
+  lines(
+    "    let mut ciphers: Vec<crate::Cipher> = ciphers",
+    "        .into_iter()",
+    "        .map(|c| crate::Cipher::from_cipher(key_store, c))",
+    "        .collect::<Result<Vec<_>, _>>()?;",
+  ),
+);
+
+replaceExact(
+  cipherModel,
+  lines(
     "    fn try_from(cipher: CipherDetailsResponseModel) -> Result<Self, Self::Error> {",
     "        Ok(Self {",
   ),
@@ -1024,5 +1152,5 @@ replaceExact(
 );
 
 console.log(
-  "prepare-safeory-sdk-adapter-proof: wired SecureNote blob create/edit/sync/state paths and server-compatible JSON blob containers",
+  "prepare-safeory-sdk-adapter-proof: wired SecureNote blob create/edit/sync/state/export paths and server-compatible JSON blob containers",
 );

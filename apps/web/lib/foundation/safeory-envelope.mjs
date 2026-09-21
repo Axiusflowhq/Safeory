@@ -1,6 +1,8 @@
 export {
   SAFEORY_ENVELOPE_MARKER,
   SAFEORY_ENVELOPE_VERSION,
+  parseSafeoryEnvelopeV1,
+  serializeSafeoryEnvelopeV1,
   validateSafeoryEnvelopeV1,
 } from "../../../../product/domain/safeory-envelope.mjs"
 export {

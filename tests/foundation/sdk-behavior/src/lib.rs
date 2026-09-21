@@ -409,6 +409,7 @@ mod tests {
         assert!(request.secure_note.is_none());
 
         let response = CipherDetailsResponseModel {
+            id: encrypted.id.map(Into::into),
             r#type: Some(CipherType::SecureNote.into()),
             data: encrypted.data.clone(),
             key: encrypted.key.as_ref().map(ToString::to_string),
@@ -429,10 +430,57 @@ mod tests {
         assert_eq!(decrypted.name, "Safeory insurance record");
         assert_eq!(decrypted.notes.as_deref(), Some(serialized.as_str()));
 
-        let list = vault.ciphers().decrypt_list(vec![synced]).await.unwrap();
+        let list = vault
+            .ciphers()
+            .decrypt_list(vec![synced.clone()])
+            .await
+            .unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].name, "Safeory insurance record");
         assert_eq!(list[0].r#type, CipherListViewType::SecureNote);
+
+        let mut corrupted = synced.clone();
+        corrupted.data = Some("{\"format_version\":1}".to_owned());
+        assert!(
+            client
+                .exporters()
+                .export_vault(vec![], vec![corrupted], ExportFormat::Json)
+                .await
+                .is_err(),
+            "corrupted carrier must fail export instead of being silently omitted"
+        );
+
+        let exported = client
+            .exporters()
+            .export_vault(vec![], vec![synced], ExportFormat::Json)
+            .await
+            .unwrap();
+        let exported: serde_json::Value = serde_json::from_str(&exported).unwrap();
+        let exported_item = &exported["items"][0];
+        assert_eq!(exported_item["name"], "Safeory insurance record");
+        let exported_notes = exported_item["notes"].as_str().unwrap();
+        let exported_envelope: serde_json::Value = serde_json::from_str(exported_notes).unwrap();
+        assert_eq!(exported_envelope["marker"], "safeory.life_record");
+        assert_eq!(
+            exported_envelope["record_id"],
+            "11111111-1111-4111-8111-111111111111"
+        );
+
+        let reimported = vault
+            .ciphers()
+            .encrypt(safeory_envelope_view(exported_notes.to_owned()))
+            .await
+            .unwrap()
+            .cipher;
+        assert!(
+            reimported
+                .data
+                .as_deref()
+                .is_some_and(|data| data.starts_with('{'))
+        );
+        assert!(reimported.notes.is_none());
+        let reimported_view = vault.ciphers().decrypt(reimported).await.unwrap();
+        assert_eq!(reimported_view.notes.as_deref(), Some(exported_notes));
     }
 
     #[tokio::test]

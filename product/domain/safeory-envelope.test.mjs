@@ -3,6 +3,8 @@ import test from "node:test";
 
 import {
   MAX_SAFEORY_ENVELOPE_BYTES,
+  parseSafeoryEnvelopeV1,
+  serializeSafeoryEnvelopeV1,
   validateSafeoryEnvelopeV1,
 } from "./safeory-envelope.mjs";
 import {
@@ -28,6 +30,41 @@ test("rejects outer/inner identity mismatch", () => {
       ),
     /record_id does not match/,
   );
+});
+
+test("rejects corrupted marker and schema version", () => {
+  const marker = fixture();
+  marker.marker = "safeory.other";
+  assert.throws(() => validateSafeoryEnvelopeV1(marker), /marker is invalid/);
+
+  const version = fixture();
+  version.schema_version = 99;
+  assert.throws(
+    () => validateSafeoryEnvelopeV1(version),
+    /schema_version is unsupported/,
+  );
+});
+
+test("parses serialized envelopes and rejects malformed JSON", () => {
+  const serialized = JSON.stringify(fixture());
+  assert.equal(
+    parseSafeoryEnvelopeV1(serialized, RECORD_ID).record_id,
+    RECORD_ID,
+  );
+  assert.throws(
+    () => parseSafeoryEnvelopeV1('{"marker":"safeory.life_record",'),
+    /invalid JSON/,
+  );
+});
+
+test("validated serialization round-trips extension data losslessly", () => {
+  const value = fixture();
+  value.extensions["vendor.future"] = {
+    nested: ["a", { later: true }],
+  };
+  const serialized = serializeSafeoryEnvelopeV1(value, RECORD_ID);
+  const restored = parseSafeoryEnvelopeV1(serialized, RECORD_ID);
+  assert.deepEqual(restored, value);
 });
 
 test("rejects unknown top-level fields instead of silently dropping them", () => {
