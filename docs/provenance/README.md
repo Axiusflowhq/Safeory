@@ -49,6 +49,9 @@ The generated directory is intentionally ignored by Git. CI publishes it as the
 - `LEGAL_REVIEW_SUMMARY.md` — reviewer-facing pinned-input summary plus every
   dependency entry whose generated license metadata is `UNKNOWN`, plus
   GPL/LGPL/EULA-sensitive dependency metadata surfaced for explicit review.
+- `QUALIFIED_LICENSE_REVIEW_CHECKLIST.md` — the exact tracked review/sign-off
+  checklist copied into the artifact so counsel/reviewers can work from a
+  self-contained evidence bundle.
 - `THIRD_PARTY_NOTICES.md` — generated provenance/notices index for the bundle.
 - `generation-summary.json` — source/component counts and unresolved-license
   count.

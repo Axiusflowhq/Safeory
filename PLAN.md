@@ -407,6 +407,13 @@ completed in run `35571550793`):
   LGPL alternatives, and `AdaptiveCards` with `SEE-FILE:EULA-Windows.txt`. The
   provenance checker requires the generated review-evidence map to match the
   tracked map and rejects tampering with that handoff.
+- Added `docs/provenance/QUALIFIED_LICENSE_REVIEW_CHECKLIST.md` with the exact
+  pinned source scope, required artifact checks, the three unresolved NuGet
+  determinations, review-sensitive dependency categories, distribution-model
+  questions, and reviewer/run/artifact sign-off fields. The generator copies that
+  exact tracked checklist into the provenance artifact, and the checker rejects a
+  modified artifact copy so qualified review can be performed against one
+  self-contained, reproducible bundle.
 
 **Exit gate:** provenance/SBOM/license/notices pipeline is reproducible; qualified
 license review remains the separate public-distribution gate.

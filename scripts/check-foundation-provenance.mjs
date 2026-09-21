@@ -49,6 +49,7 @@ function readJson(relative) {
 for (const relative of [
   "THIRD_PARTY_NOTICES.md",
   "LEGAL_REVIEW_SUMMARY.md",
+  "QUALIFIED_LICENSE_REVIEW_CHECKLIST.md",
   "nuget-license-review-evidence.json",
   "license-inventory.json",
   "restricted-removals.json",
@@ -62,6 +63,26 @@ for (const relative of [
   if (!fs.existsSync(file) || fs.statSync(file).size === 0) {
     fail(`missing or empty artifact: ${relative}`);
   }
+}
+
+const generatedReviewChecklistPath = path.join(
+  root,
+  "QUALIFIED_LICENSE_REVIEW_CHECKLIST.md",
+);
+const trackedReviewChecklistPath = path.join(
+  safeoryRoot,
+  "docs",
+  "provenance",
+  "QUALIFIED_LICENSE_REVIEW_CHECKLIST.md",
+);
+if (
+  fs.existsSync(generatedReviewChecklistPath) &&
+  fs.readFileSync(generatedReviewChecklistPath, "utf8") !==
+    fs.readFileSync(trackedReviewChecklistPath, "utf8")
+) {
+  fail(
+    "generated qualified-review checklist does not match the tracked checklist",
+  );
 }
 if (!sourceOnly) {
   const serverSbom = path.join(root, "sbom", "server.cdx.json");

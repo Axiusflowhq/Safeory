@@ -106,6 +106,20 @@ runChecker(
 fs.rmSync(outputRoot, { recursive: true, force: true });
 fs.mkdirSync(outputRoot, { recursive: true });
 
+const qualifiedReviewChecklistSource = path.join(
+  safeoryRoot,
+  "docs",
+  "provenance",
+  "QUALIFIED_LICENSE_REVIEW_CHECKLIST.md",
+);
+if (!fs.existsSync(qualifiedReviewChecklistSource)) {
+  fail("missing docs/provenance/QUALIFIED_LICENSE_REVIEW_CHECKLIST.md");
+}
+fs.copyFileSync(
+  qualifiedReviewChecklistSource,
+  path.join(outputRoot, "QUALIFIED_LICENSE_REVIEW_CHECKLIST.md"),
+);
+
 function sha256File(file) {
   return crypto
     .createHash("sha256")
@@ -643,6 +657,8 @@ review.
   from \`UNKNOWN\`.
 - Reviewer-facing unresolved-license details are summarized in
   \`LEGAL_REVIEW_SUMMARY.md\`.
+- Qualified review steps and sign-off fields are included in
+  \`QUALIFIED_LICENSE_REVIEW_CHECKLIST.md\`.
 - SDK dependency SBOM: \`sbom/sdk.cdx.json\`.
 ${sourceOnly ? "- Server dependency SBOM was intentionally omitted by source-only generation.\n" : "- Server dependency SBOM: `sbom/server.cdx.json`.\n"}
 
