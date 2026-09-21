@@ -462,6 +462,18 @@ Phase 0.4 implementation evidence (2026-09-21):
   is deactivated, its already-issued access token must receive HTTP 401 on `/sync`
   while device A1 for the same account must continue to succeed. The revocation
   checkbox remains open until this adapted path passes Linux CI.
+- Linux run `35556222545` exposed two proof-environment/adapter defects. The
+  cleaned SDK release build reached Binaryen but Ubuntu's packaged `wasm2js`
+  aborted on an internal assertion; Bitwarden's own WASM workflow installs
+  Binaryen from npm, so Safeory CI now follows that upstream toolchain path and
+  records `wasm-opt`/`wasm2js` versions before the release build.
+- The same run reached the real local attachment upload and returned HTTP 500.
+  Source inspection showed `LocalAttachmentStorageService` unconditionally seeks
+  multipart streams even though ASP.NET multipart section bodies can be
+  non-seekable. The Safeory server adapter now guards both local upload seek sites
+  with `stream.CanSeek`, preserving rewind behavior for seekable streams while
+  accepting normal forward-only HTTP bodies. The adapter checker requires both
+  guards, and the behavior test now includes the upload response body in failures.
 - Added a real Chromium MV3 integration proof with Playwright 1.63.0. The test
   launches the production-built Safeory extension in a persistent Chromium
   context, creates the vault through the actual popup, captures a new login from a

@@ -126,7 +126,12 @@ public sealed class PasswordManagerServerBehaviorTests : IClassFixture<ApiApplic
         attachmentForm.Add(new ByteArrayContent(attachmentBytes), "data", "proof.bin");
 
         var uploadResponse = await deviceA1.PostAsync($"/ciphers/{cipherId}/attachment", attachmentForm);
-        uploadResponse.EnsureSuccessStatusCode();
+        if (!uploadResponse.IsSuccessStatusCode)
+        {
+            var uploadFailure = await uploadResponse.Content.ReadAsStringAsync();
+            throw new Xunit.Sdk.XunitException(
+                $"attachment upload failed with {(int)uploadResponse.StatusCode} {uploadResponse.StatusCode}: {uploadFailure}");
+        }
         using var uploadedCipher = JsonDocument.Parse(await uploadResponse.Content.ReadAsStringAsync());
         var uploadedAttachments = uploadedCipher.RootElement.GetProperty("attachments");
         Assert.Equal(1, uploadedAttachments.GetArrayLength());

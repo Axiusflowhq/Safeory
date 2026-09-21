@@ -29,12 +29,21 @@ if (!checkoutArg) {
 }
 
 const checkout = path.resolve(checkoutArg);
-const target = path.join(
+const authTarget = path.join(
   checkout,
   "src",
   "SharedWeb",
   "Utilities",
   "ServiceCollectionExtensions.cs",
+);
+const attachmentTarget = path.join(
+  checkout,
+  "src",
+  "Core",
+  "Vault",
+  "Services",
+  "Implementations",
+  "LocalAttachmentStorageService.cs",
 );
 
 try {
@@ -52,10 +61,10 @@ try {
   fail(`could not resolve checkout commit: ${error.message}`);
 }
 
-if (!fs.existsSync(target)) {
+if (!fs.existsSync(authTarget)) {
   fail("adapted server authentication source is missing");
 } else {
-  const body = fs.readFileSync(target, "utf8");
+  const body = fs.readFileSync(authTarget, "utf8");
   const requirements = [
     "OnTokenValidated = async (context) =>",
     "FindFirst(Claims.Device)",
@@ -72,10 +81,29 @@ if (!fs.existsSync(target)) {
   }
 }
 
+if (!fs.existsSync(attachmentTarget)) {
+  fail("adapted local attachment storage source is missing");
+} else {
+  const body = fs.readFileSync(attachmentTarget, "utf8");
+  const canSeekCount = body.match(/if \(stream\.CanSeek\)/g)?.length ?? 0;
+  if (canSeekCount !== 2) {
+    fail(
+      `expected 2 non-seekable attachment stream guards, found ${canSeekCount}`,
+    );
+  }
+  if (
+    body.includes(
+      "stream.Seek(0, SeekOrigin.Begin);\n            await stream.CopyToAsync(fs);",
+    )
+  ) {
+    fail("unguarded local attachment stream seek remains");
+  }
+}
+
 if (failed) {
   process.exit(1);
 }
 
 console.log(
-  "check-safeory-server-adapter-proof: OK (device-bound JWTs are rejected when the server device is absent or inactive)",
+  "check-safeory-server-adapter-proof: OK (inactive-device JWT rejection + non-seekable local attachments)",
 );

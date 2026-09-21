@@ -27,15 +27,24 @@ if (!checkoutArg) {
 }
 
 const checkout = path.resolve(checkoutArg);
-const target = path.join(
+const authTarget = path.join(
   checkout,
   "src",
   "SharedWeb",
   "Utilities",
   "ServiceCollectionExtensions.cs",
 );
+const attachmentTarget = path.join(
+  checkout,
+  "src",
+  "Core",
+  "Vault",
+  "Services",
+  "Implementations",
+  "LocalAttachmentStorageService.cs",
+);
 
-if (!fs.existsSync(target)) {
+if (!fs.existsSync(authTarget) || !fs.existsSync(attachmentTarget)) {
   fail(`prepared Bitwarden server checkout is missing: ${checkout}`);
 }
 
@@ -52,7 +61,7 @@ if (fs.existsSync(path.join(checkout, "bitwarden_license"))) {
   fail("server must be cleaned before Safeory adapter preparation");
 }
 
-const body = fs.readFileSync(target, "utf8").replaceAll("\r\n", "\n");
+const body = fs.readFileSync(authTarget, "utf8").replaceAll("\r\n", "\n");
 const before = `                options.Events = new JwtBearerEvents
                 {
                     OnMessageReceived = (context) =>
@@ -101,8 +110,29 @@ if (body.indexOf(before) !== body.lastIndexOf(before)) {
   fail("JWT bearer event block matched more than once");
 }
 
-fs.writeFileSync(target, body.replace(before, after));
+fs.writeFileSync(authTarget, body.replace(before, after));
+
+const attachmentBody = fs
+  .readFileSync(attachmentTarget, "utf8")
+  .replaceAll("\r\n", "\n");
+const seekBefore = `            stream.Seek(0, SeekOrigin.Begin);
+            await stream.CopyToAsync(fs);
+`;
+const seekAfter = `            if (stream.CanSeek)
+            {
+                stream.Seek(0, SeekOrigin.Begin);
+            }
+            await stream.CopyToAsync(fs);
+`;
+const seekMatches = attachmentBody.split(seekBefore).length - 1;
+if (seekMatches !== 2) {
+  fail(`expected exactly 2 local attachment seek sites, found ${seekMatches}`);
+}
+fs.writeFileSync(
+  attachmentTarget,
+  attachmentBody.replaceAll(seekBefore, seekAfter),
+);
 
 console.log(
-  `prepare-safeory-server-adapter-proof: installed inactive-device JWT rejection in ${path.relative(checkout, target)}`,
+  "prepare-safeory-server-adapter-proof: installed inactive-device JWT rejection and non-seekable local attachment support",
 );

@@ -21,8 +21,9 @@ jobs:
 
       - name: Install SDK proof system dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes binaryen
+          npm install --global binaryen@132.0.0
+          wasm-opt --version
+          wasm2js --version
           rustup toolchain install 1.94.1 --profile minimal --component rust-src --component rustfmt --component clippy
 
       - name: Clone pinned Bitwarden SDK proof input
