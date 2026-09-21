@@ -54,13 +54,17 @@ The generated directory is intentionally ignored by Git. CI publishes it as the
   self-contained evidence bundle.
 - `LICENSE_REVIEW_SIGNOFF.example.json` — machine-readable sign-off template.
   Prepare a hash-bound draft with
-  `bun run prepare:license-review -- <artifact-dir> <run-id> <artifact-id> <draft-json>`.
+  `bun run prepare:license-review -- <artifact-dir> <artifact-id> <draft-json>`;
+  the GitHub run ID and repository are read from the artifact itself.
   After qualified review, save the completed record as
   `docs/provenance/QUALIFIED_LICENSE_REVIEW_SIGNOFF.json` and validate it with
-  `bun run check:license-review -- <signoff> <artifact-dir>`.
+  `bun run check:license-review -- <signoff> <artifact-dir> --verify-github` when
+  authenticated `gh` access is available. Omit `--verify-github` only for offline
+  integrity validation.
 - `THIRD_PARTY_NOTICES.md` — generated provenance/notices index for the bundle.
 - `generation-summary.json` — the generating Safeory commit plus source/component,
-  unresolved-license, and review-sensitive counts.
+  GitHub repository/run identity when generated in CI, unresolved-license, and
+  review-sensitive counts.
 
 `scripts/check-foundation-provenance.mjs` validates the generated bundle before
 CI uploads it. It verifies the pinned commits, source-manifest hashes/shape,
@@ -86,3 +90,12 @@ control. During Phase 0 closure it also requires committed and uncommitted revie
 scope to contain only `PLAN.md` and
 `docs/provenance/QUALIFIED_LICENSE_REVIEW_SIGNOFF.json`; unrelated staged,
 unstaged, or untracked files invalidate the closure check.
+
+With `--verify-github`, the verifier additionally queries the artifact ID in the
+recorded repository, checks artifact name/run/head SHA and expiry, downloads the
+official artifact ZIP, verifies GitHub's published SHA-256 digest, rejects unsafe
+archive paths before extraction, and requires the official extracted all-file
+manifest to match the reviewed directory and sign-off. Artifact downloads are
+bounded to 128 MiB. Review timestamps cannot be future-dated, and online
+verification also requires the review to occur on or after GitHub created the
+artifact.

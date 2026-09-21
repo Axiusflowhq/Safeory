@@ -93,16 +93,24 @@ Complete this section only after qualified review of the exact generated artifac
 For a machine-checkable record, first generate the hash-bound draft from the exact
 downloaded artifact:
 
-`bun run prepare:license-review -- <downloaded-provenance-artifact-directory> <github-actions-run-id> <artifact-id> <draft-json>`
+`bun run prepare:license-review -- <downloaded-provenance-artifact-directory> <artifact-id> <draft-json>`
+
+The draft generator reads the GitHub repository and workflow run ID directly from
+`generation-summary.json`, so only the downloaded artifact ID is supplied manually.
 
 After qualified review, save the completed record as
 `docs/provenance/QUALIFIED_LICENSE_REVIEW_SIGNOFF.json` and run:
 
-`bun run check:license-review -- docs/provenance/QUALIFIED_LICENSE_REVIEW_SIGNOFF.json <downloaded-provenance-artifact-directory>`
+`bun run check:license-review -- docs/provenance/QUALIFIED_LICENSE_REVIEW_SIGNOFF.json <downloaded-provenance-artifact-directory> --verify-github`
 
 That verifier binds the review to the artifact hashes and reviewed Safeory commit,
 rejects blocking conclusions or unsatisfied conditions, and permits only the
 sign-off record plus `PLAN.md` gate closure after the reviewed commit.
+With `--verify-github`, it also requires GitHub's artifact API to report the same
+artifact name, workflow run ID, and head SHA recorded in the sign-off, verifies
+GitHub's published ZIP SHA-256, and requires the official extracted artifact
+manifest to match the reviewed directory. The review timestamp must be real,
+non-future, and no earlier than the artifact creation time.
 It validates integrity and record structure; it does not independently authenticate
 the reviewer's professional qualification.
 
@@ -115,6 +123,7 @@ ride along with legal sign-off.
 - Reviewer / organization:
 - Review date:
 - Safeory commit reviewed:
+- GitHub repository:
 - GitHub Actions run ID:
 - `safeory-foundation-provenance` artifact ID/hash:
 - Conclusion: `approved` / `approved with conditions` / `blocking issue`

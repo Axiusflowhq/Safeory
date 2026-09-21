@@ -511,6 +511,14 @@ const unknownLicenseCount = licenseRows.filter(
 const safeoryCommit = run("git", ["rev-parse", "HEAD"], {
   cwd: safeoryRoot,
 });
+const githubActionsRunId = process.env.GITHUB_RUN_ID ?? null;
+const githubRepository = process.env.GITHUB_REPOSITORY ?? null;
+if (githubActionsRunId !== null && !/^\d+$/.test(githubActionsRunId)) {
+  fail(`invalid GITHUB_RUN_ID: ${githubActionsRunId}`);
+}
+if (githubRepository !== null && !/^[^/\s]+\/[^/\s]+$/.test(githubRepository)) {
+  fail(`invalid GITHUB_REPOSITORY: ${githubRepository}`);
+}
 const unknownLicenseRows = licenseRows
   .filter((row) => row.license === "UNKNOWN")
   .sort((left, right) =>
@@ -567,6 +575,8 @@ license metadata that requires qualified review before public distribution.
 ## Pinned inputs
 
 - Safeory revision: \`${safeoryCommit}\`
+- GitHub repository: \`${githubRepository ?? "local/non-CI generation"}\`
+- GitHub Actions run: \`${githubActionsRunId ?? "local/non-CI generation"}\`
 - Bitwarden SDK: \`${seed.sources.sdk.commit}\`
 - Bitwarden server: \`${seed.sources.server.commit}\`
 - Bitwarden clients reference only: \`${seed.sources.clients.canonical_import_commit}\`
@@ -689,6 +699,8 @@ writeJson("generation-summary.json", {
   schema_version: 1,
   source_only: sourceOnly,
   safeory_commit: safeoryCommit,
+  github_repository: githubRepository,
+  github_actions_run_id: githubActionsRunId,
   sdk_commit: seed.sources.sdk.commit,
   server_commit: seed.sources.server.commit,
   clients_reference_commit: seed.sources.clients.canonical_import_commit,

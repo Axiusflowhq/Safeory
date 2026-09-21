@@ -352,6 +352,36 @@ if (summary) {
   if (!/^[0-9a-f]{40}$/.test(summary.safeory_commit ?? "")) {
     fail("generation summary safeory_commit must be a full lowercase Git SHA");
   }
+  if (
+    summary.github_actions_run_id !== null &&
+    !/^\d+$/.test(summary.github_actions_run_id ?? "")
+  ) {
+    fail(
+      "generation summary github_actions_run_id must be null or decimal digits",
+    );
+  }
+  if (
+    summary.github_repository !== null &&
+    !/^[^/\s]+\/[^/\s]+$/.test(summary.github_repository ?? "")
+  ) {
+    fail(
+      "generation summary github_repository must be null or owner/repository",
+    );
+  }
+  if (
+    process.env.GITHUB_RUN_ID &&
+    summary.github_actions_run_id !== process.env.GITHUB_RUN_ID
+  ) {
+    fail("generation summary GitHub run ID does not match the current CI run");
+  }
+  if (
+    process.env.GITHUB_REPOSITORY &&
+    summary.github_repository !== process.env.GITHUB_REPOSITORY
+  ) {
+    fail(
+      "generation summary GitHub repository does not match the current CI repository",
+    );
+  }
   if (fs.existsSync(legalReviewSummaryPath)) {
     const legalReviewSummary = fs.readFileSync(legalReviewSummaryPath, "utf8");
     const marker = `Safeory revision: \`${summary.safeory_commit}\``;
@@ -359,6 +389,16 @@ if (summary) {
       fail(
         "legal review summary Safeory revision does not match generation summary",
       );
+    }
+    const repositoryMarker = `GitHub repository: \`${summary.github_repository ?? "local/non-CI generation"}\``;
+    if (!legalReviewSummary.includes(repositoryMarker)) {
+      fail(
+        "legal review summary GitHub repository does not match generation summary",
+      );
+    }
+    const runMarker = `GitHub Actions run: \`${summary.github_actions_run_id ?? "local/non-CI generation"}\``;
+    if (!legalReviewSummary.includes(runMarker)) {
+      fail("legal review summary GitHub run does not match generation summary");
     }
   }
   if (summary.sdk_components !== sdkComponentCount) {

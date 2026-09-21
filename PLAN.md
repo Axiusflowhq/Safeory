@@ -424,6 +424,16 @@ completed in run `35571550793`):
   unsatisfied conditions. CI's provenance job exercises this tooling only with a
   clearly synthetic fixture; it does **not** constitute qualified legal approval
   or authenticate reviewer credentials.
+- Hardened that record against artifact-ID substitution: CI provenance now records
+  its GitHub repository and workflow run, and `--verify-github` checks the artifact
+  API identity/expiry/head SHA, downloads the official ZIP with a 128 MiB bound,
+  verifies GitHub's published SHA-256 digest, rejects unsafe archive paths before
+  extraction, and requires the official all-file manifest to equal the reviewed
+  directory/sign-off. Review timestamps are rejected when future-dated, and live
+  verification requires review time to be on/after artifact creation. The
+  network-independent CI self-test covers metadata mismatch and path-traversal
+  rejection; live artifact download/digest verification is run against completed
+  provenance artifacts after upload.
 
 **Exit gate:** provenance/SBOM/license/notices pipeline is reproducible; qualified
 license review remains the separate public-distribution gate.

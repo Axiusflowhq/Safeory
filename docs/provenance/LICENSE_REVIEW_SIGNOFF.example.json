@@ -7,6 +7,7 @@
   },
   "reviewed_at": "REPLACE_WITH_ISO_8601_TIMESTAMP",
   "safeory_commit": "REPLACE_WITH_SAFEORY_COMMIT",
+  "github_repository": "REPLACE_WITH_OWNER_SLASH_REPOSITORY",
   "github_actions_run_id": "REPLACE_WITH_RUN_ID",
   "provenance_artifact_id": "REPLACE_WITH_ARTIFACT_ID",
   "provenance_artifact_name": "safeory-foundation-provenance",

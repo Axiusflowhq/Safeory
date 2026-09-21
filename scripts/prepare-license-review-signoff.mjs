@@ -7,15 +7,15 @@ import {
   headlineArtifactHashes,
 } from "./license-review-artifact.mjs";
 
-const [artifactArg, runId, artifactId, outputArg] = process.argv.slice(2);
-if (!artifactArg || !runId || !artifactId) {
+const [artifactArg, artifactId, outputArg] = process.argv.slice(2);
+if (!artifactArg || !artifactId) {
   console.error(
-    "usage: node scripts/prepare-license-review-signoff.mjs <provenance-artifact-dir> <github-run-id> <artifact-id> [output-json]",
+    "usage: node scripts/prepare-license-review-signoff.mjs <provenance-artifact-dir> <artifact-id> [output-json]",
   );
   process.exit(2);
 }
-if (!/^\d+$/.test(runId) || !/^\d+$/.test(artifactId)) {
-  console.error("run ID and artifact ID must be decimal integers");
+if (!/^\d+$/.test(artifactId)) {
+  console.error("artifact ID must be a decimal integer");
   process.exit(2);
 }
 
@@ -34,6 +34,18 @@ if (!fs.existsSync(summaryPath)) {
 const summary = JSON.parse(fs.readFileSync(summaryPath, "utf8"));
 if (summary.source_only !== false) {
   console.error("qualified review draft requires a full provenance artifact");
+  process.exit(1);
+}
+if (!/^\d+$/.test(summary.github_actions_run_id ?? "")) {
+  console.error(
+    "artifact generation-summary.json has no valid GitHub Actions run ID",
+  );
+  process.exit(1);
+}
+if (!/^[^/\s]+\/[^/\s]+$/.test(summary.github_repository ?? "")) {
+  console.error(
+    "artifact generation-summary.json has no valid GitHub repository",
+  );
   process.exit(1);
 }
 
@@ -67,7 +79,8 @@ const record = {
   },
   reviewed_at: "REPLACE_WITH_ISO_8601_TIMESTAMP",
   safeory_commit: summary.safeory_commit,
-  github_actions_run_id: runId,
+  github_repository: summary.github_repository,
+  github_actions_run_id: summary.github_actions_run_id,
   provenance_artifact_id: artifactId,
   provenance_artifact_name: "safeory-foundation-provenance",
   artifact_summary: {

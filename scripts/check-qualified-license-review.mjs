@@ -11,16 +11,25 @@ import {
   reviewClosureViolations,
   worktreeReviewClosureViolations,
 } from "./license-review-git-scope.mjs";
+import {
+  assertGitHubArtifactMetadata,
+  downloadGitHubArtifactArchive,
+  extractGitHubArtifactArchive,
+  fetchGitHubArtifactMetadata,
+} from "./license-review-github.mjs";
 
 function fail(message) {
   console.error(`check-qualified-license-review: ${message}`);
   process.exitCode = 1;
 }
 
-const [signoffArg, artifactArg] = process.argv.slice(2);
-if (!signoffArg || !artifactArg) {
+const rawArgs = process.argv.slice(2);
+const verifyGitHub = rawArgs.includes("--verify-github");
+const positional = rawArgs.filter((arg) => arg !== "--verify-github");
+const [signoffArg, artifactArg] = positional;
+if (!signoffArg || !artifactArg || positional.length !== 2) {
   console.error(
-    "usage: node scripts/check-qualified-license-review.mjs <review-signoff.json> <provenance-artifact-dir>",
+    "usage: node scripts/check-qualified-license-review.mjs <review-signoff.json> <provenance-artifact-dir> [--verify-github]",
   );
   process.exit(2);
 }
@@ -51,6 +60,7 @@ const requiredStrings = [
   ["reviewer.qualification", signoff.reviewer?.qualification],
   ["reviewed_at", signoff.reviewed_at],
   ["safeory_commit", signoff.safeory_commit],
+  ["github_repository", signoff.github_repository],
   ["github_actions_run_id", signoff.github_actions_run_id],
   ["provenance_artifact_id", signoff.provenance_artifact_id],
   ["provenance_artifact_name", signoff.provenance_artifact_name],
@@ -76,12 +86,17 @@ if (
   fail("reviewed_at must be an ISO-8601 UTC timestamp ending in Z");
 } else if (Number.isNaN(Date.parse(signoff.reviewed_at))) {
   fail("reviewed_at must be a valid ISO-8601 timestamp");
+} else if (Date.parse(signoff.reviewed_at) > Date.now() + 5 * 60 * 1000) {
+  fail("reviewed_at cannot be in the future");
 }
 if (!/^[0-9a-f]{40}$/.test(signoff.safeory_commit ?? "")) {
   fail("safeory_commit must be a full 40-character lowercase Git SHA");
 }
 if (signoff.provenance_artifact_name !== "safeory-foundation-provenance") {
   fail("provenance_artifact_name must be safeory-foundation-provenance");
+}
+if (!/^[^/\s]+\/[^/\s]+$/.test(signoff.github_repository ?? "")) {
+  fail("github_repository must be owner/repository");
 }
 if (!/^\d+$/.test(signoff.github_actions_run_id ?? "")) {
   fail("github_actions_run_id must be a decimal GitHub Actions run ID");
@@ -125,7 +140,9 @@ if (signoff.safeory_commit !== head) {
     .filter(Boolean);
   const committedViolations = reviewClosureViolations(changedAfterReview);
   for (const changed of committedViolations) {
-    fail(`reviewed foundation changed after sign-off subject commit: ${changed}`);
+    fail(
+      `reviewed foundation changed after sign-off subject commit: ${changed}`,
+    );
   }
 }
 
@@ -149,6 +166,16 @@ if (!fs.existsSync(generationSummaryPath)) {
   if (summary.safeory_commit !== signoff.safeory_commit) {
     fail(
       `generation-summary safeory_commit ${summary.safeory_commit} does not match sign-off ${signoff.safeory_commit}`,
+    );
+  }
+  if (summary.github_repository !== signoff.github_repository) {
+    fail(
+      `generation-summary github_repository ${summary.github_repository} does not match sign-off ${signoff.github_repository}`,
+    );
+  }
+  if (summary.github_actions_run_id !== signoff.github_actions_run_id) {
+    fail(
+      `generation-summary github_actions_run_id ${summary.github_actions_run_id} does not match sign-off ${signoff.github_actions_run_id}`,
     );
   }
   for (const field of [
@@ -186,6 +213,45 @@ for (const relative of HEADLINE_ARTIFACT_FILES) {
   const actual = sha256(fs.readFileSync(file));
   if (actual !== expected) {
     fail(`${relative} hash ${actual} does not match sign-off ${expected}`);
+  }
+}
+
+if (verifyGitHub) {
+  let extracted;
+  try {
+    const artifact = fetchGitHubArtifactMetadata(
+      signoff.github_repository,
+      signoff.provenance_artifact_id,
+    );
+    assertGitHubArtifactMetadata(artifact, {
+      artifactId: signoff.provenance_artifact_id,
+      artifactName: signoff.provenance_artifact_name,
+      runId: signoff.github_actions_run_id,
+      headSha: signoff.safeory_commit,
+    });
+    if (Date.parse(signoff.reviewed_at) < Date.parse(artifact.created_at)) {
+      fail(
+        `review timestamp ${signoff.reviewed_at} predates GitHub artifact creation ${artifact.created_at}`,
+      );
+    }
+    const archive = await downloadGitHubArtifactArchive(artifact);
+    extracted = extractGitHubArtifactArchive(archive);
+    const officialManifest = artifactManifestSha256(extracted.root);
+    const reviewedManifest = artifactManifestSha256(artifactRoot);
+    if (officialManifest !== reviewedManifest) {
+      fail(
+        `official GitHub artifact manifest ${officialManifest} does not match reviewed directory ${reviewedManifest}`,
+      );
+    }
+    if (officialManifest !== signoff.artifact_manifest_sha256) {
+      fail(
+        `official GitHub artifact manifest ${officialManifest} does not match sign-off ${signoff.artifact_manifest_sha256}`,
+      );
+    }
+  } catch (error) {
+    fail(`GitHub artifact verification failed: ${error.message}`);
+  } finally {
+    extracted?.cleanup();
   }
 }
 
