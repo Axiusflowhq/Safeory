@@ -391,7 +391,7 @@ through Safeory-owned test clients/harnesses rather than Bitwarden's frontend:
 - [ ] Add a passkey where browser automation permits it.
 - [ ] Add/download/delete an attachment.
 - [x] Sync the same account across two devices.
-- [ ] Import representative standard password-manager fixtures.
+- [x] Import representative standard password-manager fixtures.
 - [x] Import a representative 1Password fixture.
 - [ ] Capture a new login using the Safeory extension.
 - [ ] Update an existing login using the Safeory extension.
@@ -442,9 +442,15 @@ Phase 0.4 implementation evidence (2026-09-21):
 - The harness also imports the retained representative 1Password CXF export through
   the public `ExporterClient::import_cxf` API, decrypts the resulting SDK ciphers,
   and verifies representative login, card, Wi-Fi, custom-field, and note data. The
-  complete Safeory SDK behavior harness now passes 3/3 tests locally against the
+  Safeory SDK behavior harness also unwraps the account objects from the retained
+  standard FIDO Credential Exchange Format header sample and passes each account
+  unchanged through the same public SDK importer, verifying a login, origin, and
+  SHA-256 TOTP mapping. A separate retained Dashlane CXF export verifies login,
+  TOTP, and card mappings from another password manager. The complete harness now
+  passes 4/4 tests locally against the
   cleaned pinned SDK. This closes the 1Password fixture gate without adopting any
-  Bitwarden frontend/import UI.
+  Bitwarden frontend/import UI, and closes the representative standard password-
+  manager fixture gate on the interoperable CXF boundary.
 - Added a separate Safeory server adapter proof layer rather than modifying the
   pure cleaned-OSS proof. `prepare-safeory-server-adapter-proof.mjs` adds a JWT
   `OnTokenValidated` guard for device-bound user tokens: it resolves the token's

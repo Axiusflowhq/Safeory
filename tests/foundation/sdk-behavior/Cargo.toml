@@ -9,6 +9,7 @@ bitwarden-core = { path = "../../crates/bitwarden-core", features = ["internal",
 bitwarden-exporters = { path = "../../crates/bitwarden-exporters" }
 bitwarden-pm = { path = "../../crates/bitwarden-pm" }
 bitwarden-vault = { path = "../../crates/bitwarden-vault" }
+serde_json = "=1.0.149"
 tokio = { version = "=1.52.0", features = ["macros", "rt-multi-thread"] }
 
 [workspace]

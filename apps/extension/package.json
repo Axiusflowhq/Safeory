@@ -8,7 +8,8 @@
     "build": "tsc -b && vite build && vite build -c vite.background.config.ts && vite build -c vite.content.config.ts && node scripts/copy-manifest.mjs",
     "typecheck": "tsc -b --pretty false",
     "lint": "oxlint src vite.config.ts vite.background.config.ts vite.content.config.ts",
-    "test": "node --test tests/mutation.test.ts tests/sync-configuration.test.ts tests/sync-request.test.ts tests/sync-session.test.ts"
+    "test": "node --test tests/credential-capture.test.ts tests/mutation.test.ts tests/sync-configuration.test.ts tests/sync-request.test.ts tests/sync-session.test.ts",
+    "test:chromium": "node tests/browser-chromium.mjs"
   },
   "dependencies": {
     "@safeory/contracts": "workspace:*",
@@ -17,14 +18,15 @@
     "vault-wasm": "file:../../crates/vault-wasm/pkg"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "4.3.3",
     "@types/chrome": "0.1.13",
     "@types/node": "26.5.1",
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
     "@vitejs/plugin-react": "6.1.1",
     "oxlint": "1.83.0",
+    "playwright": "1.63.0",
     "tailwindcss": "4.3.3",
-    "@tailwindcss/vite": "4.3.3",
     "typescript": "7.0.2",
     "vite": "8.3.0",
     "vite-plugin-wasm": "3.5.0"

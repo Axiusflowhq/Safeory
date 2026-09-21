@@ -198,4 +198,87 @@ mod tests {
                 && field.value.as_deref() == Some("mypassword123")
         }));
     }
+
+    #[tokio::test]
+    async fn standard_and_dashlane_cxf_fixtures_import_through_public_sdk_api() {
+        let client = client().await;
+        let resources = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/bitwarden-exporters/resources");
+
+        // The standard CXF sample is a header containing one or more accounts, while the SDK's
+        // public import boundary accepts an account payload. Safeory only unwraps that standard
+        // container; every account object is passed unchanged to the SDK importer.
+        let standard_payload = fs::read_to_string(resources.join("cxf_example.json")).unwrap();
+        let standard_header: serde_json::Value = serde_json::from_str(&standard_payload).unwrap();
+        let accounts = standard_header["accounts"].as_array().unwrap();
+        assert!(!accounts.is_empty());
+
+        let mut standard_views = Vec::new();
+        for account in accounts {
+            let imported = client
+                .exporters()
+                .import_cxf(serde_json::to_string(account).unwrap())
+                .unwrap();
+            for cipher in imported {
+                standard_views.push(client.vault().ciphers().decrypt(cipher).await.unwrap());
+            }
+        }
+
+        let github = standard_views
+            .iter()
+            .find(|cipher| cipher.name == "GitHub Login")
+            .expect("standard CXF login should import");
+        let github_login = github.login.as_ref().unwrap();
+        assert_eq!(github_login.username.as_deref(), Some("johndoe"));
+        assert_eq!(github_login.password.as_deref(), Some("securepassword123"));
+        assert_eq!(
+            github_login.uris.as_ref().unwrap()[0].uri.as_deref(),
+            Some("https://github.com")
+        );
+        let github_totp = github_login.totp.as_deref().unwrap();
+        assert!(github_totp.starts_with("otpauth://totp/Google:"));
+        assert!(github_totp.contains("secret=JBSWY3DPEHPK3PXP"));
+        assert!(github_totp.contains("issuer=Google"));
+        assert!(github_totp.contains("algorithm=SHA256"));
+
+        let dashlane_payload = fs::read_to_string(resources.join("dashlane_export.json")).unwrap();
+        let dashlane = client.exporters().import_cxf(dashlane_payload).unwrap();
+        let mut dashlane_views = Vec::with_capacity(dashlane.len());
+        for cipher in dashlane {
+            dashlane_views.push(client.vault().ciphers().decrypt(cipher).await.unwrap());
+        }
+
+        let dashlane_login = dashlane_views
+            .iter()
+            .find(|cipher| cipher.name == "adobe.com")
+            .expect("Dashlane CXF login should import")
+            .login
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            dashlane_login.username.as_deref(),
+            Some("dashlane@dashlane.com")
+        );
+        assert_eq!(dashlane_login.password.as_deref(), Some("asdfgh"));
+        assert_eq!(
+            dashlane_login.totp.as_deref(),
+            Some("otpauth://totp?secret=JBSWY3DPEHPK3PXP")
+        );
+
+        let dashlane_card = dashlane_views
+            .iter()
+            .find(|cipher| cipher.name == "Dashlane CC")
+            .expect("Dashlane CXF card should import")
+            .card
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            dashlane_card.cardholder_name.as_deref(),
+            Some("Dashlane CC")
+        );
+        assert_eq!(dashlane_card.number.as_deref(), Some("4111111111111111"));
+        assert_eq!(dashlane_card.code.as_deref(), Some("999"));
+        assert_eq!(dashlane_card.exp_month.as_deref(), Some("10"));
+        assert_eq!(dashlane_card.exp_year.as_deref(), Some("2028"));
+    }
 }

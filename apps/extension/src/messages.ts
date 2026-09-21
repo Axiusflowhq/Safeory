@@ -24,12 +24,20 @@ export interface FillPayload {
   password: string;
 }
 
+export interface CaptureCredentialRequest {
+  type: "captureCredential";
+  authorization: string;
+  title: string;
+  username: string;
+  password: string;
+  existing?: {
+    id: string;
+    revision: number;
+  };
+}
+
 export type ExtensionSyncPhase =
-  | "not_configured"
-  | "connecting"
-  | "ready"
-  | "syncing"
-  | "error";
+  "not_configured" | "connecting" | "ready" | "syncing" | "error";
 
 export interface ExtensionSyncStatus {
   phase: ExtensionSyncPhase;
@@ -42,7 +50,8 @@ export interface ExtensionSyncStatus {
 
 export type ContentRequest =
   | { type: "findCredentials" }
-  | { type: "fillCredential"; id: string; authorization: string };
+  | { type: "fillCredential"; id: string; authorization: string }
+  | CaptureCredentialRequest;
 
 export type ContentResponse =
   | {
@@ -52,6 +61,12 @@ export type ContentResponse =
       authorization?: string;
     }
   | { type: "fill"; ok: boolean; payload?: FillPayload; error?: string }
+  | {
+      type: "capture";
+      ok: boolean;
+      action?: "created" | "updated";
+      error?: string;
+    }
   | { type: "error"; error: string };
 
 export type PopupRequest =

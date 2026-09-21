@@ -8,6 +8,7 @@
 import init, { WasmVault } from "vault-wasm";
 import type { ConnectedSingleOwnerVaultSync } from "@safeory/contracts";
 import { createSerializedMutationRunner } from "./mutation";
+import { saveCapturedCredential } from "./credential-capture";
 import { loadSnapshot, saveSnapshot } from "./storage";
 import {
   clearExtensionSyncConfiguration,
@@ -27,6 +28,7 @@ import type {
 
 type ExtensionWasmVault = WasmVault & {
   listCredentialsJson(): string;
+  updateItemJson(itemJson: string, expectedRevision: bigint): bigint;
 };
 
 // --- Vault lifecycle (single in-memory instance per worker) ---
@@ -70,7 +72,9 @@ let syncStatus: ExtensionSyncStatus = { ...INITIAL_SYNC_STATUS };
 let syncAbortController: AbortController | null = null;
 
 function ensureInit(): Promise<void> {
-  initPromise ??= (init as unknown as (a?: unknown) => Promise<unknown>)().then(() => undefined);
+  initPromise ??= (init as unknown as (a?: unknown) => Promise<unknown>)().then(
+    () => undefined,
+  );
   return initPromise;
 }
 
@@ -79,9 +83,11 @@ async function getVault(): Promise<ExtensionWasmVault> {
   if (vault) return vault;
   vaultLoadPromise ??= loadSnapshot()
     .then((snapshot) => {
-      const loaded = (snapshot === null
-        ? new WasmVault()
-        : WasmVault.fromSnapshotJson(snapshot)) as ExtensionWasmVault;
+      const loaded = (
+        snapshot === null
+          ? new WasmVault()
+          : WasmVault.fromSnapshotJson(snapshot)
+      ) as ExtensionWasmVault;
       vault = loaded;
       return loaded;
     })
@@ -103,7 +109,9 @@ const mutateAndPersist = createSerializedMutationRunner<ExtensionWasmVault>({
     try {
       await saveSnapshot(current.snapshotJson());
     } catch {
-      throw new Error("Saving the encrypted vault failed. Reload before continuing.");
+      throw new Error(
+        "Saving the encrypted vault failed. Reload before continuing.",
+      );
     }
   },
   discard: (current) => {
@@ -126,7 +134,9 @@ function errorMessage(error: unknown): string {
 const syncRequests = createSyncRequestRunner(async () => {
   const connection = syncConnection;
   if (connection === null) return false;
-  const unlocked = await mutateAndPersist.access((current) => current.isUnlocked());
+  const unlocked = await mutateAndPersist.access((current) =>
+    current.isUnlocked(),
+  );
   if (!unlocked) return false;
   const generation = syncGeneration;
   syncStatus = { ...syncStatus, phase: "syncing", error: null };
@@ -135,7 +145,8 @@ const syncRequests = createSyncRequestRunner(async () => {
     const result = await connection.runtime.syncOnce(
       signal === undefined ? {} : { signal },
     );
-    if (generation !== syncGeneration || syncConnection !== connection) return false;
+    if (generation !== syncGeneration || syncConnection !== connection)
+      return false;
     syncStatus = {
       phase: "ready",
       accountId: connection.client.accountId,
@@ -189,9 +200,15 @@ async function startSync(): Promise<void> {
       return;
     }
     syncStatus = { ...syncStatus, phase: "connecting", accountId, error: null };
-    const connected = await resumeExtensionVaultSync(syncSession, abortController.signal);
-    const unlocked = await mutateAndPersist.access((current) => current.isUnlocked());
-    if (generation !== syncGeneration || !unlocked || connected === null) return;
+    const connected = await resumeExtensionVaultSync(
+      syncSession,
+      abortController.signal,
+    );
+    const unlocked = await mutateAndPersist.access((current) =>
+      current.isUnlocked(),
+    );
+    if (generation !== syncGeneration || !unlocked || connected === null)
+      return;
     syncConnection = connected;
     syncStatus = {
       ...syncStatus,
@@ -218,7 +235,9 @@ async function enrollSync(
   masterPassphrase: string,
   accountSecretCode: string,
 ): Promise<void> {
-  const unlocked = await mutateAndPersist.access((current) => current.isUnlocked());
+  const unlocked = await mutateAndPersist.access((current) =>
+    current.isUnlocked(),
+  );
   if (!unlocked) throw new Error("locked");
   syncAbortController?.abort();
   const abortController = new AbortController();
@@ -247,7 +266,9 @@ async function enrollSync(
     await syncRequests.request();
   } catch (error) {
     if (generation === syncGeneration) {
-      const configuration = await loadExtensionSyncConfiguration().catch(() => null);
+      const configuration = await loadExtensionSyncConfiguration().catch(
+        () => null,
+      );
       syncStatus = {
         ...syncStatus,
         phase: configuration === null ? "not_configured" : "error",
@@ -290,9 +311,11 @@ async function addCredential(
   website: string,
 ): Promise<PopupResponse> {
   const normalizedTitle = title.trim();
-  if (normalizedTitle.length === 0) return { type: "error", error: "title is required" };
+  if (normalizedTitle.length === 0)
+    return { type: "error", error: "title is required" };
   const normalizedWebsite = website.trim();
-  const websiteOrigin = normalizedWebsite.length === 0 ? "" : credentialOrigin(normalizedWebsite);
+  const websiteOrigin =
+    normalizedWebsite.length === 0 ? "" : credentialOrigin(normalizedWebsite);
   if (websiteOrigin === null) {
     return { type: "error", error: "website must be a valid HTTP(S) address" };
   }
@@ -324,7 +347,9 @@ async function addCredential(
 /** Normalize a stored credential website to an HTTP(S) origin. */
 function credentialOrigin(value: string): string | null {
   try {
-    const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(value) ? value : `https://${value}`;
+    const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(value)
+      ? value
+      : `https://${value}`;
     const url = new URL(withScheme);
     if (url.protocol !== "http:" && url.protocol !== "https:") return null;
     return url.origin;
@@ -351,8 +376,14 @@ function originMatches(credentialWebsite: string, pageOrigin: string): boolean {
 }
 
 /** Accept only messages sent by this extension's top-frame content script. */
-function contentContextFromSender(sender: chrome.runtime.MessageSender): ContentSenderContext | null {
-  if (sender.id !== chrome.runtime.id || sender.tab?.id === undefined || sender.frameId !== 0) {
+function contentContextFromSender(
+  sender: chrome.runtime.MessageSender,
+): ContentSenderContext | null {
+  if (
+    sender.id !== chrome.runtime.id ||
+    sender.tab?.id === undefined ||
+    sender.frameId !== 0
+  ) {
     return null;
   }
   const senderUrl = sender.url ?? sender.tab.url;
@@ -362,7 +393,7 @@ function contentContextFromSender(sender: chrome.runtime.MessageSender): Content
 
 /** Popup-privileged requests must come from one of this extension's own pages. */
 function isExtensionPageSender(sender: chrome.runtime.MessageSender): boolean {
-  if (sender.id !== chrome.runtime.id || sender.tab !== undefined || !sender.url) return false;
+  if (sender.id !== chrome.runtime.id || !sender.url) return false;
   return sender.url.startsWith(chrome.runtime.getURL(""));
 }
 
@@ -374,7 +405,10 @@ function pruneContentRequestState(now: number): void {
   for (const [key, state] of contentRequestState) {
     const authorizationExpired =
       state.authorization === undefined || state.authorization.expiresAt <= now;
-    if (authorizationExpired && now - state.lastTouchedAt > CONTENT_FILL_AUTH_TTL_MS) {
+    if (
+      authorizationExpired &&
+      now - state.lastTouchedAt > CONTENT_FILL_AUTH_TTL_MS
+    ) {
       contentRequestState.delete(key);
     }
   }
@@ -419,7 +453,7 @@ function authorizeCredentialLookup(
   return { ok: true, authorization };
 }
 
-function consumeFillAuthorization(
+function consumeContentAuthorization(
   context: ContentSenderContext,
   authorization: string,
 ): boolean {
@@ -442,8 +476,13 @@ function consumeFillAuthorization(
 
 /** SHA-256 hex of a string; used as a clipboard clear-token (compare-and-clear). */
 async function sha256Hex(value: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
-  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(value),
+  );
+  return [...new Uint8Array(digest)]
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
 }
 
 /** Popup-initiated password copy: requires unlock; returns the password plus a
@@ -456,14 +495,23 @@ async function copyPassword(v: WasmVault, id: string): Promise<PopupResponse> {
   } catch {
     return { type: "error", error: "not found" };
   }
-  if (item.kind !== "password") return { type: "error", error: "not a credential" };
+  if (item.kind !== "password")
+    return { type: "error", error: "not a credential" };
   const password = item.fields["password"] ?? "";
-  return { type: "copiedPassword", password, clearToken: await sha256Hex(password) };
+  return {
+    type: "copiedPassword",
+    password,
+    clearToken: await sha256Hex(password),
+  };
 }
 
 // --- Fill: decrypt only the requested credential, only for a matching origin ---
 
-function fillCredential(v: WasmVault, id: string, origin: string): ContentResponse {
+function fillCredential(
+  v: WasmVault,
+  id: string,
+  origin: string,
+): ContentResponse {
   if (!v.isUnlocked()) return { type: "fill", ok: false, error: "locked" };
   let item: ItemJson;
   try {
@@ -471,7 +519,8 @@ function fillCredential(v: WasmVault, id: string, origin: string): ContentRespon
   } catch {
     return { type: "fill", ok: false, error: "not found" };
   }
-  if (item.kind !== "password") return { type: "fill", ok: false, error: "not a credential" };
+  if (item.kind !== "password")
+    return { type: "fill", ok: false, error: "not a credential" };
   if (!originMatches(item.fields["website"] ?? "", origin)) {
     return { type: "fill", ok: false, error: "origin mismatch" };
   }
@@ -485,9 +534,15 @@ function fillCredential(v: WasmVault, id: string, origin: string): ContentRespon
   };
 }
 
-function findCredentials(v: WasmVault, origin: string, authorization: string): ContentResponse {
+function findCredentials(
+  v: WasmVault,
+  origin: string,
+  authorization: string,
+): ContentResponse {
   if (!v.isUnlocked()) return { type: "credentials", locked: true, items: [] };
-  const matches = listCredentials(v).filter((c) => originMatches(c.website, origin));
+  const matches = listCredentials(v).filter((c) =>
+    originMatches(c.website, origin),
+  );
   return { type: "credentials", locked: false, items: matches, authorization };
 }
 
@@ -502,11 +557,17 @@ chrome.runtime.onMessage.addListener((raw: unknown, sender, sendResponse) => {
       case "findCredentials": {
         const context = contentContextFromSender(sender);
         if (context === null) {
-          return { type: "error", error: "unauthorized sender" } satisfies ContentResponse;
+          return {
+            type: "error",
+            error: "unauthorized sender",
+          } satisfies ContentResponse;
         }
         const lookup = authorizeCredentialLookup(context);
         if (!lookup.ok) {
-          return { type: "error", error: "request throttled" } satisfies ContentResponse;
+          return {
+            type: "error",
+            error: "request throttled",
+          } satisfies ContentResponse;
         }
         return mutateAndPersist.access((v) =>
           findCredentials(v, context.origin, lookup.authorization),
@@ -515,10 +576,13 @@ chrome.runtime.onMessage.addListener((raw: unknown, sender, sendResponse) => {
       case "fillCredential": {
         const context = contentContextFromSender(sender);
         if (context === null) {
-          return { type: "error", error: "unauthorized sender" } satisfies ContentResponse;
+          return {
+            type: "error",
+            error: "unauthorized sender",
+          } satisfies ContentResponse;
         }
         return mutateAndPersist.access((v) => {
-          if (!consumeFillAuthorization(context, msg.authorization)) {
+          if (!consumeContentAuthorization(context, msg.authorization)) {
             return {
               type: "fill",
               ok: false,
@@ -528,23 +592,53 @@ chrome.runtime.onMessage.addListener((raw: unknown, sender, sendResponse) => {
           return fillCredential(v, msg.id, context.origin);
         });
       }
+      case "captureCredential": {
+        const context = contentContextFromSender(sender);
+        if (context === null) {
+          return {
+            type: "error",
+            error: "unauthorized sender",
+          } satisfies ContentResponse;
+        }
+        if (!consumeContentAuthorization(context, msg.authorization)) {
+          return {
+            type: "capture",
+            ok: false,
+            error: "authorization required",
+          } satisfies ContentResponse;
+        }
+        const result = await mutateAndPersist((v) =>
+          saveCapturedCredential(v, context.origin, msg),
+        );
+        if (result.ok) void syncRequests.request();
+        return result;
+      }
 
       // Popup surface (trusted extension page).
       case "getState": {
         if (!isExtensionPageSender(sender)) {
-          return { type: "error", error: "unauthorized sender" } satisfies PopupResponse;
+          return {
+            type: "error",
+            error: "unauthorized sender",
+          } satisfies PopupResponse;
         }
-        return mutateAndPersist.access((v) => ({
-          type: "state",
-          initialized: v.isInitialized(),
-          unlocked: v.isUnlocked(),
-          credentialCount: v.isUnlocked() ? listCredentials(v).length : 0,
-          sync: { ...syncStatus },
-        } satisfies PopupResponse));
+        return mutateAndPersist.access(
+          (v) =>
+            ({
+              type: "state",
+              initialized: v.isInitialized(),
+              unlocked: v.isUnlocked(),
+              credentialCount: v.isUnlocked() ? listCredentials(v).length : 0,
+              sync: { ...syncStatus },
+            }) satisfies PopupResponse,
+        );
       }
       case "create": {
         if (!isExtensionPageSender(sender)) {
-          return { type: "error", error: "unauthorized sender" } satisfies PopupResponse;
+          return {
+            type: "error",
+            error: "unauthorized sender",
+          } satisfies PopupResponse;
         }
         await mutateAndPersist((v) => v.create(msg.passphrase));
         void startSync();
@@ -552,7 +646,10 @@ chrome.runtime.onMessage.addListener((raw: unknown, sender, sendResponse) => {
       }
       case "unlock": {
         if (!isExtensionPageSender(sender)) {
-          return { type: "error", error: "unauthorized sender" } satisfies PopupResponse;
+          return {
+            type: "error",
+            error: "unauthorized sender",
+          } satisfies PopupResponse;
         }
         await mutateAndPersist.access((v) => v.unlock(msg.passphrase));
         void startSync();
@@ -560,15 +657,23 @@ chrome.runtime.onMessage.addListener((raw: unknown, sender, sendResponse) => {
       }
       case "unlockWithRecoveryKit": {
         if (!isExtensionPageSender(sender)) {
-          return { type: "error", error: "unauthorized sender" } satisfies PopupResponse;
+          return {
+            type: "error",
+            error: "unauthorized sender",
+          } satisfies PopupResponse;
         }
-        await mutateAndPersist.access((v) => v.unlockWithRecoveryKit(msg.secretHex));
+        await mutateAndPersist.access((v) =>
+          v.unlockWithRecoveryKit(msg.secretHex),
+        );
         void startSync();
         return { type: "ok" } satisfies PopupResponse;
       }
       case "lock": {
         if (!isExtensionPageSender(sender)) {
-          return { type: "error", error: "unauthorized sender" } satisfies PopupResponse;
+          return {
+            type: "error",
+            error: "unauthorized sender",
+          } satisfies PopupResponse;
         }
         stopSync();
         await mutateAndPersist.access((v) => v.lock());
@@ -577,16 +682,25 @@ chrome.runtime.onMessage.addListener((raw: unknown, sender, sendResponse) => {
       }
       case "listCredentials": {
         if (!isExtensionPageSender(sender)) {
-          return { type: "error", error: "unauthorized sender" } satisfies PopupResponse;
+          return {
+            type: "error",
+            error: "unauthorized sender",
+          } satisfies PopupResponse;
         }
-        return mutateAndPersist.access((v) => ({
-          type: "credentials",
-          items: listCredentials(v),
-        } satisfies PopupResponse));
+        return mutateAndPersist.access(
+          (v) =>
+            ({
+              type: "credentials",
+              items: listCredentials(v),
+            }) satisfies PopupResponse,
+        );
       }
       case "addCredential": {
         if (!isExtensionPageSender(sender)) {
-          return { type: "error", error: "unauthorized sender" } satisfies PopupResponse;
+          return {
+            type: "error",
+            error: "unauthorized sender",
+          } satisfies PopupResponse;
         }
         return await addCredential(
           msg.title,
@@ -597,18 +711,30 @@ chrome.runtime.onMessage.addListener((raw: unknown, sender, sendResponse) => {
       }
       case "copyPassword": {
         if (!isExtensionPageSender(sender)) {
-          return { type: "error", error: "unauthorized sender" } satisfies PopupResponse;
+          return {
+            type: "error",
+            error: "unauthorized sender",
+          } satisfies PopupResponse;
         }
         return mutateAndPersist.access((v) => copyPassword(v, msg.id));
       }
       case "generatePassword":
         if (!isExtensionPageSender(sender)) {
-          return { type: "error", error: "unauthorized sender" } satisfies PopupResponse;
+          return {
+            type: "error",
+            error: "unauthorized sender",
+          } satisfies PopupResponse;
         }
-        return { type: "password", password: WasmVault.generatePassword(msg.length) } satisfies PopupResponse;
+        return {
+          type: "password",
+          password: WasmVault.generatePassword(msg.length),
+        } satisfies PopupResponse;
       case "generateAccountSecret":
         if (!isExtensionPageSender(sender)) {
-          return { type: "error", error: "unauthorized sender" } satisfies PopupResponse;
+          return {
+            type: "error",
+            error: "unauthorized sender",
+          } satisfies PopupResponse;
         }
         return {
           type: "accountSecret",
@@ -616,7 +742,10 @@ chrome.runtime.onMessage.addListener((raw: unknown, sender, sendResponse) => {
         } satisfies PopupResponse;
       case "enrollSync": {
         if (!isExtensionPageSender(sender)) {
-          return { type: "error", error: "unauthorized sender" } satisfies PopupResponse;
+          return {
+            type: "error",
+            error: "unauthorized sender",
+          } satisfies PopupResponse;
         }
         await enrollSync(
           msg.apiBaseUrl,
@@ -628,22 +757,32 @@ chrome.runtime.onMessage.addListener((raw: unknown, sender, sendResponse) => {
       }
       case "syncNow": {
         if (!isExtensionPageSender(sender)) {
-          return { type: "error", error: "unauthorized sender" } satisfies PopupResponse;
+          return {
+            type: "error",
+            error: "unauthorized sender",
+          } satisfies PopupResponse;
         }
-        if (syncConnection === null) throw new Error("Encrypted sync is not connected.");
+        if (syncConnection === null)
+          throw new Error("Encrypted sync is not connected.");
         await syncRequests.request();
         return { type: "ok" } satisfies PopupResponse;
       }
       case "retrySync": {
         if (!isExtensionPageSender(sender)) {
-          return { type: "error", error: "unauthorized sender" } satisfies PopupResponse;
+          return {
+            type: "error",
+            error: "unauthorized sender",
+          } satisfies PopupResponse;
         }
         await startSync();
         return { type: "ok" } satisfies PopupResponse;
       }
       case "resetSyncConfiguration": {
         if (!isExtensionPageSender(sender)) {
-          return { type: "error", error: "unauthorized sender" } satisfies PopupResponse;
+          return {
+            type: "error",
+            error: "unauthorized sender",
+          } satisfies PopupResponse;
         }
         stopSync();
         await clearExtensionSyncConfiguration();
@@ -651,12 +790,18 @@ chrome.runtime.onMessage.addListener((raw: unknown, sender, sendResponse) => {
         return { type: "ok" } satisfies PopupResponse;
       }
       default:
-        return { type: "error", error: "unknown message" } satisfies PopupResponse;
+        return {
+          type: "error",
+          error: "unknown message",
+        } satisfies PopupResponse;
     }
   })()
     .then((res: ContentResponse | PopupResponse) => sendResponse(res))
     .catch((e: unknown) =>
-      sendResponse({ type: "error", error: e instanceof Error ? e.message : String(e) }),
+      sendResponse({
+        type: "error",
+        error: e instanceof Error ? e.message : String(e),
+      }),
     );
   return true; // keep the message channel open for the async response
 });
