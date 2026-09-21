@@ -1,6 +1,7 @@
 /target/
 /node_modules/
 /.proof/
+/docs/provenance/generated/
 .pnpm-store/
 apps/web/dist/
 apps/web/node_modules/

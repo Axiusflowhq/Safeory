@@ -8,6 +8,296 @@ permissions:
   contents: read
 
 jobs:
+  foundation-sdk-proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Node 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Install SDK proof system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes binaryen
+          rustup toolchain install 1.94.1 --profile minimal --component rust-src --component rustfmt --component clippy
+
+      - name: Clone pinned Bitwarden SDK proof input
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .proof
+          SDK_REPOSITORY="$(node -p "require('./docs/provenance/foundation-seed.json').sources.sdk.repository")"
+          SDK_COMMIT="$(node -p "require('./docs/provenance/foundation-seed.json').sources.sdk.commit")"
+          git clone --no-checkout "$SDK_REPOSITORY" .proof/bitwarden-sdk-ci
+          git -C .proof/bitwarden-sdk-ci checkout --detach "$SDK_COMMIT"
+          test -z "$(git -C .proof/bitwarden-sdk-ci status --porcelain)"
+
+      - name: Prepare and verify OSS-only SDK graph
+        run: |
+          node scripts/prepare-bitwarden-sdk-proof.mjs .proof/bitwarden-sdk-ci
+          node scripts/check-bitwarden-sdk-proof.mjs .proof/bitwarden-sdk-ci
+
+      - name: Install SDK JavaScript build tooling
+        working-directory: .proof/bitwarden-sdk-ci
+        run: npm ci --ignore-scripts
+
+      - name: Check cleaned SDK workspace
+        working-directory: .proof/bitwarden-sdk-ci
+        run: cargo check --workspace --locked
+
+      - name: Test retained SDK libraries
+        working-directory: .proof/bitwarden-sdk-ci
+        run: cargo test --workspace --locked --lib
+
+      - name: Build cleaned release WASM SDK
+        working-directory: .proof/bitwarden-sdk-ci
+        run: bash crates/bitwarden-wasm-internal/build.sh -r
+
+      - name: Re-check SDK boundary after build
+        run: node scripts/check-bitwarden-sdk-proof.mjs .proof/bitwarden-sdk-ci
+
+  foundation-server-proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Node 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Install .NET 10.0.103
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.103
+
+      - name: Install server Rust toolchain
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup default 1.97.1
+
+      - name: Clone pinned Bitwarden server proof input
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .proof
+          SERVER_REPOSITORY="$(node -p "require('./docs/provenance/foundation-seed.json').sources.server.repository")"
+          SERVER_COMMIT="$(node -p "require('./docs/provenance/foundation-seed.json').sources.server.commit")"
+          git clone --no-checkout "$SERVER_REPOSITORY" .proof/bitwarden-server-ci
+          git -C .proof/bitwarden-server-ci checkout --detach "$SERVER_COMMIT"
+          test -z "$(git -C .proof/bitwarden-server-ci status --porcelain)"
+
+      - name: Prepare and verify OSS-only server graph
+        run: |
+          node scripts/prepare-bitwarden-server-proof.mjs .proof/bitwarden-server-ci
+          node scripts/check-bitwarden-server-proof.mjs .proof/bitwarden-server-ci
+
+      - name: Restore server-local .NET tools
+        working-directory: .proof/bitwarden-server-ci
+        run: dotnet tool restore
+
+      - name: Build cleaned self-hosted server composition
+        working-directory: .proof/bitwarden-server-ci
+        shell: bash
+        run: |
+          set -euo pipefail
+          projects=(
+            src/Admin/Admin.csproj
+            src/Api/Api.csproj
+            src/Billing/Billing.csproj
+            src/Events/Events.csproj
+            src/EventsProcessor/EventsProcessor.csproj
+            src/Icons/Icons.csproj
+            src/Identity/Identity.csproj
+            src/Notifications/Notifications.csproj
+            util/Migrator/Migrator.csproj
+            util/PostgresMigrations/PostgresMigrations.csproj
+            util/SeederApi/SeederApi.csproj
+            util/Setup/Setup.csproj
+            AppHost/AppHost.csproj
+          )
+          for project in "${projects[@]}"; do
+            dotnet restore "$project" --force-evaluate
+            dotnet build "$project" --configuration Release --no-restore
+          done
+
+      - name: Run retained server unit tests
+        working-directory: .proof/bitwarden-server-ci
+        shell: bash
+        run: |
+          set -euo pipefail
+          tests=(
+            test/Core.Test/Core.Test.csproj
+            test/Api.Test/Api.Test.csproj
+            test/Admin.Test/Admin.Test.csproj
+            test/Billing.Test/Billing.Test.csproj
+            test/Events.Test/Events.Test.csproj
+            test/EventsProcessor.Test/EventsProcessor.Test.csproj
+            test/Identity.Test/Identity.Test.csproj
+            test/Notifications.Test/Notifications.Test.csproj
+            test/SharedWeb.Test/SharedWeb.Test.csproj
+            test/Infrastructure.Dapper.Test/Infrastructure.Dapper.Test.csproj
+          )
+          for project in "${tests[@]}"; do
+            dotnet restore "$project" --force-evaluate
+            dotnet test "$project" --configuration Debug --no-restore
+          done
+
+      - name: Verify restored server dependency boundary
+        run: node scripts/check-bitwarden-server-proof.mjs .proof/bitwarden-server-ci --require-restored
+
+  foundation-server-postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: bitwarden_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d bitwarden_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Node 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Install .NET 10.0.103
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.103
+
+      - name: Clone and prepare pinned Bitwarden server
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .proof
+          SERVER_REPOSITORY="$(node -p "require('./docs/provenance/foundation-seed.json').sources.server.repository")"
+          SERVER_COMMIT="$(node -p "require('./docs/provenance/foundation-seed.json').sources.server.commit")"
+          git clone --no-checkout "$SERVER_REPOSITORY" .proof/bitwarden-server-postgres
+          git -C .proof/bitwarden-server-postgres checkout --detach "$SERVER_COMMIT"
+          node scripts/prepare-bitwarden-server-proof.mjs .proof/bitwarden-server-postgres
+          node scripts/check-bitwarden-server-proof.mjs .proof/bitwarden-server-postgres
+
+      - name: Restore server-local .NET tools
+        working-directory: .proof/bitwarden-server-postgres
+        run: dotnet tool restore
+
+      - name: Configure disposable PostgreSQL connection
+        working-directory: .proof/bitwarden-server-postgres
+        run: >-
+          dotnet user-secrets --project src/Api/Api.csproj set
+          "GlobalSettings:PostgreSql:ConnectionString"
+          "Host=localhost;Port=5432;Username=postgres;Password=postgres;Database=bitwarden_test;Include Error Detail=true"
+
+      - name: Apply pinned PostgreSQL migration chain
+        working-directory: .proof/bitwarden-server-postgres/util/PostgresMigrations
+        run: dotnet ef database update
+
+      - name: Run PostgreSQL-backed EF repository tests
+        working-directory: .proof/bitwarden-server-postgres
+        run: |
+          dotnet restore test/Infrastructure.EFIntegration.Test/Infrastructure.EFIntegration.Test.csproj --force-evaluate
+          dotnet test test/Infrastructure.EFIntegration.Test/Infrastructure.EFIntegration.Test.csproj --configuration Debug --no-restore
+
+      - name: Verify PostgreSQL proof dependency boundary
+        run: node scripts/check-bitwarden-server-proof.mjs .proof/bitwarden-server-postgres --require-restored
+
+  foundation-provenance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs:
+      - foundation-sdk-proof
+      - foundation-server-proof
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Node 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Install .NET 10.0.103
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.103
+
+      - name: Install SDK Rust toolchain
+        run: rustup toolchain install 1.94.1 --profile minimal
+
+      - name: Recreate cleaned foundation proof inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .proof
+
+          SDK_REPOSITORY="$(node -p "require('./docs/provenance/foundation-seed.json').sources.sdk.repository")"
+          SDK_COMMIT="$(node -p "require('./docs/provenance/foundation-seed.json').sources.sdk.commit")"
+          git clone --no-checkout "$SDK_REPOSITORY" .proof/bitwarden-sdk-provenance
+          git -C .proof/bitwarden-sdk-provenance checkout --detach "$SDK_COMMIT"
+          node scripts/prepare-bitwarden-sdk-proof.mjs .proof/bitwarden-sdk-provenance
+
+          SERVER_REPOSITORY="$(node -p "require('./docs/provenance/foundation-seed.json').sources.server.repository")"
+          SERVER_COMMIT="$(node -p "require('./docs/provenance/foundation-seed.json').sources.server.commit")"
+          git clone --no-checkout "$SERVER_REPOSITORY" .proof/bitwarden-server-provenance
+          git -C .proof/bitwarden-server-provenance checkout --detach "$SERVER_COMMIT"
+          node scripts/prepare-bitwarden-server-proof.mjs .proof/bitwarden-server-provenance
+
+      - name: Restore retained server composition for dependency evidence
+        working-directory: .proof/bitwarden-server-provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          projects=(
+            src/Admin/Admin.csproj
+            src/Api/Api.csproj
+            src/Billing/Billing.csproj
+            src/Events/Events.csproj
+            src/EventsProcessor/EventsProcessor.csproj
+            src/Icons/Icons.csproj
+            src/Identity/Identity.csproj
+            src/Notifications/Notifications.csproj
+            util/Migrator/Migrator.csproj
+            util/PostgresMigrations/PostgresMigrations.csproj
+            util/SeederApi/SeederApi.csproj
+            util/Setup/Setup.csproj
+            AppHost/AppHost.csproj
+          )
+          for project in "${projects[@]}"; do
+            dotnet restore "$project" --force-evaluate
+          done
+
+      - name: Generate foundation SBOM, licenses, notices, and source manifests
+        run: >-
+          node scripts/generate-foundation-provenance.mjs
+          .proof/bitwarden-sdk-provenance
+          .proof/bitwarden-server-provenance
+          docs/provenance/generated
+
+      - name: Validate generated provenance artifacts
+        run: node scripts/check-foundation-provenance.mjs docs/provenance/generated
+
+      - name: Upload foundation provenance bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: safeory-foundation-provenance
+          path: docs/provenance/generated
+          if-no-files-found: error
+
   quality:
     runs-on: ubuntu-latest
     timeout-minutes: 30

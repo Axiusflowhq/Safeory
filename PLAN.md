@@ -190,25 +190,76 @@ password-manager behavior and to identify any narrowly reusable non-UI logic.
 Its web app, browser-extension UI, components, routes, product shell, branding,
 and design system are not part of the Safeory import.
 
-- [ ] Create a fresh disposable copy of the pinned Bitwarden clients checkout.
-- [ ] Physically remove the complete `bitwarden_license/` tree in that proof.
-- [ ] Remove `@bitwarden/commercial-sdk-internal` from package manifests and
+- [x] Create a fresh disposable copy of the pinned Bitwarden clients checkout.
+- [x] Physically remove the complete `bitwarden_license/` tree in that proof.
+- [x] Remove `@bitwarden/commercial-sdk-internal` from package manifests and
       lockfiles in that proof.
-- [ ] Remove commercial-only project targets/configuration that references
+- [x] Remove commercial-only project targets/configuration that references
       deleted source.
-- [ ] Run dependency search proving no restricted package/path remains.
-- [ ] Install dependencies from a clean checkout.
-- [ ] Build/run enough upstream web/browser surfaces in the disposable checkout
+- [x] Run dependency search proving no restricted package/path remains.
+- [x] Install dependencies from a clean checkout.
+- [x] Build/run enough upstream web/browser surfaces in the disposable checkout
       to prove the OSS behavior we may need to reproduce or port.
-- [ ] Run the relevant client unit/integration tests for any non-UI behavior we
+- [x] Run the relevant client unit/integration tests for any non-UI behavior we
       intend to depend on or selectively port.
-- [ ] Inventory every client-side behavior Safeory still needs after adopting
+- [x] Inventory every client-side behavior Safeory still needs after adopting
       the Rust SDK/server and classify it as: available from SDK/core, reimplement
       in Safeory, or selectively port as isolated non-UI logic.
-- [ ] Record exact build commands/toolchain versions and the final list of any
+- [x] Record exact build commands/toolchain versions and the final list of any
       client-side non-UI source that is actually selected for porting.
-- [ ] Explicitly prove that no Bitwarden frontend application, UI component
+- [x] Explicitly prove that no Bitwarden frontend application, UI component
       tree, route tree, product shell, or design system is selected for import.
+
+Phase 0.1 proof evidence (2026-09-21):
+
+- Disposable proof checkouts are kept under ignored `.proof/` paths. A fresh
+  local clone was recreated at `.proof/bitwarden-clients-phase01-final` from the
+  pinned commit `07ac2aa903459ea8e1c18e3295b765be0bc3585f`, then prepared from a
+  clean working tree with:
+  `node scripts/prepare-bitwarden-clients-proof.mjs .proof/bitwarden-clients-phase01-final`.
+- `scripts/check-bitwarden-clients-proof.mjs` now verifies the pinned Git commit,
+  physical removal of `bitwarden_license/`, package-manifest and lockfile removal
+  of `@bitwarden/commercial-sdk-internal`, removal of commercial app project
+  configurations, self-hosted browser defaults, disabled upstream update channel,
+  and (when dependencies are installed) absence of the commercial SDK from
+  `node_modules`.
+- Clean dependency reproduction used Node `v24.20.0` and npm `11.19.0` in
+  `.proof/bitwarden-clients-clean-repro`; `npm ci` completed from the cleaned
+  lockfile. The inherited dependency graph reported 87 npm audit findings
+  (3 low, 36 moderate, 44 high, 4 critical). These are retained as explicit
+  dependency-risk evidence for the later provenance/security gates rather than
+  being hidden or auto-fixed inside the proof.
+- The installed proof passed:
+  `node scripts/check-bitwarden-clients-proof.mjs .proof/bitwarden-clients-clean-repro --require-installed`.
+- Cleaned OSS build commands passed with exit code 0:
+  `npm run build:oss:selfhost:prod --workspace @bitwarden/web-vault`,
+  `npm run build:prod:chrome --workspace @bitwarden/browser`, and
+  `npm run build:prod:firefox --workspace @bitwarden/browser`.
+- Candidate non-UI seam tests were exercised before selecting any source for
+  permanent import. Common autofill/domain/FIDO2/login-URI tests passed
+  299 tests with 2 upstream todos. Browser URL-variation, event-security,
+  insertion, FIDO2 background, and FIDO2 content-script suites passed. The
+  exploratory full DOM collector suite exposed one upstream timing-sensitive
+  late-shadow-root hydration assertion: it fails when run with the full file but
+  passed twice when isolated. Because the collector is not selected for import,
+  this is recorded as upstream reference instability rather than patched or
+  suppressed in Safeory.
+- Client behavior classification after the server + Rust SDK/core adoption:
+  account/session/device state, encrypted vault records, sync/revisions,
+  attachments, imports/exports, TOTP/passkey credential cryptography/storage,
+  and key-management primitives belong to the retained server/SDK/core; all
+  customer-facing web/extension UI, navigation, onboarding, settings, capture
+  prompts, save/update UX, popup/options surfaces, and product shell are Safeory
+  reimplementations; URL/origin matching/domain normalization and browser
+  WebAuthn messaging/permissions-policy logic are the only current candidates
+  for a later isolated non-UI port if Phase 1 proves the SDK/core lacks the needed
+  browser seam. DOM collection/insertion remains reference-only unless a narrower
+  reviewed helper is demonstrably necessary.
+- Final Phase 0.1 selected client-source import list: **none**. No Bitwarden web
+  application, browser UI, Angular component tree, route tree, product shell,
+  branding, design system, or other frontend source is selected for permanent
+  import. The permanent `foundation/` tree therefore remains free of Bitwarden
+  frontend code at this gate.
 
 **Exit gate:** the disposable clients proof has no restricted dependency, the
 required inherited behaviors are understood/tested, and the permanent Safeory
@@ -216,7 +267,7 @@ foundation still contains no Bitwarden frontend.
 
 ## 0.2 Reproduce cleaned foundation on Linux CI
 
-- [ ] Add CI jobs for cleaned SDK and server build proof plus any explicitly
+- [x] Add CI jobs for cleaned SDK and server build proof plus any explicitly
       selected isolated non-UI client logic.
 - [ ] Build the cleaned Rust/WASM SDK on Linux.
 - [ ] Build the cleaned server composition on Linux.
@@ -224,9 +275,53 @@ foundation still contains no Bitwarden frontend.
       adapted foundation on Linux.
 - [ ] Run non-environment-dependent upstream tests for retained server/SDK/core
       code and Safeory tests around adapted behavior.
-- [ ] Add Docker-backed integration services for the environment-dependent
+- [x] Add Docker-backed integration services for the environment-dependent
       server tests that matter to Safeory.
 - [ ] Ensure PostgreSQL migration tests run against a real PostgreSQL service.
+
+Phase 0.2 implementation evidence (2026-09-21; Linux execution gates still
+pending CI):
+
+- Added deterministic SDK proof tooling:
+  `scripts/prepare-bitwarden-sdk-proof.mjs` and
+  `scripts/check-bitwarden-sdk-proof.mjs`. A fresh checkout of pinned SDK commit
+  `7fd530e4852639d7391d062760891631ee9c15c1` was cleaned reproducibly, its
+  licensed source/features/API surface was removed, Cargo pruned only now-
+  unreachable lock entries, and `cargo check --workspace --locked` passed on the
+  prepared checkout.
+- The retained cleaned SDK library tests also pass locally with
+  `cargo test --workspace --locked --lib`. This host does not provide Bash or
+  Binaryen (`wasm-opt`/`wasm2js`), so the release WASM build remains an explicit
+  Linux CI gate rather than being claimed from Windows evidence.
+- Added deterministic server proof tooling:
+  `scripts/prepare-bitwarden-server-proof.mjs` and
+  `scripts/check-bitwarden-server-proof.mjs`. A fresh checkout of pinned server
+  commit `6fcd3b71f5f2eb0881dd4a3b587fa8afe5957da1` passes the structural OSS gate:
+  `bitwarden_license/` is physically absent, the checkout forces the `OSS`
+  compilation constant, licensed project references/solution groups are removed,
+  `Billing` and `SeederApi` use the upstream `AddOosServices()` registrations,
+  and the Aspire host no longer includes SSO/SCIM licensed services.
+- This Windows host has no .NET SDK installed, so server compilation is not
+  represented as locally proven. The authoritative server build/test proof is
+  intentionally delegated to the new Linux CI jobs below.
+- Added CI job `foundation-sdk-proof`: recreates the pinned SDK checkout on
+  Ubuntu, prepares/checks the OSS graph, runs locked Cargo check and retained
+  library tests, installs Binaryen, builds the release WASM package through the
+  upstream build script, and rechecks the boundary afterward.
+- Added CI job `foundation-server-proof`: recreates the pinned server checkout on
+  Ubuntu with .NET `10.0.103` and Rust `1.97.1`, builds the cleaned self-hosted
+  service/util composition, runs selected non-environment-dependent upstream
+  server tests, and rejects restored assets that retain licensed dependencies.
+- Added CI job `foundation-server-postgres` with a real `postgres:17-alpine`
+  service. It injects the disposable connection string through the upstream
+  `bitwarden-Api` user-secrets mechanism, runs the pinned `dotnet-ef 8.0.8`
+  PostgreSQL migration chain, then runs the existing EF repository integration
+  suite against that database. The checkbox above remains open until this job has
+  actually passed in Linux CI.
+- Phase 0.1 selected no Bitwarden client source for porting, so there is currently
+  no isolated client-code proof job to add. Safeory-owned web/extension builds
+  remain in the existing Ubuntu `quality` job; their "against adapted foundation"
+  gate stays open until the production foundation adapter is introduced.
 
 **Exit gate:** the retained cleaned backend/core plus Safeory-owned clients
 reproduce in clean CI without depending on Bitwarden frontend applications.
@@ -237,11 +332,40 @@ reproduce in clean CI without depending on Bitwarden frontend applications.
       client code.
 - [ ] Generate license inventory.
 - [ ] Generate required notices bundle.
-- [ ] Record removed restricted paths/packages.
-- [ ] Record all retained upstream source commits and exact retained source
+- [x] Record removed restricted paths/packages.
+- [x] Record all retained upstream source commits and exact retained source
       boundaries.
-- [ ] Add a CI failure if restricted paths/dependencies reappear.
+- [x] Add a CI failure if restricted paths/dependencies reappear.
 - [ ] Obtain qualified license review before public distribution.
+
+Phase 0.3 implementation evidence (2026-09-21; full Linux artifact generation
+still pending CI):
+
+- Added `scripts/generate-foundation-provenance.mjs`. It runs the cleaned SDK and
+  server boundary checkers first, then records every retained tracked upstream
+  file with SHA-256, the pinned source commits, the exact cleanup diffs, and the
+  forbidden path/dependency policy.
+- Source-only local generation succeeded against the prepared pinned checkouts:
+  1,545 retained SDK files and 7,271 retained server files were hashed. The SDK
+  CycloneDX 1.6 inventory contained 919 locked Cargo/npm components and reported
+  no missing license metadata in that local source-only run.
+- The full generator also reads restored NuGet `project.assets.json` files and
+  package `.nuspec` metadata to build the server CycloneDX SBOM and dependency
+  license inventory. This path intentionally fails if the server composition has
+  not been restored; it cannot be represented as locally executed on this host
+  because the pinned .NET SDK is unavailable here.
+- Added `docs/provenance/README.md` describing the source pins, generated artifact
+  contract, source-only limitation, and the separate qualified-review gate.
+- Added CI job `foundation-provenance`, dependent on the cleaned SDK/server proof
+  jobs. It recreates both pinned cleaned checkouts, restores the retained server
+  composition, generates SDK/server SBOMs, license inventory, exact source
+  manifests, restricted-removal evidence, copied upstream notice/license files,
+  and `THIRD_PARTY_NOTICES.md`, then uploads the bundle as
+  `safeory-foundation-provenance`.
+- Restricted-source/dependency regression is now fail-closed in CI through the
+  clients/SDK/server proof checkers, the permanent foundation-boundary checker,
+  and the provenance generator's preflight checks. Full SBOM/license/notices
+  checkboxes remain open until the Linux provenance job has actually passed.
 
 **Exit gate:** provenance/SBOM/license/notices pipeline is reproducible and has no
 known blocking licensing issue.
