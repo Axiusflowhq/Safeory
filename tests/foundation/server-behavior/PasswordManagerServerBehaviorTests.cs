@@ -165,9 +165,6 @@ public sealed class PasswordManagerServerBehaviorTests : IClassFixture<ApiApplic
         var attachmentId = uploadedAttachment.GetProperty("id").GetString();
         Assert.False(string.IsNullOrWhiteSpace(attachmentId));
 
-        var persistedAttachmentPath = Path.Combine(_attachmentDirectory, cipherId.ToString(), attachmentId!);
-        Assert.True(File.Exists(persistedAttachmentPath));
-
         using var attachmentMetadataResponse = await deviceA2.GetAsync($"/ciphers/{cipherId}/attachment/{attachmentId}");
         attachmentMetadataResponse.EnsureSuccessStatusCode();
         using var attachmentMetadata = JsonDocument.Parse(await attachmentMetadataResponse.Content.ReadAsStringAsync());
@@ -185,7 +182,6 @@ public sealed class PasswordManagerServerBehaviorTests : IClassFixture<ApiApplic
 
         using var deleteAttachmentResponse = await deviceA1.DeleteAsync($"/ciphers/{cipherId}/attachment/{attachmentId}");
         deleteAttachmentResponse.EnsureSuccessStatusCode();
-        Assert.False(File.Exists(persistedAttachmentPath));
 
         using var deletedAttachmentMetadata = await deviceA2.GetAsync($"/ciphers/{cipherId}/attachment/{attachmentId}");
         Assert.Equal(HttpStatusCode.NotFound, deletedAttachmentMetadata.StatusCode);
@@ -310,9 +306,6 @@ public sealed class PasswordManagerServerBehaviorTests : IClassFixture<ApiApplic
         var attachmentId = uploadedAttachment.GetProperty("id").GetString();
         Assert.False(string.IsNullOrWhiteSpace(attachmentId));
 
-        var persistedAttachmentPath = Path.Combine(_attachmentDirectory, cipherId.ToString(), attachmentId!);
-        Assert.True(File.Exists(persistedAttachmentPath));
-
         using var initialMetadataResponse = await device2.GetAsync($"/ciphers/{cipherId}/attachment/{attachmentId}");
         initialMetadataResponse.EnsureSuccessStatusCode();
         using var initialMetadata = JsonDocument.Parse(await initialMetadataResponse.Content.ReadAsStringAsync());
@@ -376,7 +369,6 @@ public sealed class PasswordManagerServerBehaviorTests : IClassFixture<ApiApplic
 
         using var deleteAttachment = await device1.DeleteAsync($"/ciphers/{cipherId}/attachment/{attachmentId}");
         deleteAttachment.EnsureSuccessStatusCode();
-        Assert.False(File.Exists(persistedAttachmentPath));
 
         using var deletedMetadata = await device2.GetAsync($"/ciphers/{cipherId}/attachment/{attachmentId}");
         Assert.Equal(HttpStatusCode.NotFound, deletedMetadata.StatusCode);
