@@ -43,8 +43,20 @@ const attachmentTarget = path.join(
   "Implementations",
   "LocalAttachmentStorageService.cs",
 );
+const cipherControllerTarget = path.join(
+  checkout,
+  "src",
+  "Api",
+  "Vault",
+  "Controllers",
+  "CiphersController.cs",
+);
 
-if (!fs.existsSync(authTarget) || !fs.existsSync(attachmentTarget)) {
+if (
+  !fs.existsSync(authTarget) ||
+  !fs.existsSync(attachmentTarget) ||
+  !fs.existsSync(cipherControllerTarget)
+) {
   fail(`prepared Bitwarden server checkout is missing: ${checkout}`);
 }
 
@@ -133,6 +145,57 @@ fs.writeFileSync(
   attachmentBody.replaceAll(seekBefore, seekAfter),
 );
 
+const controllerBody = fs
+  .readFileSync(cipherControllerTarget, "utf8")
+  .replaceAll("\r\n", "\n");
+const multipartRevisionBefore =
+  "        DateTime? lastKnownRevisionDate = GetLastKnownRevisionDateFromForm();\n";
+const multipartRevisionAfter = `        Request.EnableBuffering();
+        DateTime? lastKnownRevisionDate = GetLastKnownRevisionDateFromForm();
+        Request.Body.Position = 0;
+`;
+const multipartRevisionMatches =
+  controllerBody.split(multipartRevisionBefore).length - 1;
+if (multipartRevisionMatches !== 2) {
+  fail(
+    `expected exactly 2 attachment revision-form reads, found ${multipartRevisionMatches}`,
+  );
+}
+const bufferedControllerBody = controllerBody.replaceAll(
+  multipartRevisionBefore,
+  multipartRevisionAfter,
+);
+const downgradeBefore = `        // Validate the model was encrypted by the posting user, against the cipher we hold rather than
+        // the organization the client claims.
+        ValidateCipherEncryptedByUser(model, user, cipher.OrganizationId.HasValue, id);
+
+        ValidateClientVersionForFido2CredentialSupport(cipher);
+`;
+const downgradeAfter = `        // Validate the model was encrypted by the posting user, against the cipher we hold rather than
+        // the organization the client claims.
+        ValidateCipherEncryptedByUser(model, user, cipher.OrganizationId.HasValue, id);
+
+        if (cipher.IsDataBlobEncrypted() &&
+            !(new Cipher { Data = model.Data }).IsDataBlobEncrypted())
+        {
+            throw new BadRequestException(
+                "Cannot overwrite a blob-encrypted item with legacy field-level data. Re-sync and update the item with a compatible client.");
+        }
+
+        ValidateClientVersionForFido2CredentialSupport(cipher);
+`;
+const downgradeMatches =
+  bufferedControllerBody.split(downgradeBefore).length - 1;
+if (downgradeMatches !== 1) {
+  fail(
+    `expected exactly 1 personal cipher PUT validation site, found ${downgradeMatches}`,
+  );
+}
+fs.writeFileSync(
+  cipherControllerTarget,
+  bufferedControllerBody.replace(downgradeBefore, downgradeAfter),
+);
+
 console.log(
-  "prepare-safeory-server-adapter-proof: installed inactive-device JWT rejection and non-seekable local attachment support",
+  "prepare-safeory-server-adapter-proof: installed inactive-device JWT rejection, rewindable multipart attachment parsing, non-seekable local attachment support, and blob downgrade rejection",
 );

@@ -2,13 +2,16 @@
 mod tests {
     use std::{fs, path::Path};
 
-    use bitwarden_core::{Client, client::test_accounts::test_bitwarden_com_account};
+    use bitwarden_core::{
+        Client, client::test_accounts::test_bitwarden_com_account,
+        key_management::BLOB_SECURITY_VERSION,
+    };
     use bitwarden_encoding::B64Url;
     use bitwarden_exporters::ExportFormat;
     use bitwarden_pm::PasswordManagerClient;
     use bitwarden_vault::{
         AttachmentView, CipherRepromptType, CipherType, CipherView, Fido2CredentialFullView,
-        LoginUriView, LoginView, UriMatchType, generate_totp,
+        LoginUriView, LoginView, SecureNoteType, SecureNoteView, UriMatchType, generate_totp,
     };
 
     const TEST_FIDO_P256_KEY: &[u8] = &[
@@ -68,6 +71,44 @@ mod tests {
             creation_date: "2024-01-30T17:55:36.150Z".parse().unwrap(),
             deleted_date: None,
             revision_date: "2024-01-30T17:55:36.150Z".parse().unwrap(),
+            archived_date: None,
+        }
+    }
+
+    fn safeory_envelope_view(notes: String) -> CipherView {
+        CipherView {
+            id: Some("11111111-1111-4111-8111-111111111111".parse().unwrap()),
+            organization_id: None,
+            folder_id: None,
+            collection_ids: vec![],
+            key: None,
+            name: "Safeory insurance record".to_owned(),
+            notes: Some(notes),
+            r#type: CipherType::SecureNote,
+            login: None,
+            identity: None,
+            card: None,
+            secure_note: Some(SecureNoteView {
+                r#type: SecureNoteType::Generic,
+            }),
+            ssh_key: None,
+            bank_account: None,
+            drivers_license: None,
+            passport: None,
+            favorite: false,
+            reprompt: CipherRepromptType::None,
+            organization_use_totp: false,
+            edit: true,
+            permissions: None,
+            view_password: true,
+            local_data: None,
+            attachments: None,
+            attachment_decryption_failures: None,
+            fields: None,
+            password_history: None,
+            creation_date: "2026-09-21T00:00:00Z".parse().unwrap(),
+            deleted_date: None,
+            revision_date: "2026-09-21T00:00:00Z".parse().unwrap(),
             archived_date: None,
         }
     }
@@ -219,6 +260,112 @@ mod tests {
             .decrypt_fido2_private_key(with_passkey)
             .unwrap();
         assert_eq!(recovered_private_key, key_value);
+    }
+
+    #[tokio::test]
+    async fn safeory_envelope_round_trips_through_server_compatible_blob_cipher() {
+        let client = client().await;
+        client
+            .0
+            .internal
+            .get_key_store()
+            .set_security_state_version(BLOB_SECURITY_VERSION);
+
+        let large_extension_value = "x".repeat(60_000);
+        let envelope = serde_json::json!({
+            "marker": "safeory.life_record",
+            "schema_version": 1,
+            "record_id": "11111111-1111-4111-8111-111111111111",
+            "record_kind": "insurance",
+            "data": {
+                "title": "Family health policy",
+                "provider": "Example Mutual",
+                "policy_number": "POL-123",
+                "renewal": "2027-01-15",
+                "notes": "Call before renewal."
+            },
+            "links": ["22222222-2222-4222-8222-222222222222"],
+            "relationships": [{
+                "target_record_id": "33333333-3333-4333-8333-333333333333",
+                "relation": "covers_person"
+            }],
+            "reminders": [{
+                "reminder_id": "44444444-4444-4444-8444-444444444444",
+                "mode": "recurring",
+                "next_date": "2027-01-01",
+                "label": "Review insurance renewal",
+                "recurrence": { "frequency": "yearly", "interval": 1, "end_date": null }
+            }],
+            "continuity": {
+                "legacy_disposition": "selected_for_legacy",
+                "policy_ref": "55555555-5555-4555-8555-555555555555"
+            },
+            "extensions": {
+                "safeory.example.future": { "preserved": true, "version": 2 },
+                "vendor.future.a": large_extension_value,
+                "vendor.future.b": large_extension_value,
+                "vendor.future.c": large_extension_value,
+                "vendor.future.d": large_extension_value
+            }
+        });
+        let serialized = serde_json::to_string(&envelope).unwrap();
+        assert!(serialized.len() > 230_000);
+        assert!(serialized.as_bytes().len() <= 256 * 1024);
+
+        let vault = client.vault();
+        let encrypted = vault
+            .ciphers()
+            .encrypt(safeory_envelope_view(serialized.clone()))
+            .await
+            .unwrap()
+            .cipher;
+
+        let data = encrypted
+            .data
+            .as_ref()
+            .expect("blob cipher must carry opaque Data");
+        assert!(data.starts_with('{'));
+        assert!(data.len() < 500_000);
+        let outer: serde_json::Value = serde_json::from_str(data).unwrap();
+        assert_eq!(outer["format_version"], 1);
+        assert!(outer["wrapped_cek"].is_string());
+        assert!(outer["envelope"].is_string());
+        assert!(encrypted.notes.is_none());
+        assert!(encrypted.secure_note.is_none());
+
+        let decrypted = vault.ciphers().decrypt(encrypted.clone()).await.unwrap();
+        assert_eq!(decrypted.name, "Safeory insurance record");
+        assert_eq!(decrypted.notes.as_deref(), Some(serialized.as_str()));
+        assert_eq!(
+            decrypted.secure_note.as_ref().unwrap().r#type,
+            SecureNoteType::Generic
+        );
+        let restored: serde_json::Value =
+            serde_json::from_str(decrypted.notes.as_deref().unwrap()).unwrap();
+        assert_eq!(restored["marker"], "safeory.life_record");
+        assert_eq!(
+            restored["record_id"],
+            "11111111-1111-4111-8111-111111111111"
+        );
+        assert_eq!(
+            restored["extensions"]["safeory.example.future"]["version"],
+            2
+        );
+        assert_eq!(
+            restored["extensions"]["vendor.future.d"],
+            large_extension_value
+        );
+
+        let batch = vault
+            .ciphers()
+            .decrypt_list_full_with_failures(vec![encrypted])
+            .await;
+        assert!(batch.failures.is_empty());
+        assert_eq!(batch.successes.len(), 1);
+        assert_eq!(
+            batch.successes[0].notes.as_deref(),
+            Some(serialized.as_str())
+        );
     }
 
     #[tokio::test]

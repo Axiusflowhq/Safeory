@@ -54,6 +54,11 @@ jobs:
         working-directory: .proof/bitwarden-sdk-ci
         run: cargo test --workspace --locked --lib
 
+      - name: Apply and verify Safeory SDK behavior adapters
+        run: |
+          node scripts/prepare-safeory-sdk-adapter-proof.mjs .proof/bitwarden-sdk-ci
+          node scripts/check-safeory-sdk-adapter-proof.mjs .proof/bitwarden-sdk-ci
+
       - name: Install Safeory-owned SDK behavior harness
         run: node scripts/prepare-bitwarden-sdk-behavior-proof.mjs .proof/bitwarden-sdk-ci
 
@@ -61,12 +66,14 @@ jobs:
         working-directory: .proof/bitwarden-sdk-ci
         run: CARGO_TARGET_DIR=target cargo test --manifest-path .safeory/sdk-behavior/Cargo.toml --locked
 
-      - name: Build cleaned release WASM SDK
+      - name: Build adapted release WASM SDK
         working-directory: .proof/bitwarden-sdk-ci
         run: bash crates/bitwarden-wasm-internal/build.sh -r
 
       - name: Re-check SDK boundary after build
-        run: node scripts/check-bitwarden-sdk-proof.mjs .proof/bitwarden-sdk-ci
+        run: |
+          node scripts/check-bitwarden-sdk-proof.mjs .proof/bitwarden-sdk-ci
+          node scripts/check-safeory-sdk-adapter-proof.mjs .proof/bitwarden-sdk-ci
 
   foundation-server-proof:
     runs-on: ubuntu-latest

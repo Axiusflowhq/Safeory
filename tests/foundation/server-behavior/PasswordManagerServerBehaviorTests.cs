@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
 using Bit.Api.IntegrationTest.Factories;
+using Bit.Api.Vault.Models;
 using Bit.Api.Vault.Models.Request;
 using Bit.Api.Vault.Models.Response;
 using Bit.Core.Enums;
@@ -19,6 +20,8 @@ public sealed class PasswordManagerServerBehaviorTests : IClassFixture<ApiApplic
     private const string MasterPasswordHash = "master_password_hash";
     private const string EncryptedValue =
         "2.3Uk+WNBIoU5xzmVFNcoWzz==|1MsPIYuRfdOHfu/0uY6H2Q==|/98sp4wb6pHP1VTZ9JcNCYgQjEUMFPlqJgCwRk1YXKg=";
+    private const string BlobData =
+        "{\"format_version\":1,\"wrapped_cek\":\"safeory-wrapped-cek\",\"envelope\":\"safeory-envelope\"}";
 
     private readonly ApiApplicationFactory _factory;
     private readonly ITestOutputHelper _output;
@@ -194,6 +197,66 @@ public sealed class PasswordManagerServerBehaviorTests : IClassFixture<ApiApplic
             (int)activeDeviceProbe.StatusCode);
     }
 
+    [Fact]
+    public async Task BlobCipherSyncsAndCannotBeSilentlyDowngraded()
+    {
+        var suffix = Guid.NewGuid().ToString("N");
+        var email = $"safeory-blob-{suffix}@example.com";
+        await _factory.LoginWithNewAccount(email, MasterPasswordHash);
+
+        var device1Tokens = await _factory.Identity.TokenFromPasswordAsync(
+            email,
+            MasterPasswordHash,
+            $"safeory-blob-a1-{suffix}",
+            deviceType: DeviceType.FirefoxBrowser,
+            deviceName: "safeory-blob-firefox");
+        var device2Tokens = await _factory.Identity.TokenFromPasswordAsync(
+            email,
+            MasterPasswordHash,
+            $"safeory-blob-a2-{suffix}",
+            deviceType: DeviceType.ChromeBrowser,
+            deviceName: "safeory-blob-chromium");
+
+        using var device1 = _factory.CreateAuthedClient(device1Tokens.Token);
+        using var device2 = _factory.CreateAuthedClient(device2Tokens.Token);
+
+        var createResponse = await device1.PostAsJsonAsync("/ciphers", BlobRequest());
+        createResponse.EnsureSuccessStatusCode();
+        using var created = JsonDocument.Parse(await createResponse.Content.ReadAsStringAsync());
+        var cipherId = created.RootElement.GetProperty("id").GetGuid();
+        var createdRevision = created.RootElement.GetProperty("revisionDate").GetDateTime();
+        Assert.Equal(BlobData, created.RootElement.GetProperty("data").GetString());
+        Assert.True(
+            !created.RootElement.TryGetProperty("name", out var createdName) ||
+            createdName.ValueKind == JsonValueKind.Null);
+
+        var secondDeviceSync = await Sync(device2);
+        var synced = FindCipher(secondDeviceSync.RootElement, cipherId);
+        Assert.Equal(BlobData, synced.GetProperty("data").GetString());
+
+        var blobUpdate = await device1.PutAsJsonAsync(
+            $"/ciphers/{cipherId}",
+            BlobRequest(createdRevision, favorite: true));
+        blobUpdate.EnsureSuccessStatusCode();
+        using var updated = JsonDocument.Parse(await blobUpdate.Content.ReadAsStringAsync());
+        var updatedRevision = updated.RootElement.GetProperty("revisionDate").GetDateTime();
+        Assert.True(updatedRevision >= createdRevision);
+        Assert.True(updated.RootElement.GetProperty("favorite").GetBoolean());
+        Assert.Equal(BlobData, updated.RootElement.GetProperty("data").GetString());
+
+        var downgrade = await device1.PutAsJsonAsync(
+            $"/ciphers/{cipherId}",
+            LegacySecureNoteRequest(updatedRevision));
+        Assert.Equal(HttpStatusCode.BadRequest, downgrade.StatusCode);
+        var downgradeBody = await downgrade.Content.ReadAsStringAsync();
+        Assert.Contains("Cannot overwrite a blob-encrypted item", downgradeBody);
+
+        var afterRejectedDowngrade = await Sync(device2);
+        var preserved = FindCipher(afterRejectedDowngrade.RootElement, cipherId);
+        Assert.Equal(BlobData, preserved.GetProperty("data").GetString());
+        Assert.True(preserved.GetProperty("favorite").GetBoolean());
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_attachmentDirectory))
@@ -231,6 +294,30 @@ public sealed class PasswordManagerServerBehaviorTests : IClassFixture<ApiApplic
             LastKnownRevisionDate = lastKnownRevisionDate,
         };
     }
+
+    private static CipherRequestModel BlobRequest(DateTime? lastKnownRevisionDate = null, bool favorite = false) =>
+        new()
+        {
+            Type = CipherType.SecureNote,
+            Favorite = favorite,
+            Reprompt = CipherRepromptType.None,
+            Data = BlobData,
+            LastKnownRevisionDate = lastKnownRevisionDate,
+        };
+
+    private static CipherRequestModel LegacySecureNoteRequest(DateTime lastKnownRevisionDate) =>
+        new()
+        {
+            Type = CipherType.SecureNote,
+            Name = EncryptedValue,
+            Favorite = true,
+            Reprompt = CipherRepromptType.None,
+            SecureNote = new CipherSecureNoteModel
+            {
+                Type = SecureNoteType.Generic,
+            },
+            LastKnownRevisionDate = lastKnownRevisionDate,
+        };
 
     private static async Task<JsonDocument> Sync(HttpClient client)
     {

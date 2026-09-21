@@ -45,6 +45,14 @@ const attachmentTarget = path.join(
   "Implementations",
   "LocalAttachmentStorageService.cs",
 );
+const cipherControllerTarget = path.join(
+  checkout,
+  "src",
+  "Api",
+  "Vault",
+  "Controllers",
+  "CiphersController.cs",
+);
 
 try {
   const actualCommit = execFileSync(
@@ -100,10 +108,36 @@ if (!fs.existsSync(attachmentTarget)) {
   }
 }
 
+if (!fs.existsSync(cipherControllerTarget)) {
+  fail("adapted cipher controller source is missing");
+} else {
+  const body = fs.readFileSync(cipherControllerTarget, "utf8");
+  const requirements = [
+    "Request.EnableBuffering();",
+    "Request.Body.Position = 0;",
+    "cipher.IsDataBlobEncrypted()",
+    "new Cipher { Data = model.Data }",
+    "Cannot overwrite a blob-encrypted item with legacy field-level data.",
+  ];
+  for (const requirement of requirements) {
+    if (!body.includes(requirement)) {
+      fail(`missing blob downgrade guard fragment: ${requirement}`);
+    }
+  }
+  const bufferingCount =
+    body.match(/Request\.EnableBuffering\(\);/g)?.length ?? 0;
+  const rewindCount = body.match(/Request\.Body\.Position = 0;/g)?.length ?? 0;
+  if (bufferingCount !== 2 || rewindCount !== 2) {
+    fail(
+      `expected 2 multipart buffering/rewind guards, found buffering=${bufferingCount}, rewind=${rewindCount}`,
+    );
+  }
+}
+
 if (failed) {
   process.exit(1);
 }
 
 console.log(
-  "check-safeory-server-adapter-proof: OK (inactive-device JWT rejection + non-seekable local attachments)",
+  "check-safeory-server-adapter-proof: OK (inactive-device JWT rejection + multipart rewind + non-seekable local attachments + blob downgrade rejection)",
 );

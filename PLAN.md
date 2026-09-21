@@ -432,8 +432,8 @@ Phase 0.4 implementation evidence (2026-09-21):
 - Added a separate Safeory-owned Rust SDK behavior harness under
   `tests/foundation/sdk-behavior/`. Against the cleaned pinned SDK it proves public
   cipher encrypt/decrypt, deterministic TOTP generation, decrypted JSON export,
-  and attachment buffer encryption/decryption using a cipher key. Both tests pass
-  locally against SDK commit `7fd530e4852639d7391d062760891631ee9c15c1`.
+  attachment buffer encryption/decryption using a cipher key, retained password-
+  manager import behavior, and encrypted FIDO2/passkey material handling.
 - The SDK harness copies the cleaned SDK lockfile, normalizes only reachability via
   offline Cargo metadata, then rejects any resolved package identity absent from
   the pinned SDK lock before tests run with `--locked`. This prevents the harness
@@ -446,9 +446,9 @@ Phase 0.4 implementation evidence (2026-09-21):
   standard FIDO Credential Exchange Format header sample and passes each account
   unchanged through the same public SDK importer, verifying a login, origin, and
   SHA-256 TOTP mapping. A separate retained Dashlane CXF export verifies login,
-  TOTP, and card mappings from another password manager. The complete harness now
-  passes 4/4 tests locally against the
-  cleaned pinned SDK. This closes the 1Password fixture gate without adopting any
+  TOTP, and card mappings from another password manager. The five password-manager
+  foundation tests pass locally against the cleaned pinned SDK. This closes the
+  1Password fixture gate without adopting any
   Bitwarden frontend/import UI, and closes the representative standard password-
   manager fixture gate on the interoperable CXF boundary.
 - Added a separate Safeory server adapter proof layer rather than modifying the
@@ -474,6 +474,14 @@ Phase 0.4 implementation evidence (2026-09-21):
   with `stream.CanSeek`, preserving rewind behavior for seekable streams while
   accepting normal forward-only HTTP bodies. The adapter checker requires both
   guards, and the behavior test now includes the upload response body in failures.
+- Linux run `35559452762` proved that storage-side fix was necessary but not
+  sufficient: `PostAttachmentV1` first accessed `Request.Form` to obtain
+  `lastKnownRevisionDate`, consuming the multipart request body before
+  `MultipartReader` parsed the file and causing `Unexpected end of Stream`. The
+  Safeory server adapter now enables request buffering and rewinds the body at both
+  attachment endpoints after form/revision parsing. The checker requires exactly
+  two buffering + rewind guards. Attachment lifecycle and selective-revocation
+  gates remain open until this revised adapter passes Linux behavior CI.
 - Added a real Chromium MV3 integration proof with Playwright 1.63.0. The test
   launches the production-built Safeory extension in a persistent Chromium
   context, creates the vault through the actual popup, captures a new login from a
@@ -523,7 +531,7 @@ foundation without adopting Bitwarden's frontend.
 
 Use the existing `SafeoryEnvelopeV1` fixture:
 
-- [ ] Choose the least-invasive foundation encrypted-record carrier.
+- [x] Choose the least-invasive foundation encrypted-record carrier.
 - [ ] Persist one representative insurance/life record.
 - [ ] Render it through one temporary Safeory client route.
 - [ ] Edit and revision-sync it.
@@ -536,6 +544,44 @@ Use the existing `SafeoryEnvelopeV1` fixture:
 - [ ] Test corrupted marker/version/identity/JSON/size/attachment boundaries.
 - [ ] Prove an older/non-Safeory-compatible client cannot silently rewrite away
       mandatory Safeory data.
+
+Phase 0.5 implementation evidence (2026-09-21):
+
+- Selected an individual-vault blob-encrypted `SecureNote` as the least-invasive
+  foundation carrier. The serialized `SafeoryEnvelopeV1` remains ordinary
+  Safeory-owned plaintext only inside the SDK `CipherView.notes`; the foundation
+  SDK seals the entire secure-note payload into opaque cipher `Data`, so Safeory
+  does not introduce a parallel generic sync protocol or a new server record type.
+- Legacy field-level `Notes` was rejected as the carrier because the server caps
+  that encrypted field at 10,000 characters, below Safeory's 256 KiB envelope
+  contract. Blob cipher `Data` is server-opaque and accepts up to 500,000
+  characters, leaving sufficient room for the sealed 256 KiB envelope plus crypto
+  overhead.
+- The pinned SDK already contains versioned blob sealing/unsealing and a security-
+  state selection predicate, but those helpers were not wired into the public
+  cipher client. It also serialized the sealed outer container as base64-CBOR,
+  while the pinned server recognizes the same logical fields only in a JSON object
+  with top-level `format_version`, `wrapped_cek`, and `envelope`.
+- Added a separate Safeory SDK adapter proof rather than changing the pure cleaned-
+  OSS preparation. It wires qualifying individual-vault public encrypt/decrypt and
+  full-list paths to the existing blob implementation, writes the existing sealed
+  container as the server-compatible JSON shape, and retains read compatibility
+  for the SDK's earlier base64-CBOR representation. Organization ciphers remain on
+  the inherited path because the pinned SDK explicitly excludes them from blob
+  selection.
+- The adapted SDK behavior harness now passes 6/6 tests locally. Its carrier test
+  serializes a representative insurance envelope above 230 KiB but within the
+  256 KiB Safeory limit, verifies public encryption produces JSON blob `Data`
+  below the server's 500,000-character limit with no legacy notes/type payload,
+  decrypts it through both single and full-list public APIs, and confirms unknown
+  future extension data survives byte-for-byte at the JSON-value level.
+- Added a paired server downgrade invariant for the normal personal-vault PUT
+  path: once an item is blob-encrypted, an incoming legacy field-level replacement
+  is rejected before the stored cipher is mutated. The Linux behavior harness now
+  creates a blob secure note, observes it unchanged on a second device, performs a
+  revision-fenced blob update, attempts a current-revision legacy overwrite and
+  requires HTTP 400, then verifies the opaque blob remains intact. This downgrade
+  gate remains unchecked above until the new Linux CI run passes.
 
 **Exit gate:** Safeory structured records round-trip over foundation transport
 without creating a parallel generic sync protocol.
