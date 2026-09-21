@@ -258,6 +258,23 @@ function nugetLicense(name, version) {
   if (!nuspec) return { value: "UNKNOWN", evidence: "nuspec-missing" };
   const file = path.join(packageDir, nuspec);
   const body = fs.readFileSync(file, "utf8");
+  const projectUrl = body.match(/<projectUrl>([^<]+)<\/projectUrl>/i)?.[1];
+  const repositoryAttributes = body.match(/<repository\b([^>]*)\/?\s*>/i)?.[1];
+  const repositoryUrl = repositoryAttributes?.match(
+    /\burl=["']([^"']+)["']/i,
+  )?.[1];
+  const repositoryCommit = repositoryAttributes?.match(
+    /\bcommit=["']([^"']+)["']/i,
+  )?.[1];
+  const review = Object.fromEntries(
+    [
+      ["project_url", projectUrl],
+      ["repository_url", repositoryUrl],
+      ["repository_commit", repositoryCommit],
+    ]
+      .filter(([, value]) => value)
+      .map(([key, value]) => [key, decodeXml(value.trim())]),
+  );
   const expression = body.match(
     /<license\s+type=["']expression["'][^>]*>([^<]+)<\/license>/i,
   )?.[1];
@@ -274,7 +291,7 @@ function nugetLicense(name, version) {
   const licenseUrl = body.match(/<licenseUrl>([^<]+)<\/licenseUrl>/i)?.[1];
   if (licenseUrl)
     return { value: decodeXml(licenseUrl.trim()), evidence: file };
-  return { value: "UNKNOWN", evidence: file };
+  return { value: "UNKNOWN", evidence: file, review };
 }
 
 function nugetComponents() {
@@ -303,6 +320,7 @@ function nugetComponents() {
         purl: `pkg:nuget/${encodeURIComponent(name)}@${encodeURIComponent(version)}`,
         license: license.value,
         evidence: license.evidence,
+        review: license.review,
       });
     }
   }
@@ -397,11 +415,30 @@ const licenseRows = [...sdkComponents, ...serverComponents].map(
     version: component.version,
     license: component.license,
     evidence: component.evidence,
+    review: component.review ?? null,
   }),
 );
 const unknownLicenseCount = licenseRows.filter(
   (row) => row.license === "UNKNOWN",
 ).length;
+const unknownLicenseRows = licenseRows
+  .filter((row) => row.license === "UNKNOWN")
+  .sort((left, right) =>
+    `${left.ecosystem}:${left.package}:${left.version}`.localeCompare(
+      `${right.ecosystem}:${right.package}:${right.version}`,
+    ),
+  );
+
+function reviewHints(row) {
+  const hints = [];
+  if (row.review?.project_url)
+    hints.push(`project: \`${row.review.project_url}\``);
+  if (row.review?.repository_url)
+    hints.push(`repository: \`${row.review.repository_url}\``);
+  if (row.review?.repository_commit)
+    hints.push(`commit: \`${row.review.repository_commit}\``);
+  return hints.length === 0 ? "" : `; ${hints.join("; ")}`;
+}
 writeJson("license-inventory.json", {
   schema_version: 1,
   source_only: sourceOnly,
@@ -409,6 +446,53 @@ writeJson("license-inventory.json", {
   unknown_license_count: unknownLicenseCount,
   packages: licenseRows,
 });
+
+const legalReviewSummary = `# Foundation legal review summary
+
+This generated file is a review aid, not a legal conclusion. It binds the review
+packet to the pinned cleaned foundation inputs and surfaces unresolved dependency
+license metadata that requires qualified review before public distribution.
+
+## Pinned inputs
+
+- Bitwarden SDK: \`${seed.sources.sdk.commit}\`
+- Bitwarden server: \`${seed.sources.server.commit}\`
+- Bitwarden clients reference only: \`${seed.sources.clients.canonical_import_commit}\`
+- Selected Bitwarden client/frontend production imports: **none**
+
+## Automated evidence
+
+- SDK components: **${sdkComponents.length}**
+- Server components: **${serverComponents.length}**${sourceOnly ? " (source-only mode; server dependency SBOM omitted)" : ""}
+- Unknown dependency-license entries: **${unknownLicenseCount}**
+- Restricted source/dependency cleanup: \`restricted-removals.json\`
+- Full package evidence: \`license-inventory.json\`
+- Repository license/notices: \`licenses/\`
+- Exact retained source hashes: \`source-manifests/\`
+
+## Unresolved dependency-license metadata
+
+${
+  unknownLicenseRows.length === 0
+    ? "No `UNKNOWN` dependency-license entries were generated.\n"
+    : `${unknownLicenseRows
+        .map(
+          (row) =>
+            `- \`${row.ecosystem}:${row.package}@${row.version}\` — evidence: \`${row.evidence}\`${reviewHints(row)}`,
+        )
+        .join("\n")}\n`
+}
+## Review gate
+
+A qualified reviewer must resolve or explicitly accept every unresolved or
+non-standard license condition and review the copied upstream license, AGPL/GPL,
+Bitwarden license/FAQ, disclaimer, and trademark materials before the public-
+distribution gate in \`PLAN.md\` is closed.
+`;
+fs.writeFileSync(
+  path.join(outputRoot, "LEGAL_REVIEW_SUMMARY.md"),
+  legalReviewSummary,
+);
 
 const sourceLicenseFiles = {
   sdk: ["LICENSE", "LICENSE_GPL.txt", "LICENSE_SDK.txt", "DISCLAIMER.md"],
@@ -460,6 +544,8 @@ review.
 - SDK repository license/notices are copied under \`licenses/sdk/\`.
 - Server repository license/notices are copied under \`licenses/server/\`.
 - Dependency license evidence is recorded in \`license-inventory.json\`.
+- Reviewer-facing unresolved-license details are summarized in
+  \`LEGAL_REVIEW_SUMMARY.md\`.
 - SDK dependency SBOM: \`sbom/sdk.cdx.json\`.
 ${sourceOnly ? "- Server dependency SBOM was intentionally omitted by source-only generation.\n" : "- Server dependency SBOM: `sbom/server.cdx.json`.\n"}
 

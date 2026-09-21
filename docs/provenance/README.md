@@ -43,6 +43,8 @@ The generated directory is intentionally ignored by Git. CI publishes it as the
   digest, bound to the pinned commit.
 - `restricted-removals.json` — the exact prepared-checkout cleanup diff plus the
   forbidden path/dependency policy.
+- `LEGAL_REVIEW_SUMMARY.md` — reviewer-facing pinned-input summary plus every
+  dependency entry whose generated license metadata is `UNKNOWN`.
 - `THIRD_PARTY_NOTICES.md` — generated provenance/notices index for the bundle.
 - `generation-summary.json` — source/component counts and unresolved-license
   count.

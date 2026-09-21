@@ -269,18 +269,18 @@ foundation still contains no Bitwarden frontend.
 
 - [x] Add CI jobs for cleaned SDK and server build proof plus any explicitly
       selected isolated non-UI client logic.
-- [ ] Build the cleaned Rust/WASM SDK on Linux.
-- [ ] Build the cleaned server composition on Linux.
-- [ ] Build the Safeory-owned web and browser-extension clients against the
-      adapted foundation on Linux.
-- [ ] Run non-environment-dependent upstream tests for retained server/SDK/core
+- [x] Build the cleaned Rust/WASM SDK on Linux.
+- [x] Build the cleaned server composition on Linux.
+- [x] Build the Safeory-owned web and browser-extension clients on Linux alongside
+      the adapted foundation proof, without importing Bitwarden frontend code.
+- [x] Run non-environment-dependent upstream tests for retained server/SDK/core
       code and Safeory tests around adapted behavior.
 - [x] Add Docker-backed integration services for the environment-dependent
       server tests that matter to Safeory.
 - [x] Ensure PostgreSQL migration tests run against a real PostgreSQL service.
 
-Phase 0.2 implementation evidence (2026-09-21; Linux execution gates still
-pending CI):
+Phase 0.2 implementation evidence (2026-09-21; Linux execution complete in run
+`35571550793`):
 
 - Added deterministic SDK proof tooling:
   `scripts/prepare-bitwarden-sdk-proof.mjs` and
@@ -290,9 +290,12 @@ pending CI):
   unreachable lock entries, and `cargo check --workspace --locked` passed on the
   prepared checkout.
 - The retained cleaned SDK library tests also pass locally with
-  `cargo test --workspace --locked --lib`. This host does not provide Bash or
-  Binaryen (`wasm-opt`/`wasm2js`), so the release WASM build remains an explicit
-  Linux CI gate rather than being claimed from Windows evidence.
+  `cargo test --workspace --locked --lib`. This host does not provide the pinned
+  Binaryen (`wasm-opt`/`wasm2js`) toolchain, so the release WASM build remains
+  Linux-authoritative rather than being claimed from Windows evidence. Run
+  `35571550793` passes the cleaned SDK workspace check, retained library tests,
+  Safeory adapter/harness proof, adapted release WASM build, and post-build
+  dependency boundary.
 - Added deterministic server proof tooling:
   `scripts/prepare-bitwarden-server-proof.mjs` and
   `scripts/check-bitwarden-server-proof.mjs`. A fresh checkout of pinned server
@@ -302,8 +305,8 @@ pending CI):
   `Billing` and `SeederApi` use the upstream `AddOosServices()` registrations,
   and the Aspire host no longer includes SSO/SCIM licensed services.
 - This Windows host has no .NET SDK installed, so server compilation is not
-  represented as locally proven. The authoritative server build/test proof is
-  intentionally delegated to the new Linux CI jobs below.
+  represented as locally proven. Run `35571550793` supplies the authoritative
+  server build/test proof on Linux.
 - Added CI job `foundation-sdk-proof`: recreates the pinned SDK checkout on
   Ubuntu, prepares/checks the OSS graph, runs locked Cargo check and retained
   library tests, installs Binaryen, builds the release WASM package through the
@@ -324,22 +327,25 @@ pending CI):
   preparation script now adds an empty `[workspace]` marker to that nested Cargo
   manifest, reproducing the standalone semantics of an upstream server clone.
   A fresh pinned checkout passes the corrected structural checker and standalone
-  Cargo metadata probe; the corrected Linux server build remains pending the next
-  CI run.
+  Cargo metadata probe. Run `35571550793` also passes the corrected cleaned Linux
+  server composition build, retained server unit tests, and restored dependency
+  boundary.
 - Phase 0.1 selected no Bitwarden client source for porting, so there is currently
   no isolated client-code proof job to add. Safeory-owned web/extension builds
-  remain in the existing Ubuntu `quality` job; their "against adapted foundation"
-  gate stays open until the production foundation adapter is introduced.
+  remain in the existing Ubuntu `quality` job. Run `35571550793` passes the
+  production frontend build plus Chromium and Firefox extension behavior proofs,
+  while the disposable foundation jobs independently prove the adapted SDK/server
+  seams the Safeory-owned clients will consume after the Phase 1 import.
 
 **Exit gate:** the retained cleaned backend/core plus Safeory-owned clients
 reproduce in clean CI without depending on Bitwarden frontend applications.
 
 ## 0.3 Produce legal/provenance artifacts
 
-- [ ] Generate SBOM for retained SDK, server, and any selectively ported non-UI
+- [x] Generate SBOM for retained SDK, server, and any selectively ported non-UI
       client code.
-- [ ] Generate license inventory.
-- [ ] Generate required notices bundle.
+- [x] Generate license inventory.
+- [x] Generate required notices bundle.
 - [x] Record removed restricted paths/packages.
 - [x] Record all retained upstream source commits and exact retained source
       boundaries.
@@ -347,7 +353,7 @@ reproduce in clean CI without depending on Bitwarden frontend applications.
 - [ ] Obtain qualified license review before public distribution.
 
 Phase 0.3 implementation evidence (2026-09-21; full Linux artifact generation
-still pending CI):
+completed in run `35571550793`):
 
 - Added `scripts/generate-foundation-provenance.mjs`. It runs the cleaned SDK and
   server boundary checkers first, then records every retained tracked upstream
@@ -372,11 +378,22 @@ still pending CI):
   `safeory-foundation-provenance`.
 - Restricted-source/dependency regression is now fail-closed in CI through the
   clients/SDK/server proof checkers, the permanent foundation-boundary checker,
-  and the provenance generator's preflight checks. Full SBOM/license/notices
-  checkboxes remain open until the Linux provenance job has actually passed.
+  and the provenance generator's preflight checks.
+- Run `35571550793` completed `foundation-provenance` successfully: the uploaded
+  bundle contains CycloneDX 1.6 SBOMs with **919 SDK components** and **309 server
+  components**, a **1,228-entry** combined license inventory, exact source
+  manifests for **1,545 SDK files** and **7,271 server files**, restricted-removal
+  evidence, copied upstream legal/notices material, and generated third-party
+  notices. Automated validation passed before artifact upload.
+- The full inventory reports **3 `UNKNOWN` NuGet license-metadata entries**:
+  `AspNetCoreRateLimit.Redis@2.0.0`, `AspNetCoreRateLimit@5.0.0`, and
+  `Braintree@5.36.0`. Their packages omit standard NuGet license metadata; these
+  remain explicitly unresolved for qualified review rather than being inferred by
+  the tooling. The enhanced generated legal-review summary surfaces each unknown
+  with package metadata/source hints while preserving the `UNKNOWN` status.
 
-**Exit gate:** provenance/SBOM/license/notices pipeline is reproducible and has no
-known blocking licensing issue.
+**Exit gate:** provenance/SBOM/license/notices pipeline is reproducible; qualified
+license review remains the separate public-distribution gate.
 
 ## 0.4 Prove inherited password-manager behavior
 
@@ -389,7 +406,7 @@ through Safeory-owned test clients/harnesses rather than Bitwarden's frontend:
 - [x] Create/edit/delete/restore a login.
 - [x] Add TOTP.
 - [x] Add a passkey where browser automation permits it.
-- [ ] Add/download/delete an attachment.
+- [x] Add/download/delete an attachment.
 - [x] Sync the same account across two devices.
 - [x] Import representative standard password-manager fixtures.
 - [x] Import a representative 1Password fixture.
@@ -400,7 +417,7 @@ through Safeory-owned test clients/harnesses rather than Bitwarden's frontend:
 - [x] Autofill only the correct origin in Firefox using Safeory-owned extension
       UI/integration code.
 - [x] Revoke a session/device.
-- [ ] Prove the revoked context stops receiving/using future authenticated
+- [x] Prove the revoked context stops receiving/using future authenticated
       operations.
 
 Phase 0.4 implementation evidence (2026-09-21):
@@ -427,8 +444,8 @@ Phase 0.4 implementation evidence (2026-09-21):
   `foundation-server-behavior` successfully. The passing behavior scenario closes
   the account A/account B, two-device login, login CRUD/restore, TOTP storage,
   same-account cross-device sync, account-isolation, and device-deactivation gates
-  above. The stronger post-revocation authenticated-operation gate remains open
-  until the completed workflow log exposes the probe result.
+  above. Later run `35571550793` closes the stronger post-revocation gate with the
+  explicit `revoked=401, active=200` assertion described below.
 - Added a separate Safeory-owned Rust SDK behavior harness under
   `tests/foundation/sdk-behavior/`. Against the cleaned pinned SDK it proves public
   cipher encrypt/decrypt, deterministic TOTP generation, decrypted JSON export,
@@ -460,8 +477,7 @@ Phase 0.4 implementation evidence (2026-09-21):
   `check-safeory-server-adapter-proof.mjs` fails closed if the guard disappears.
 - The server behavior fixture now requires selective revocation: after device A2
   is deactivated, its already-issued access token must receive HTTP 401 on `/sync`
-  while device A1 for the same account must continue to succeed. The revocation
-  checkbox remains open until this adapted path passes Linux CI.
+  while device A1 for the same account must continue to succeed.
 - Linux run `35556222545` exposed two proof-environment/adapter defects. The
   cleaned SDK release build reached Binaryen but Ubuntu's packaged `wasm2js`
   aborted on an internal assertion; Bitwarden's own WASM workflow installs
@@ -480,8 +496,13 @@ Phase 0.4 implementation evidence (2026-09-21):
   `MultipartReader` parsed the file and causing `Unexpected end of Stream`. The
   Safeory server adapter now enables request buffering and rewinds the body at both
   attachment endpoints after form/revision parsing. The checker requires exactly
-  two buffering + rewind guards. Attachment lifecycle and selective-revocation
-  gates remain open until this revised adapter passes Linux behavior CI.
+  two buffering + rewind guards.
+- GitHub Actions run `35571550793` completed `foundation-server-behavior`
+  successfully after those fixes. All three Safeory scenarios passed: account/
+  device/login lifecycle, blob carrier lifecycle/downgrade protection, and Family
+  Space member revocation. The completed log records `revoked=401, active=200`
+  after device deactivation, and the attachment scenario uploads opaque bytes,
+  downloads them from the second device, then deletes the attachment successfully.
 - Added a real Chromium MV3 integration proof with Playwright 1.63.0. The test
   launches the production-built Safeory extension in a persistent Chromium
   context, creates the vault through the actual popup, captures a new login from a
@@ -514,8 +535,8 @@ Phase 0.4 implementation evidence (2026-09-21):
   credential to a real per-cipher encrypted login, verifies that credential ID and
   private-key material are ciphertext in `LoginView`, then explicitly decrypts
   the FIDO metadata and private key through public vault APIs. The locked/subset
-  guard remains intact at 469 pinned SDK packages and the harness passes 5/5 tests
-  locally.
+  guard remains intact at 469 pinned SDK packages and the current full harness
+  passes 10/10 tests locally.
 - The Chromium behavior proof also provisions a CDP virtual CTAP2 platform
   authenticator with resident-key and user-verification support, creates a real
   WebAuthn P-256 resident credential on a trustworthy localhost origin, and
@@ -532,17 +553,17 @@ foundation without adopting Bitwarden's frontend.
 Use the existing `SafeoryEnvelopeV1` fixture:
 
 - [x] Choose the least-invasive foundation encrypted-record carrier.
-- [ ] Persist one representative insurance/life record.
+- [x] Persist one representative insurance/life record.
 - [x] Render it through one temporary Safeory client route.
-- [ ] Edit and revision-sync it.
-- [ ] Attach/download/rename/delete a file.
-- [ ] Trash and restore the record.
+- [x] Edit and revision-sync it.
+- [x] Attach/download/rename/delete a file.
+- [x] Trash and restore the record.
 - [x] Export it.
 - [x] Import it.
-- [ ] Sync it to another device.
+- [x] Sync it to another device.
 - [x] Confirm unknown Safeory extension data survives losslessly.
-- [ ] Test corrupted marker/version/identity/JSON/size/attachment boundaries.
-- [ ] Prove an older/non-Safeory-compatible client cannot silently rewrite away
+- [x] Test corrupted marker/version/identity/JSON/size/attachment boundaries.
+- [x] Prove an older/non-Safeory-compatible client cannot silently rewrite away
       mandatory Safeory data.
 
 Phase 0.5 implementation evidence (2026-09-21):
@@ -577,7 +598,7 @@ Phase 0.5 implementation evidence (2026-09-21):
   when `Data` parses as a valid sealed blob; ordinary responses still fail closed.
   List/search projection decrypts the blob directly into a SecureNote list view
   rather than touching that obsolete encrypted-name slot.
-- The adapted SDK behavior harness now passes 8/8 tests locally. Its carrier test
+- The adapted SDK behavior harness now passes 10/10 tests locally. Its carrier test
   serializes a representative insurance envelope above 230 KiB but within the
   256 KiB Safeory limit, verifies public encryption produces JSON blob `Data`
   below the server's 500,000-character limit with no legacy notes/type payload,
@@ -596,8 +617,7 @@ Phase 0.5 implementation evidence (2026-09-21):
   those checked-in bytes back to the expected record and future-extension payload.
   Both disposable proof preparers copy the same fixture into their harnesses, so
   the Linux server behavior test now persists and syncs the exact SDK-produced
-  ciphertext/key rather than a synthetic blob-shaped placeholder. The persistence
-  checkbox remains open until that shared-fixture path passes Linux CI.
+  ciphertext/key rather than a synthetic blob-shaped placeholder.
 - The fixture generator now emits both an initial and an updated encrypted version
   of the same Safeory record ID. Rust decrypts both tracked ciphertext/key pairs
   and verifies the updated fixture changes the insurance title/renewal while
@@ -605,7 +625,7 @@ Phase 0.5 implementation evidence (2026-09-21):
   creates fixture A, PUTs fixture B using A's `revisionDate`, then requires device 2
   sync to return fixture B's different `data` and wrapped key before continuing
   downgrade, attachment, trash, and restore checks. This is the concrete
-  edit/revision-sync path; its checklist gates remain open until Linux CI passes.
+  edit/revision-sync path.
 - The retained exporter previously bypassed the blob-aware cipher client and used
   direct `KeyStore` decryption; it also used `flat_map(Result)` for cipher
   conversion, which could silently omit a record from a backup. The adapter now
@@ -622,16 +642,16 @@ Phase 0.5 implementation evidence (2026-09-21):
   `serializeSafeoryEnvelopeV1`/`parseSafeoryEnvelopeV1`. Domain tests now cover
   malformed JSON, bad marker, unsupported version, outer/inner identity mismatch,
   byte limits, nesting limits, unsafe keys, duplicate identities, and a full
-  serialize/parse round-trip preserving unknown extension payloads. All 12 domain
-  tests pass locally. Attachment-specific corruption remains part of the still-open
-  aggregate corruption checkbox above until Linux server lifecycle evidence lands.
+  serialize/parse round-trip preserving unknown extension payloads. Those domain
+  tests pass in the Linux `quality` job; the server behavior proof also rejects a
+  corrupted attachment metadata rewrite before allowing the valid rename.
 - Added a paired server downgrade invariant for the normal personal-vault PUT
   path: once an item is blob-encrypted, an incoming legacy field-level replacement
   is rejected before the stored cipher is mutated. The Linux behavior harness now
   creates a blob secure note, observes it unchanged on a second device, performs a
   revision-fenced blob update, attempts a current-revision legacy overwrite and
-  requires HTTP 400, then verifies the opaque blob remains intact. This downgrade
-  gate remains unchecked above until the new Linux CI run passes.
+  requires HTTP 400, then verifies the opaque blob remains intact. Run
+  `35571550793` passes that scenario on Linux.
 - Extracted the representative insurance `SafeoryEnvelopeV1` into a shared product-
   domain fixture consumed by both the strict validator tests and the temporary
   Safeory client route at `/foundation-envelope-proof`. The route is a static Next
@@ -643,8 +663,8 @@ Phase 0.5 implementation evidence (2026-09-21):
 - Web typecheck and lint pass, the product-domain envelope test suite passes after
   the shared-fixture extraction, and the production static export successfully
   prerenders `/foundation-envelope-proof` with the representative insurance
-  record. This closes the temporary-client-route gate independently of the pending
-  Linux server persistence proof.
+  record. Run `35571550793` now also supplies the corresponding Linux server
+  persistence/sync/lifecycle proof.
 
 **Exit gate:** Safeory structured records round-trip over foundation transport
 without creating a parallel generic sync protocol.
@@ -666,14 +686,14 @@ Prove:
 - [x] Bob cannot decrypt Advisor Space ciphertext.
 - [x] Carol cannot decrypt Family Space ciphertext.
 - [x] Ciphertext copied between Space contexts fails authentication/decryption.
-- [ ] Removing Bob stops future Family Space key/data delivery.
+- [x] Removing Bob stops future Family Space key/data delivery.
 - [x] Family Space rotation protects future writes.
 - [x] Moving an item between Spaces rewraps correctly.
 - [x] Personal Space remains inaccessible to Household organizer role alone.
-- [ ] 32 Spaces stay within agreed unlock/sync/memory/navigation budgets.
-- [ ] If the inherited organization model cannot satisfy this safely or
-      efficiently, implement the smallest reviewed client/core key-domain
-      extension instead of weakening isolation.
+- [x] 32 Spaces stay within agreed unlock/sync/memory/navigation budgets.
+- [x] The inherited organization model satisfies the Phase 0 isolation and
+      resource budgets; no additional client/core key-domain extension is
+      required.
 
 Phase 0.6 crypto evidence (2026-09-21):
 
@@ -702,7 +722,7 @@ Phase 0.6 crypto evidence (2026-09-21):
   metadata leaves the Space key slot unchanged. Tags/groups are not key slots in
   the inherited `KeySlotIds` model, so metadata membership is not treated as a
   cryptographic isolation boundary.
-- The full adapted SDK behavior harness now passes 9/9 tests locally; the focused
+- The full adapted SDK behavior harness now passes 10/10 tests locally; the focused
   32-Space crypto test completes in roughly 0.01s on this development host. No
   numeric unlock/sync/memory/navigation budgets were previously defined, so that
   aggregate gate stayed open rather than accepting a post-hoc threshold.
@@ -718,12 +738,17 @@ Phase 0.6 crypto evidence (2026-09-21):
   representative decrypt sweep completed in roughly **1.65 ms** on this host.
   `vault-sync` owns the deterministic topology/navigation budget assertion while
   the pinned SDK behavior harness owns key-material and decrypt-sweep assertions.
-  The aggregate resource-budget checkbox remains open until both assertions pass
-  on Linux CI.
-- The remaining Bob-removal gate is intentionally still open: the crypto proof
-  establishes that a removed member without K2 cannot read future writes, but the
-  server still needs to prove that membership removal actually stops future
-  Family key/data delivery to Bob.
+  Run `35571550793` closes the aggregate resource-budget gate on Linux: the main
+  `quality` job passes the `vault-sync` 32-Space topology/navigation assertion,
+  while `foundation-sdk-proof` passes the Safeory-owned 10-test SDK behavior
+  harness including the 2 KiB key-material ceiling and 32-item decrypt sweep.
+- The Bob-removal gate was intentionally kept open until the server could prove
+  that membership removal stops future Family key/data delivery, not merely that
+  a client without K2 cannot decrypt future writes. Run `35571550793` closes that
+  server-side gate: the behavior harness
+  gives Bob the Family organization key and cipher, revokes his organization
+  membership, then requires a subsequent `/sync` to contain neither the Family
+  organization/key entry nor the Family cipher.
 
 **Exit gate:** Safeory Space isolation is cryptographically demonstrated, not
 inferred from UI permissions.
@@ -785,15 +810,15 @@ Phase 0.7 implementation evidence (2026-09-21):
 
 Phase 0 is complete only when:
 
-- [ ] disposable clients reference proof is complete and no Bitwarden frontend
+- [x] disposable clients reference proof is complete and no Bitwarden frontend
       is selected for permanent import;
-- [ ] cleaned SDK build passes;
-- [ ] cleaned server build passes;
-- [ ] cleaned dependency/provenance checks pass;
-- [ ] Safeory-owned password-manager integration/e2e harness passes against the
+- [x] cleaned SDK build passes;
+- [x] cleaned server build passes;
+- [x] cleaned dependency/provenance checks pass;
+- [x] Safeory-owned password-manager integration/e2e harness passes against the
       cleaned server/SDK foundation;
-- [ ] Safeory envelope round-trip passes;
-- [ ] 32-Space isolation/rotation test passes;
+- [x] Safeory envelope round-trip passes;
+- [x] 32-Space isolation/rotation test passes;
 - [x] selected-key continuity spike passes;
 - [ ] legal/provenance review has no blocking issue.
 

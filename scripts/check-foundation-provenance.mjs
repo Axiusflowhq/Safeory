@@ -48,6 +48,7 @@ function readJson(relative) {
 
 for (const relative of [
   "THIRD_PARTY_NOTICES.md",
+  "LEGAL_REVIEW_SUMMARY.md",
   "license-inventory.json",
   "restricted-removals.json",
   "generation-summary.json",
@@ -198,6 +199,24 @@ if (inventory) {
   }
 }
 
+const legalReviewSummaryPath = path.join(root, "LEGAL_REVIEW_SUMMARY.md");
+if (inventory && fs.existsSync(legalReviewSummaryPath)) {
+  const legalReviewSummary = fs.readFileSync(legalReviewSummaryPath, "utf8");
+  const expectedCount = `Unknown dependency-license entries: **${inventory.unknown_license_count}**`;
+  if (!legalReviewSummary.includes(expectedCount)) {
+    fail("legal review summary unknown-license count does not match inventory");
+  }
+  for (const entry of inventory.packages.filter(
+    (value) => value.license === "UNKNOWN",
+  )) {
+    const marker = `${entry.ecosystem}:${entry.package}@${entry.version}`;
+    if (!legalReviewSummary.includes(marker)) {
+      fail(`legal review summary omits unknown-license entry ${marker}`);
+      break;
+    }
+  }
+}
+
 const removals = readJson("restricted-removals.json");
 if (removals) {
   for (const [source, commit] of Object.entries(expectedCommits)) {
@@ -227,6 +246,14 @@ if (summary) {
   }
   if (Boolean(summary.source_only) !== sourceOnly) {
     fail("generation summary source_only flag does not match validation mode");
+  }
+  if (
+    inventory &&
+    summary.unknown_license_count !== inventory.unknown_license_count
+  ) {
+    fail(
+      "generation summary unknown-license count does not match the license inventory",
+    );
   }
 }
 
