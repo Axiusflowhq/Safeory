@@ -49,6 +49,7 @@ function readJson(relative) {
 for (const relative of [
   "THIRD_PARTY_NOTICES.md",
   "LEGAL_REVIEW_SUMMARY.md",
+  "nuget-license-review-evidence.json",
   "license-inventory.json",
   "restricted-removals.json",
   "generation-summary.json",
@@ -172,6 +173,27 @@ const serverComponentCount = sourceOnly
   : checkSbom("sbom/server.cdx.json", seed.sources.server.commit);
 
 const inventory = readJson("license-inventory.json");
+const generatedNugetReviewEvidence = readJson(
+  "nuget-license-review-evidence.json",
+);
+const trackedNugetReviewEvidence = JSON.parse(
+  fs.readFileSync(
+    path.join(
+      safeoryRoot,
+      "docs",
+      "provenance",
+      "nuget-license-review-evidence.json",
+    ),
+    "utf8",
+  ),
+);
+if (
+  generatedNugetReviewEvidence &&
+  JSON.stringify(generatedNugetReviewEvidence) !==
+    JSON.stringify(trackedNugetReviewEvidence)
+) {
+  fail("generated NuGet review evidence does not match the tracked review map");
+}
 if (inventory) {
   if (!Array.isArray(inventory.packages)) {
     fail("license inventory has no packages array");
@@ -196,6 +218,35 @@ if (inventory) {
         }
       }
     }
+    if (!sourceOnly && generatedNugetReviewEvidence) {
+      for (const reviewEntry of generatedNugetReviewEvidence.entries ?? []) {
+        const inventoryEntry = inventory.packages.find(
+          (entry) =>
+            entry.ecosystem === "nuget" &&
+            entry.package === reviewEntry.package &&
+            entry.version === reviewEntry.version,
+        );
+        if (!inventoryEntry) {
+          fail(
+            `NuGet review evidence has no retained package ${reviewEntry.package}@${reviewEntry.version}`,
+          );
+          continue;
+        }
+        if (inventoryEntry.license !== "UNKNOWN") {
+          fail(
+            `NuGet review evidence unexpectedly targets a resolved license ${reviewEntry.package}@${reviewEntry.version}`,
+          );
+        }
+        if (
+          JSON.stringify(inventoryEntry.review?.curated ?? null) !==
+          JSON.stringify(reviewEntry)
+        ) {
+          fail(
+            `NuGet review evidence was not preserved for ${reviewEntry.package}@${reviewEntry.version}`,
+          );
+        }
+      }
+    }
   }
 }
 
@@ -212,6 +263,25 @@ if (inventory && fs.existsSync(legalReviewSummaryPath)) {
     const marker = `${entry.ecosystem}:${entry.package}@${entry.version}`;
     if (!legalReviewSummary.includes(marker)) {
       fail(`legal review summary omits unknown-license entry ${marker}`);
+      break;
+    }
+  }
+  const reviewSensitive = inventory.packages.filter(
+    (entry) =>
+      entry.license === "UNKNOWN" ||
+      /(?:^|[^A-Z])(?:A?GPL|LGPL)(?:-|\b)/i.test(entry.license) ||
+      /EULA/i.test(entry.license),
+  );
+  const expectedSensitiveCount = `Review-sensitive dependency entries: **${reviewSensitive.length}**`;
+  if (!legalReviewSummary.includes(expectedSensitiveCount)) {
+    fail(
+      "legal review summary review-sensitive count does not match inventory",
+    );
+  }
+  for (const entry of reviewSensitive) {
+    const marker = `${entry.ecosystem}:${entry.package}@${entry.version}`;
+    if (!legalReviewSummary.includes(marker)) {
+      fail(`legal review summary omits review-sensitive entry ${marker}`);
       break;
     }
   }
@@ -254,6 +324,19 @@ if (summary) {
     fail(
       "generation summary unknown-license count does not match the license inventory",
     );
+  }
+  if (inventory) {
+    const reviewSensitiveCount = inventory.packages.filter(
+      (entry) =>
+        entry.license === "UNKNOWN" ||
+        /(?:^|[^A-Z])(?:A?GPL|LGPL)(?:-|\b)/i.test(entry.license) ||
+        /EULA/i.test(entry.license),
+    ).length;
+    if (summary.review_sensitive_license_count !== reviewSensitiveCount) {
+      fail(
+        "generation summary review-sensitive count does not match the license inventory",
+      );
+    }
   }
 }
 

@@ -391,6 +391,22 @@ completed in run `35571550793`):
   remain explicitly unresolved for qualified review rather than being inferred by
   the tooling. The enhanced generated legal-review summary surfaces each unknown
   with package metadata/source hints while preserving the `UNKNOWN` status.
+- Added a tracked, version-bound `nuget-license-review-evidence.json` handoff for
+  those three unresolved rows. Both AspNetCoreRateLimit packages point to their
+  nuspec-pinned upstream commit `4a7b74e0...` whose `LICENSE.md` is MIT with
+  SHA-256 `03a4322b...81ef3`; Braintree points to its matching `5.36.0` upstream
+  release tag/commit `8d310daa...` whose `LICENSE` is MIT with SHA-256
+  `6f33a91d...ae102`. These are **candidate review facts only**: the generated
+  inventory intentionally keeps all three licenses as `UNKNOWN` until a qualified
+  reviewer accepts the evidence.
+- The legal-review summary now also surfaces the full technically review-sensitive
+  dependency set instead of only unknown metadata. Against the completed Linux
+  inventory that set contains **10 entries**: the 3 unknown NuGet packages,
+  3 `GPL-3.0-only` Bitwarden Server SDK packages, `ansi_colours` under
+  `LGPL-3.0-or-later`, two `r-efi` versions whose expression offers permissive or
+  LGPL alternatives, and `AdaptiveCards` with `SEE-FILE:EULA-Windows.txt`. The
+  provenance checker requires the generated review-evidence map to match the
+  tracked map and rejects tampering with that handoff.
 
 **Exit gate:** provenance/SBOM/license/notices pipeline is reproducible; qualified
 license review remains the separate public-distribution gate.

@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "entries": [
+    {
+      "package": "AspNetCoreRateLimit",
+      "version": "5.0.0",
+      "candidate_license": "MIT",
+      "package_project_url": "https://github.com/stefanprodan/AspNetCoreRateLimit",
+      "repository_url": "https://github.com/stefanprodan/AspNetCoreRateLimit",
+      "repository_commit": "4a7b74e0bc0b6678190dfe4388f6079e44eafee9",
+      "license_path": "LICENSE.md",
+      "license_url": "https://raw.githubusercontent.com/stefanprodan/AspNetCoreRateLimit/4a7b74e0bc0b6678190dfe4388f6079e44eafee9/LICENSE.md",
+      "license_sha256": "03a4322bc1f9e2ee5fd1711ff728fc8f13cdf408992be942c46e9290fed81ef3",
+      "basis": "NuGet nuspec repository URL and exact repository commit; package metadata itself omits license fields"
+    },
+    {
+      "package": "AspNetCoreRateLimit.Redis",
+      "version": "2.0.0",
+      "candidate_license": "MIT",
+      "package_project_url": "https://github.com/stefanprodan/AspNetCoreRateLimit",
+      "repository_url": "https://github.com/stefanprodan/AspNetCoreRateLimit",
+      "repository_commit": "4a7b74e0bc0b6678190dfe4388f6079e44eafee9",
+      "license_path": "LICENSE.md",
+      "license_url": "https://raw.githubusercontent.com/stefanprodan/AspNetCoreRateLimit/4a7b74e0bc0b6678190dfe4388f6079e44eafee9/LICENSE.md",
+      "license_sha256": "03a4322bc1f9e2ee5fd1711ff728fc8f13cdf408992be942c46e9290fed81ef3",
+      "basis": "NuGet nuspec repository URL and exact repository commit; package metadata itself omits license fields"
+    },
+    {
+      "package": "Braintree",
+      "version": "5.36.0",
+      "candidate_license": "MIT",
+      "package_project_url": "https://github.com/braintree/braintree_dotnet",
+      "repository_url": "https://github.com/braintree/braintree_dotnet",
+      "repository_ref": "5.36.0",
+      "repository_commit": "8d310daad99279661680f49e7dfdfe14331786fb",
+      "license_path": "LICENSE",
+      "license_url": "https://raw.githubusercontent.com/braintree/braintree_dotnet/5.36.0/LICENSE",
+      "license_sha256": "6f33a91d81f1d0dd8293859462f77ed2a28416847a3de15da89ef7eabf6ae102",
+      "basis": "NuGet project URL plus matching upstream 5.36.0 release tag; package metadata itself omits license fields"
+    }
+  ]
+}

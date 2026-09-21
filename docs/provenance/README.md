@@ -37,6 +37,9 @@ The generated directory is intentionally ignored by Git. CI publishes it as the
   assets for the retained server composition.
 - `license-inventory.json` — package/version/license evidence, including explicit
   `UNKNOWN` entries where package metadata is insufficient.
+- `nuget-license-review-evidence.json` — version-bound upstream evidence for
+  unresolved NuGet metadata. Candidate licenses in this file are review aids;
+  the corresponding inventory rows remain `UNKNOWN` until qualified review.
 - `licenses/` — upstream repository-level license, disclaimer, FAQ, and trademark
   notice files kept verbatim for review.
 - `source-manifests/` — every retained tracked upstream file with its SHA-256
@@ -44,7 +47,8 @@ The generated directory is intentionally ignored by Git. CI publishes it as the
 - `restricted-removals.json` — the exact prepared-checkout cleanup diff plus the
   forbidden path/dependency policy.
 - `LEGAL_REVIEW_SUMMARY.md` — reviewer-facing pinned-input summary plus every
-  dependency entry whose generated license metadata is `UNKNOWN`.
+  dependency entry whose generated license metadata is `UNKNOWN`, plus
+  GPL/LGPL/EULA-sensitive dependency metadata surfaced for explicit review.
 - `THIRD_PARTY_NOTICES.md` — generated provenance/notices index for the bundle.
 - `generation-summary.json` — source/component counts and unresolved-license
   count.

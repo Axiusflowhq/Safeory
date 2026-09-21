@@ -15,6 +15,47 @@ const seedPath = path.join(
   "foundation-seed.json",
 );
 const seed = JSON.parse(fs.readFileSync(seedPath, "utf8"));
+const nugetReviewEvidencePath = path.join(
+  safeoryRoot,
+  "docs",
+  "provenance",
+  "nuget-license-review-evidence.json",
+);
+const nugetReviewEvidence = JSON.parse(
+  fs.readFileSync(nugetReviewEvidencePath, "utf8"),
+);
+if (
+  nugetReviewEvidence.schema_version !== 1 ||
+  !Array.isArray(nugetReviewEvidence.entries)
+) {
+  fail("invalid docs/provenance/nuget-license-review-evidence.json schema");
+}
+const nugetReviewEvidenceByPackage = new Map();
+for (const entry of nugetReviewEvidence.entries) {
+  if (
+    !entry?.package ||
+    !entry?.version ||
+    !entry?.candidate_license ||
+    !entry?.repository_url ||
+    !entry?.repository_commit ||
+    !entry?.license_path ||
+    !entry?.license_url ||
+    !/^[0-9a-f]{64}$/.test(entry?.license_sha256 ?? "") ||
+    !entry?.basis
+  ) {
+    fail(
+      `NuGet review evidence is incomplete or malformed for ${entry?.package ?? "<unknown>"}@${entry?.version ?? "<unknown>"}`,
+    );
+  }
+  const key = `${entry.package.toLowerCase()}@${entry.version.toLowerCase()}`;
+  if (nugetReviewEvidenceByPackage.has(key)) {
+    fail(
+      `duplicate NuGet review evidence entry ${entry.package}@${entry.version}`,
+    );
+  }
+  nugetReviewEvidenceByPackage.set(key, entry);
+}
+const usedNugetReviewEvidence = new Set();
 
 function fail(message) {
   console.error(`generate-foundation-provenance: ${message}`);
@@ -275,6 +316,9 @@ function nugetLicense(name, version) {
       .filter(([, value]) => value)
       .map(([key, value]) => [key, decodeXml(value.trim())]),
   );
+  const reviewKey = `${name.toLowerCase()}@${version.toLowerCase()}`;
+  const curatedReview = nugetReviewEvidenceByPackage.get(reviewKey);
+  if (curatedReview) usedNugetReviewEvidence.add(reviewKey);
   const expression = body.match(
     /<license\s+type=["']expression["'][^>]*>([^<]+)<\/license>/i,
   )?.[1];
@@ -291,7 +335,14 @@ function nugetLicense(name, version) {
   const licenseUrl = body.match(/<licenseUrl>([^<]+)<\/licenseUrl>/i)?.[1];
   if (licenseUrl)
     return { value: decodeXml(licenseUrl.trim()), evidence: file };
-  return { value: "UNKNOWN", evidence: file, review };
+  return {
+    value: "UNKNOWN",
+    evidence: file,
+    review: {
+      ...review,
+      ...(curatedReview ? { curated: curatedReview } : {}),
+    },
+  };
 }
 
 function nugetComponents() {
@@ -352,6 +403,15 @@ const sdkComponents = dedupeComponents([
   ),
 ]);
 const serverComponents = sourceOnly ? [] : dedupeComponents(nugetComponents());
+if (!sourceOnly) {
+  for (const [key, entry] of nugetReviewEvidenceByPackage) {
+    if (!usedNugetReviewEvidence.has(key)) {
+      fail(
+        `NuGet review evidence entry was not matched by a retained unresolved package: ${entry.package}@${entry.version}`,
+      );
+    }
+  }
+}
 
 function cyclonedxComponent(component) {
   const result = {
@@ -428,6 +488,18 @@ const unknownLicenseRows = licenseRows
       `${right.ecosystem}:${right.package}:${right.version}`,
     ),
   );
+const reviewSensitiveRows = licenseRows
+  .filter(
+    (row) =>
+      row.license === "UNKNOWN" ||
+      /(?:^|[^A-Z])(?:A?GPL|LGPL)(?:-|\b)/i.test(row.license) ||
+      /EULA/i.test(row.license),
+  )
+  .sort((left, right) =>
+    `${left.license}:${left.ecosystem}:${left.package}:${left.version}`.localeCompare(
+      `${right.license}:${right.ecosystem}:${right.package}:${right.version}`,
+    ),
+  );
 
 function reviewHints(row) {
   const hints = [];
@@ -437,6 +509,14 @@ function reviewHints(row) {
     hints.push(`repository: \`${row.review.repository_url}\``);
   if (row.review?.repository_commit)
     hints.push(`commit: \`${row.review.repository_commit}\``);
+  if (row.review?.curated?.candidate_license)
+    hints.push(
+      `candidate: \`${row.review.curated.candidate_license}\` (review evidence only)`,
+    );
+  if (row.review?.curated?.license_url)
+    hints.push(`license: \`${row.review.curated.license_url}\``);
+  if (row.review?.curated?.license_sha256)
+    hints.push(`sha256: \`${row.review.curated.license_sha256}\``);
   return hints.length === 0 ? "" : `; ${hints.join("; ")}`;
 }
 writeJson("license-inventory.json", {
@@ -446,6 +526,7 @@ writeJson("license-inventory.json", {
   unknown_license_count: unknownLicenseCount,
   packages: licenseRows,
 });
+writeJson("nuget-license-review-evidence.json", nugetReviewEvidence);
 
 const legalReviewSummary = `# Foundation legal review summary
 
@@ -465,6 +546,7 @@ license metadata that requires qualified review before public distribution.
 - SDK components: **${sdkComponents.length}**
 - Server components: **${serverComponents.length}**${sourceOnly ? " (source-only mode; server dependency SBOM omitted)" : ""}
 - Unknown dependency-license entries: **${unknownLicenseCount}**
+- Review-sensitive dependency entries: **${reviewSensitiveRows.length}**
 - Restricted source/dependency cleanup: \`restricted-removals.json\`
 - Full package evidence: \`license-inventory.json\`
 - Repository license/notices: \`licenses/\`
@@ -479,6 +561,18 @@ ${
         .map(
           (row) =>
             `- \`${row.ecosystem}:${row.package}@${row.version}\` — evidence: \`${row.evidence}\`${reviewHints(row)}`,
+        )
+        .join("\n")}\n`
+}
+## Review-sensitive dependency metadata
+
+${
+  reviewSensitiveRows.length === 0
+    ? "No review-sensitive dependency license entries were identified by the technical classifier.\n"
+    : `${reviewSensitiveRows
+        .map(
+          (row) =>
+            `- \`${row.ecosystem}:${row.package}@${row.version}\` — \`${row.license}\`${reviewHints(row)}`,
         )
         .join("\n")}\n`
 }
@@ -544,6 +638,9 @@ review.
 - SDK repository license/notices are copied under \`licenses/sdk/\`.
 - Server repository license/notices are copied under \`licenses/server/\`.
 - Dependency license evidence is recorded in \`license-inventory.json\`.
+- Version-bound unresolved NuGet review evidence is recorded in
+  \`nuget-license-review-evidence.json\` without changing those inventory rows
+  from \`UNKNOWN\`.
 - Reviewer-facing unresolved-license details are summarized in
   \`LEGAL_REVIEW_SUMMARY.md\`.
 - SDK dependency SBOM: \`sbom/sdk.cdx.json\`.
@@ -564,6 +661,7 @@ writeJson("generation-summary.json", {
   sdk_components: sdkComponents.length,
   server_components: serverComponents.length,
   unknown_license_count: unknownLicenseCount,
+  review_sensitive_license_count: reviewSensitiveRows.length,
 });
 
 console.log(
