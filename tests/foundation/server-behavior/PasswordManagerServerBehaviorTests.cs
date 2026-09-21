@@ -1,4 +1,6 @@
+using System.Net;
 using System.Net.Http.Json;
+using System.Text;
 using System.Text.Json;
 using Bit.Api.IntegrationTest.Factories;
 using Bit.Api.Vault.Models.Request;
@@ -12,7 +14,7 @@ using Xunit.Abstractions;
 
 namespace Safeory.Foundation.ServerBehavior;
 
-public sealed class PasswordManagerServerBehaviorTests : IClassFixture<ApiApplicationFactory>
+public sealed class PasswordManagerServerBehaviorTests : IClassFixture<ApiApplicationFactory>, IDisposable
 {
     private const string MasterPasswordHash = "master_password_hash";
     private const string EncryptedValue =
@@ -20,11 +22,15 @@ public sealed class PasswordManagerServerBehaviorTests : IClassFixture<ApiApplic
 
     private readonly ApiApplicationFactory _factory;
     private readonly ITestOutputHelper _output;
+    private readonly string _attachmentDirectory;
 
     public PasswordManagerServerBehaviorTests(ApiApplicationFactory factory, ITestOutputHelper output)
     {
         _factory = factory;
         _output = output;
+        _attachmentDirectory = Path.Combine(Path.GetTempPath(), $"safeory-foundation-attachments-{Guid.NewGuid():N}");
+        _factory.UpdateConfiguration("globalSettings:attachment:baseDirectory", _attachmentDirectory);
+        _factory.UpdateConfiguration("globalSettings:baseServiceUri:api", "http://localhost");
     }
 
     [Fact]
@@ -112,6 +118,47 @@ public sealed class PasswordManagerServerBehaviorTests : IClassFixture<ApiApplic
             !restoredCipher.TryGetProperty("deletedDate", out var restoredDeleted) ||
             restoredDeleted.ValueKind == JsonValueKind.Null);
 
+        // Persist opaque attachment bytes through the real local attachment store, then prove a
+        // second device can retrieve the signed download while another account cannot.
+        var attachmentBytes = Encoding.UTF8.GetBytes("safeory-foundation-opaque-attachment");
+        using var attachmentForm = new MultipartFormDataContent();
+        attachmentForm.Add(new StringContent(EncryptedValue), "key");
+        attachmentForm.Add(new ByteArrayContent(attachmentBytes), "data", "proof.bin");
+
+        var uploadResponse = await deviceA1.PostAsync($"/ciphers/{cipherId}/attachment", attachmentForm);
+        uploadResponse.EnsureSuccessStatusCode();
+        using var uploadedCipher = JsonDocument.Parse(await uploadResponse.Content.ReadAsStringAsync());
+        var uploadedAttachments = uploadedCipher.RootElement.GetProperty("attachments");
+        Assert.Equal(1, uploadedAttachments.GetArrayLength());
+        var uploadedAttachment = uploadedAttachments[0];
+        var attachmentId = uploadedAttachment.GetProperty("id").GetString();
+        Assert.False(string.IsNullOrWhiteSpace(attachmentId));
+
+        var persistedAttachmentPath = Path.Combine(_attachmentDirectory, cipherId.ToString(), attachmentId!);
+        Assert.True(File.Exists(persistedAttachmentPath));
+
+        using var attachmentMetadataResponse = await deviceA2.GetAsync($"/ciphers/{cipherId}/attachment/{attachmentId}");
+        attachmentMetadataResponse.EnsureSuccessStatusCode();
+        using var attachmentMetadata = JsonDocument.Parse(await attachmentMetadataResponse.Content.ReadAsStringAsync());
+        Assert.Equal("proof.bin", attachmentMetadata.RootElement.GetProperty("fileName").GetString());
+        Assert.Equal(EncryptedValue, attachmentMetadata.RootElement.GetProperty("key").GetString());
+
+        var downloadUrl = attachmentMetadata.RootElement.GetProperty("url").GetString();
+        Assert.False(string.IsNullOrWhiteSpace(downloadUrl));
+        using var downloadResponse = await deviceA2.GetAsync(downloadUrl);
+        downloadResponse.EnsureSuccessStatusCode();
+        Assert.Equal(attachmentBytes, await downloadResponse.Content.ReadAsByteArrayAsync());
+
+        using var otherAccountAttachment = await accountBClient.GetAsync($"/ciphers/{cipherId}/attachment/{attachmentId}");
+        Assert.Equal(HttpStatusCode.NotFound, otherAccountAttachment.StatusCode);
+
+        using var deleteAttachmentResponse = await deviceA1.DeleteAsync($"/ciphers/{cipherId}/attachment/{attachmentId}");
+        deleteAttachmentResponse.EnsureSuccessStatusCode();
+        Assert.False(File.Exists(persistedAttachmentPath));
+
+        using var deletedAttachmentMetadata = await deviceA2.GetAsync($"/ciphers/{cipherId}/attachment/{attachmentId}");
+        Assert.Equal(HttpStatusCode.NotFound, deletedAttachmentMetadata.StatusCode);
+
         // Revoke the second device and prove the durable server-side device state changes.
         var users = _factory.GetService<IUserRepository>();
         var accountAUser = await users.GetByEmailAsync(accountA);
@@ -133,6 +180,14 @@ public sealed class PasswordManagerServerBehaviorTests : IClassFixture<ApiApplic
         // revocation gate until this observed status is explicitly required to be unauthorized/forbidden.
         var revokedTokenProbe = await deviceA2.GetAsync("/sync");
         _output.WriteLine("post-deactivation /sync status: {0}", (int)revokedTokenProbe.StatusCode);
+    }
+
+    public void Dispose()
+    {
+        if (Directory.Exists(_attachmentDirectory))
+        {
+            Directory.Delete(_attachmentDirectory, recursive: true);
+        }
     }
 
     private static CipherRequestModel LoginRequest(DateTime? lastKnownRevisionDate = null, bool favorite = false)

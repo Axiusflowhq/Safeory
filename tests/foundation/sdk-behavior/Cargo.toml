@@ -1,0 +1,14 @@
+[package]
+name = "safeory-foundation-sdk-behavior"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+bitwarden-core = { path = "../../crates/bitwarden-core", features = ["internal", "test-fixtures"] }
+bitwarden-exporters = { path = "../../crates/bitwarden-exporters" }
+bitwarden-pm = { path = "../../crates/bitwarden-pm" }
+bitwarden-vault = { path = "../../crates/bitwarden-vault" }
+tokio = { version = "=1.52.0", features = ["macros", "rt-multi-thread"] }
+
+[workspace]

@@ -383,27 +383,27 @@ known blocking licensing issue.
 Create an automated self-hosted fixture using the cleaned server/SDK foundation
 through Safeory-owned test clients/harnesses rather than Bitwarden's frontend:
 
-- [ ] Create account A.
-- [ ] Create account B.
-- [ ] Log in from two separate client/device contexts.
-- [ ] Create/edit/delete/restore a login.
-- [ ] Add TOTP.
+- [x] Create account A.
+- [x] Create account B.
+- [x] Log in from two separate client/device contexts.
+- [x] Create/edit/delete/restore a login.
+- [x] Add TOTP.
 - [ ] Add a passkey where browser automation permits it.
 - [ ] Add/download/delete an attachment.
-- [ ] Sync the same account across two devices.
+- [x] Sync the same account across two devices.
 - [ ] Import representative standard password-manager fixtures.
-- [ ] Import a representative 1Password fixture.
+- [x] Import a representative 1Password fixture.
 - [ ] Capture a new login using the Safeory extension.
 - [ ] Update an existing login using the Safeory extension.
 - [ ] Autofill only the correct origin in Chromium using Safeory-owned extension
       UI/integration code.
 - [ ] Autofill only the correct origin in Firefox using Safeory-owned extension
       UI/integration code.
-- [ ] Revoke a session/device.
+- [x] Revoke a session/device.
 - [ ] Prove the revoked context stops receiving/using future authenticated
       operations.
 
-Phase 0.4 implementation evidence (2026-09-21; first Linux behavior run pending):
+Phase 0.4 implementation evidence (2026-09-21):
 
 - Added a Safeory-owned .NET behavior harness under
   `tests/foundation/server-behavior/`. It is copied into the disposable cleaned
@@ -423,6 +423,28 @@ Phase 0.4 implementation evidence (2026-09-21; first Linux behavior run pending)
 - Added CI job `foundation-server-behavior`, dependent on the cleaned server build
   proof, to compile and execute this Safeory-owned harness on Linux and re-run the
   restricted dependency boundary afterward.
+- GitHub Actions run `35554744189` completed both `foundation-server-proof` and
+  `foundation-server-behavior` successfully. The passing behavior scenario closes
+  the account A/account B, two-device login, login CRUD/restore, TOTP storage,
+  same-account cross-device sync, account-isolation, and device-deactivation gates
+  above. The stronger post-revocation authenticated-operation gate remains open
+  until the completed workflow log exposes the probe result.
+- Added a separate Safeory-owned Rust SDK behavior harness under
+  `tests/foundation/sdk-behavior/`. Against the cleaned pinned SDK it proves public
+  cipher encrypt/decrypt, deterministic TOTP generation, decrypted JSON export,
+  and attachment buffer encryption/decryption using a cipher key. Both tests pass
+  locally against SDK commit `7fd530e4852639d7391d062760891631ee9c15c1`.
+- The SDK harness copies the cleaned SDK lockfile, normalizes only reachability via
+  offline Cargo metadata, then rejects any resolved package identity absent from
+  the pinned SDK lock before tests run with `--locked`. This prevents the harness
+  from silently selecting newer registry dependencies. The harness is wired into
+  `foundation-sdk-proof` before the release WASM build.
+- The harness also imports the retained representative 1Password CXF export through
+  the public `ExporterClient::import_cxf` API, decrypts the resulting SDK ciphers,
+  and verifies representative login, card, Wi-Fi, custom-field, and note data. The
+  complete Safeory SDK behavior harness now passes 3/3 tests locally against the
+  cleaned pinned SDK. This closes the 1Password fixture gate without adopting any
+  Bitwarden frontend/import UI.
 
 **Exit gate:** Safeory can rely on the adapted backend/core password-manager
 foundation without adopting Bitwarden's frontend.
