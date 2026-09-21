@@ -704,9 +704,22 @@ Phase 0.6 crypto evidence (2026-09-21):
   cryptographic isolation boundary.
 - The full adapted SDK behavior harness now passes 9/9 tests locally; the focused
   32-Space crypto test completes in roughly 0.01s on this development host. No
-  numeric unlock/sync/memory/navigation budgets are defined in the repository yet,
-  so the aggregate resource-budget gate remains open rather than inventing a
-  threshold after the measurement.
+  numeric unlock/sync/memory/navigation budgets were previously defined, so that
+  aggregate gate stayed open rather than accepting a post-hoc threshold.
+- The Phase 0 resource budget is now fixed before CI measurement at **32 total
+  Spaces**, **2 KiB maximum raw symmetric key material** for Alice's user key plus
+  31 organization/Space keys, **64 KiB maximum serialized household topology**,
+  **32 navigation entries** with one opaque encrypted-manifest reference per
+  Space, and **2 seconds maximum** for the 32-item unlock-like decrypt sweep. The
+  limits are regression ceilings, not performance targets for production UI.
+- The corresponding local proofs pass: the pinned SDK uses exactly **2,048
+  bytes** of encoded AES-256-CBC-HMAC key material, the 32-Space topology is
+  **18,970 bytes**, navigation contains exactly **32** bounded Space IDs, and the
+  representative decrypt sweep completed in roughly **1.65 ms** on this host.
+  `vault-sync` owns the deterministic topology/navigation budget assertion while
+  the pinned SDK behavior harness owns key-material and decrypt-sweep assertions.
+  The aggregate resource-budget checkbox remains open until both assertions pass
+  on Linux CI.
 - The remaining Bob-removal gate is intentionally still open: the crypto proof
   establishes that a removed member without K2 cannot read future writes, but the
   server still needs to prove that membership removal actually stops future

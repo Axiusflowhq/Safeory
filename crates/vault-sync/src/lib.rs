@@ -980,6 +980,68 @@ mod tests {
     }
 
     #[test]
+    fn thirty_two_space_topology_stays_within_phase_zero_sync_and_navigation_budget() {
+        const SPACE_TARGET: usize = 32;
+        const TOPOLOGY_BUDGET_BYTES: usize = 64 * 1024;
+
+        let mut migration = SingleOwnerMigrationV1::new([]);
+        let household_id = migration.topology.household.household_id;
+        let owner_membership_id = migration.topology.memberships[0].membership_id;
+        let owner_device_id = migration.topology.accounts[0].device_ids[0];
+
+        for _ in 1..SPACE_TARGET {
+            let space_id = SpaceId::new();
+            migration.topology.spaces.push(SpaceV1 {
+                format_version: DOMAIN_FORMAT_VERSION,
+                space_id,
+                household_id,
+                kind: SpaceKind::Purpose,
+                encrypted_manifest_object_id: ObjectId::new(),
+                key_generation: 1,
+                revision: 0,
+            });
+            migration.topology.household.space_ids.push(space_id);
+            migration.topology.space_members.push(SpaceMemberV1 {
+                format_version: DOMAIN_FORMAT_VERSION,
+                space_id,
+                membership_id: owner_membership_id,
+                access: SpaceAccess::Manage,
+                envelope_object_id: ObjectId::new(),
+                device_id: owner_device_id,
+                key_generation: 1,
+                revision: 0,
+            });
+        }
+
+        migration
+            .validate()
+            .expect("32-Space topology must validate");
+        assert_eq!(migration.topology.spaces.len(), SPACE_TARGET);
+        assert_eq!(migration.topology.household.space_ids.len(), SPACE_TARGET);
+        assert_eq!(migration.topology.space_members.len(), SPACE_TARGET);
+
+        let navigation_space_ids: Vec<_> = migration
+            .topology
+            .spaces
+            .iter()
+            .map(|space| space.space_id)
+            .collect();
+        assert_eq!(navigation_space_ids.len(), SPACE_TARGET);
+
+        let serialized = serde_json::to_vec(&migration.topology).expect("serialize topology");
+        assert!(
+            serialized.len() <= TOPOLOGY_BUDGET_BYTES,
+            "32-Space topology uses {} bytes, budget is {TOPOLOGY_BUDGET_BYTES}",
+            serialized.len()
+        );
+        eprintln!(
+            "32-Space topology: {} bytes / {TOPOLOGY_BUDGET_BYTES} byte budget; {} navigation entries",
+            serialized.len(),
+            navigation_space_ids.len()
+        );
+    }
+
+    #[test]
     fn topology_authorization_binds_account_device_scope_and_access() {
         let migration = SingleOwnerMigrationV1::new([]);
         let topology = &migration.topology;

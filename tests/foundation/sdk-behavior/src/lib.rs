@@ -50,6 +50,8 @@ pub mod fixture_support {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use std::{fs, path::Path};
 
     use bitwarden_api_api::models::CipherDetailsResponseModel;
@@ -480,7 +482,12 @@ mod tests {
 
     #[test]
     fn safeory_spaces_use_independent_key_domains_and_rewrap_on_move() {
+        const SPACE_TARGET: usize = 32;
+        const KEY_MATERIAL_BUDGET_BYTES: usize = 2 * 1024;
+        const UNLOCK_LIKE_DECRYPT_BUDGET: Duration = Duration::from_secs(2);
+
         let alice_user_key = SymmetricCryptoKey::make_aes256_cbc_hmac_key();
+        let alice_user_key_bytes = alice_user_key.to_encoded().as_ref().len();
         let bob_user_key = SymmetricCryptoKey::make_aes256_cbc_hmac_key();
         let carol_user_key = SymmetricCryptoKey::make_aes256_cbc_hmac_key();
 
@@ -494,6 +501,18 @@ mod tests {
         let space_keys: Vec<SymmetricCryptoKey> = (0..31)
             .map(|_| SymmetricCryptoKey::make_aes256_cbc_hmac_key())
             .collect();
+        let retained_key_material_bytes = alice_user_key_bytes
+            + space_keys
+                .iter()
+                .map(|key| key.to_encoded().as_ref().len())
+                .sum::<usize>();
+        assert!(
+            retained_key_material_bytes <= KEY_MATERIAL_BUDGET_BYTES,
+            "32-Space key material uses {retained_key_material_bytes} bytes, budget is {KEY_MATERIAL_BUDGET_BYTES}"
+        );
+        eprintln!(
+            "32-Space key material: {retained_key_material_bytes} bytes / {KEY_MATERIAL_BUDGET_BYTES} byte budget"
+        );
         for (id, key) in space_ids.iter().zip(space_keys.iter()) {
             install_space_key(&alice, *id, key.clone());
         }
@@ -591,7 +610,7 @@ mod tests {
 
         // Exercise all 32 domains (Personal + 31 independently keyed Spaces) in one unlock-like
         // context. Every organization ciphertext decrypts only because Alice has that exact slot.
-        let mut all_space_items = Vec::with_capacity(32);
+        let mut all_space_items = Vec::with_capacity(SPACE_TARGET);
         all_space_items.push(personal);
         for (index, id) in space_ids.iter().enumerate() {
             all_space_items.push(encrypt_space_item(
@@ -600,11 +619,20 @@ mod tests {
                 &format!("Space {:02}", index + 1),
             ));
         }
-        assert_eq!(all_space_items.len(), 32);
+        assert_eq!(all_space_items.len(), SPACE_TARGET);
+        let unlock_like_started = Instant::now();
         for cipher in &all_space_items {
             let decrypted: CipherView = alice.decrypt(cipher).unwrap();
             assert!(!decrypted.name.is_empty());
         }
+        let unlock_like_elapsed = unlock_like_started.elapsed();
+        assert!(
+            unlock_like_elapsed <= UNLOCK_LIKE_DECRYPT_BUDGET,
+            "32-Space decrypt sweep took {unlock_like_elapsed:?}, budget is {UNLOCK_LIKE_DECRYPT_BUDGET:?}"
+        );
+        eprintln!(
+            "32-Space decrypt sweep: {unlock_like_elapsed:?} / {UNLOCK_LIKE_DECRYPT_BUDGET:?} budget"
+        );
     }
 
     #[tokio::test]
