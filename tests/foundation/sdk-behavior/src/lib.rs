@@ -244,11 +244,7 @@ mod tests {
         ];
         for index in 4..=31 {
             let id = space_id(index);
-            install_space_key(
-                &alice,
-                id,
-                SymmetricCryptoKey::make_aes256_cbc_hmac_key(),
-            );
+            install_space_key(&alice, id, SymmetricCryptoKey::make_aes256_cbc_hmac_key());
             all_space_items.push(encrypt_space_item(
                 &alice,
                 Some(id),
@@ -320,15 +316,19 @@ mod tests {
 
         // Moving a record between Spaces rewraps its per-record cipher key without exposing
         // plaintext or re-encrypting the payload fields.
-        let mut moved = advisor.clone();
-        let wrapped_key_before = moved.key.as_ref().unwrap().to_string();
-        moved
+        let mut moved_view: CipherView = alice.decrypt(&advisor).unwrap();
+        let wrapped_key_before = moved_view.key.as_ref().unwrap().to_string();
+        moved_view
             .move_to_organization(&mut alice.context(), travel_space)
             .unwrap();
-        assert_eq!(moved.organization_id, Some(travel_space));
-        assert_ne!(wrapped_key_before, moved.key.as_ref().unwrap().to_string());
-        let moved_view: CipherView = alice.decrypt(&moved).unwrap();
-        assert_eq!(moved_view.name, "Advisor shared");
+        assert_eq!(moved_view.organization_id, Some(travel_space));
+        assert_ne!(
+            wrapped_key_before,
+            moved_view.key.as_ref().unwrap().to_string()
+        );
+        let moved: bitwarden_vault::Cipher = alice.encrypt(moved_view).unwrap();
+        let moved_decrypted: CipherView = alice.decrypt(&moved).unwrap();
+        assert_eq!(moved_decrypted.name, "Advisor shared");
         let carol_after_move: Result<CipherView, _> = carol.decrypt(&moved);
         assert!(carol_after_move.is_err());
     }
