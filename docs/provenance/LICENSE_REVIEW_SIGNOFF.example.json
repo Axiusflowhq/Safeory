@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "reviewer": {
+    "name": "REPLACE_WITH_QUALIFIED_REVIEWER",
+    "organization": "REPLACE_WITH_REVIEW_ORGANIZATION",
+    "qualification": "REPLACE_WITH_REVIEWER_QUALIFICATION"
+  },
+  "reviewed_at": "REPLACE_WITH_ISO_8601_TIMESTAMP",
+  "safeory_commit": "REPLACE_WITH_SAFEORY_COMMIT",
+  "github_actions_run_id": "REPLACE_WITH_RUN_ID",
+  "provenance_artifact_id": "REPLACE_WITH_ARTIFACT_ID",
+  "provenance_artifact_name": "safeory-foundation-provenance",
+  "artifact_summary": {
+    "sdk_components": "REPLACE_WITH_INTEGER",
+    "server_components": "REPLACE_WITH_INTEGER",
+    "unknown_license_count": "REPLACE_WITH_INTEGER",
+    "review_sensitive_license_count": "REPLACE_WITH_INTEGER"
+  },
+  "artifact_manifest_sha256": "REPLACE_WITH_SHA256",
+  "artifact_hashes": {
+    "generation-summary.json": "REPLACE_WITH_SHA256",
+    "license-inventory.json": "REPLACE_WITH_SHA256",
+    "LEGAL_REVIEW_SUMMARY.md": "REPLACE_WITH_SHA256",
+    "QUALIFIED_LICENSE_REVIEW_CHECKLIST.md": "REPLACE_WITH_SHA256",
+    "nuget-license-review-evidence.json": "REPLACE_WITH_SHA256"
+  },
+  "conclusion": "approved",
+  "conditions": [],
+  "notes": "REPLACE_WITH_REVIEW_NOTES"
+}

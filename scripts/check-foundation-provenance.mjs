@@ -50,6 +50,7 @@ for (const relative of [
   "THIRD_PARTY_NOTICES.md",
   "LEGAL_REVIEW_SUMMARY.md",
   "QUALIFIED_LICENSE_REVIEW_CHECKLIST.md",
+  "LICENSE_REVIEW_SIGNOFF.example.json",
   "nuget-license-review-evidence.json",
   "license-inventory.json",
   "restricted-removals.json",
@@ -82,6 +83,25 @@ if (
 ) {
   fail(
     "generated qualified-review checklist does not match the tracked checklist",
+  );
+}
+const generatedSignoffExamplePath = path.join(
+  root,
+  "LICENSE_REVIEW_SIGNOFF.example.json",
+);
+const trackedSignoffExamplePath = path.join(
+  safeoryRoot,
+  "docs",
+  "provenance",
+  "LICENSE_REVIEW_SIGNOFF.example.json",
+);
+if (
+  fs.existsSync(generatedSignoffExamplePath) &&
+  fs.readFileSync(generatedSignoffExamplePath, "utf8") !==
+    fs.readFileSync(trackedSignoffExamplePath, "utf8")
+) {
+  fail(
+    "generated license-review sign-off template does not match the tracked template",
   );
 }
 if (!sourceOnly) {
@@ -329,6 +349,18 @@ if (removals) {
 
 const summary = readJson("generation-summary.json");
 if (summary) {
+  if (!/^[0-9a-f]{40}$/.test(summary.safeory_commit ?? "")) {
+    fail("generation summary safeory_commit must be a full lowercase Git SHA");
+  }
+  if (fs.existsSync(legalReviewSummaryPath)) {
+    const legalReviewSummary = fs.readFileSync(legalReviewSummaryPath, "utf8");
+    const marker = `Safeory revision: \`${summary.safeory_commit}\``;
+    if (!legalReviewSummary.includes(marker)) {
+      fail(
+        "legal review summary Safeory revision does not match generation summary",
+      );
+    }
+  }
   if (summary.sdk_components !== sdkComponentCount) {
     fail("generation summary SDK component count does not match the SBOM");
   }

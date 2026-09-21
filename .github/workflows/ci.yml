@@ -411,6 +411,9 @@ jobs:
       - name: Validate generated provenance artifacts
         run: node scripts/check-foundation-provenance.mjs docs/provenance/generated
 
+      - name: Exercise qualified-review sign-off tooling
+        run: node scripts/test-qualified-license-review-tooling.mjs docs/provenance/generated
+
       - name: Upload foundation provenance bundle
         uses: actions/upload-artifact@v7
         with:

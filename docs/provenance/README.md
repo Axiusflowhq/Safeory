@@ -52,9 +52,15 @@ The generated directory is intentionally ignored by Git. CI publishes it as the
 - `QUALIFIED_LICENSE_REVIEW_CHECKLIST.md` — the exact tracked review/sign-off
   checklist copied into the artifact so counsel/reviewers can work from a
   self-contained evidence bundle.
+- `LICENSE_REVIEW_SIGNOFF.example.json` — machine-readable sign-off template.
+  Prepare a hash-bound draft with
+  `bun run prepare:license-review -- <artifact-dir> <run-id> <artifact-id> <draft-json>`.
+  After qualified review, save the completed record as
+  `docs/provenance/QUALIFIED_LICENSE_REVIEW_SIGNOFF.json` and validate it with
+  `bun run check:license-review -- <signoff> <artifact-dir>`.
 - `THIRD_PARTY_NOTICES.md` — generated provenance/notices index for the bundle.
-- `generation-summary.json` — source/component counts and unresolved-license
-  count.
+- `generation-summary.json` — the generating Safeory commit plus source/component,
+  unresolved-license, and review-sensitive counts.
 
 `scripts/check-foundation-provenance.mjs` validates the generated bundle before
 CI uploads it. It verifies the pinned commits, source-manifest hashes/shape,
@@ -72,3 +78,8 @@ These scripts collect evidence; they do not make a legal determination. Unknown
 or non-standard license metadata must be resolved or explicitly reviewed, and the
 qualified-license-review item in `PLAN.md` must remain open until that review is
 actually completed.
+
+The sign-off verifier validates artifact/commit integrity, required fields,
+conclusion shape, and condition status. It does **not** authenticate that the named
+reviewer is legally qualified; that remains an external human/organizational
+control.

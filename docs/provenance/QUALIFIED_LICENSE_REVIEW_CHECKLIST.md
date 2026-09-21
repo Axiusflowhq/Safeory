@@ -90,6 +90,22 @@ available:
 
 Complete this section only after qualified review of the exact generated artifact.
 
+For a machine-checkable record, first generate the hash-bound draft from the exact
+downloaded artifact:
+
+`bun run prepare:license-review -- <downloaded-provenance-artifact-directory> <github-actions-run-id> <artifact-id> <draft-json>`
+
+After qualified review, save the completed record as
+`docs/provenance/QUALIFIED_LICENSE_REVIEW_SIGNOFF.json` and run:
+
+`bun run check:license-review -- docs/provenance/QUALIFIED_LICENSE_REVIEW_SIGNOFF.json <downloaded-provenance-artifact-directory>`
+
+That verifier binds the review to the artifact hashes and reviewed Safeory commit,
+rejects blocking conclusions or unsatisfied conditions, and permits only the
+sign-off record plus `PLAN.md` gate closure after the reviewed commit.
+It validates integrity and record structure; it does not independently authenticate
+the reviewer's professional qualification.
+
 - Reviewer / organization:
 - Review date:
 - Safeory commit reviewed:

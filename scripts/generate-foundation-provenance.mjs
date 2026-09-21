@@ -112,12 +112,25 @@ const qualifiedReviewChecklistSource = path.join(
   "provenance",
   "QUALIFIED_LICENSE_REVIEW_CHECKLIST.md",
 );
+const qualifiedReviewSignoffExampleSource = path.join(
+  safeoryRoot,
+  "docs",
+  "provenance",
+  "LICENSE_REVIEW_SIGNOFF.example.json",
+);
 if (!fs.existsSync(qualifiedReviewChecklistSource)) {
   fail("missing docs/provenance/QUALIFIED_LICENSE_REVIEW_CHECKLIST.md");
+}
+if (!fs.existsSync(qualifiedReviewSignoffExampleSource)) {
+  fail("missing docs/provenance/LICENSE_REVIEW_SIGNOFF.example.json");
 }
 fs.copyFileSync(
   qualifiedReviewChecklistSource,
   path.join(outputRoot, "QUALIFIED_LICENSE_REVIEW_CHECKLIST.md"),
+);
+fs.copyFileSync(
+  qualifiedReviewSignoffExampleSource,
+  path.join(outputRoot, "LICENSE_REVIEW_SIGNOFF.example.json"),
 );
 
 function sha256File(file) {
@@ -495,6 +508,9 @@ const licenseRows = [...sdkComponents, ...serverComponents].map(
 const unknownLicenseCount = licenseRows.filter(
   (row) => row.license === "UNKNOWN",
 ).length;
+const safeoryCommit = run("git", ["rev-parse", "HEAD"], {
+  cwd: safeoryRoot,
+});
 const unknownLicenseRows = licenseRows
   .filter((row) => row.license === "UNKNOWN")
   .sort((left, right) =>
@@ -550,6 +566,7 @@ license metadata that requires qualified review before public distribution.
 
 ## Pinned inputs
 
+- Safeory revision: \`${safeoryCommit}\`
 - Bitwarden SDK: \`${seed.sources.sdk.commit}\`
 - Bitwarden server: \`${seed.sources.server.commit}\`
 - Bitwarden clients reference only: \`${seed.sources.clients.canonical_import_commit}\`
@@ -659,6 +676,8 @@ review.
   \`LEGAL_REVIEW_SUMMARY.md\`.
 - Qualified review steps and sign-off fields are included in
   \`QUALIFIED_LICENSE_REVIEW_CHECKLIST.md\`.
+- The machine-readable sign-off template is included as
+  \`LICENSE_REVIEW_SIGNOFF.example.json\`.
 - SDK dependency SBOM: \`sbom/sdk.cdx.json\`.
 ${sourceOnly ? "- Server dependency SBOM was intentionally omitted by source-only generation.\n" : "- Server dependency SBOM: `sbom/server.cdx.json`.\n"}
 
@@ -669,6 +688,7 @@ fs.writeFileSync(path.join(outputRoot, "THIRD_PARTY_NOTICES.md"), notices);
 writeJson("generation-summary.json", {
   schema_version: 1,
   source_only: sourceOnly,
+  safeory_commit: safeoryCommit,
   sdk_commit: seed.sources.sdk.commit,
   server_commit: seed.sources.server.commit,
   clients_reference_commit: seed.sources.clients.canonical_import_commit,
