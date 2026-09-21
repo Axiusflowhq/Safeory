@@ -1,0 +1,15 @@
+[package]
+name = "safeory-foundation-continuity-behavior"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+bitwarden-core = { path = "../../../.proof/bitwarden-sdk-continuity/crates/bitwarden-core", features = ["internal", "test-fixtures"] }
+bitwarden-crypto = { path = "../../../.proof/bitwarden-sdk-continuity/crates/bitwarden-crypto" }
+bitwarden-vault = { path = "../../../.proof/bitwarden-sdk-continuity/crates/bitwarden-vault" }
+serde_json = "=1.0.151"
+sha2 = "=0.11.0"
+vault-sharing = { path = "../../../crates/vault-sharing" }
+
+[workspace]

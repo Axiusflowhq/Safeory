@@ -717,18 +717,56 @@ inferred from UI permissions.
 
 ## 0.7 Prove the continuity crypto seam
 
-- [ ] Add a disposable selected-key operation in the cleaned foundation core.
-- [ ] Seal one record key to a trustee-device public key.
-- [ ] Seal one Space key to a trustee-device public key.
-- [ ] Open the capsule on a separate trustee device/context.
-- [ ] Ensure raw account/user/Space/record keys never appear in ordinary JS,
+- [x] Add a disposable selected-key operation in the cleaned foundation core.
+- [x] Seal one record key to a trustee-device public key.
+- [x] Seal one Space key to a trustee-device public key.
+- [x] Open the capsule on a separate trustee device/context.
+- [x] Ensure raw account/user/Space/record keys never appear in ordinary JS,
       browser storage, logs, or network traffic.
-- [ ] Run the existing Safeory timed-release state machine using only opaque
+- [x] Run the existing Safeory timed-release state machine using only opaque
       capsule references.
-- [ ] Measure the security-sensitive patch surface that must be maintained.
+- [x] Measure the security-sensitive patch surface that must be maintained.
 
 **Exit gate:** selected continuity release is possible without a whole-vault
 backdoor or JavaScript raw-key export.
+
+Phase 0.7 implementation evidence (2026-09-21):
+
+- Added a disposable continuity-only adapter over the pinned cleaned SDK. The
+  adapter exposes exactly two native Rust callback operations: unwrap one
+  selected per-record cipher key, or select one organization/Space key. The
+  encoded key is held in `Zeroizing<Vec<u8>>` only for the callback lifetime;
+  there is no WASM/UniFFI binding and no generic account/user-key export API.
+- The adapter checker constrains the security-sensitive foundation delta to
+  exactly three `bitwarden-vault` files. The current measured delta is
+  **+46/-3 lines**, below the proof budget, and is independently replayable
+  from the pinned SDK commit after the OSS-only cleanup.
+- The Safeory-owned continuity behavior harness seals a selected record key and
+  a selected Space key directly from the native callback into
+  `vault-sharing::ShareEnvelopeV2` capsules for a trustee-device X25519 public
+  key. An unrelated device is rejected. The intended trustee opens each capsule
+  in a separate context; the released record key decrypts only the selected
+  record, while the released Space key lets a trustee context decrypt that
+  Space's record without receiving Alice's Personal/user key.
+- The serialized transport object contains authenticated capsule ciphertext and
+  public metadata only; the proof asserts there is no plaintext/key field. A
+  repository checker rejects either selected-key bridge name anywhere under
+  ordinary `apps/`, `packages/`, or `crates/vault-wasm`, preventing the proof
+  seam from becoming a JavaScript/browser raw-key API. The mixed proof lock is
+  also checked against the union of Safeory's root lock and the cleaned SDK lock;
+  all 382 resolved non-harness packages are already pinned by one of those two
+  graphs.
+- `vault-emergency` has a separate timed-release test whose `what` value is only
+  an opaque `capsule:sha256:<digest>` reference. It progresses through waiting
+  and release without ever receiving capsule bytes or vault key material; only
+  after authorization would the trustee client open the separately stored
+  capsule.
+- Local validation passes for both halves with `--locked` dependencies. CI now
+  has a dedicated `foundation-continuity-proof` job that recreates the cleaned
+  pinned SDK, reapplies/checks the continuity adapter, enforces the JS/WASM and
+  lock-union boundaries, runs the trustee capsule proof, and runs the opaque
+  timed-release proof. The Phase 0 final selected-key gate remains open until
+  that Linux job is green.
 
 ## 0.8 Phase 0 final gate
 

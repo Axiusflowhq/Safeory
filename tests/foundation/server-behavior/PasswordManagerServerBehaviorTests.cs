@@ -7,6 +7,8 @@ using Bit.Api.IntegrationTest.Helpers;
 using Bit.Api.Vault.Models;
 using Bit.Api.Vault.Models.Request;
 using Bit.Api.Vault.Models.Response;
+using Bit.Core.AdminConsole.Entities;
+using Bit.Core.Billing.Enums;
 using Bit.Core.Enums;
 using Bit.Core.Models.Data;
 using Bit.Core.Repositories;
@@ -404,13 +406,35 @@ public sealed class PasswordManagerServerBehaviorTests : IClassFixture<ApiApplic
         await _factory.LoginWithNewAccount(aliceEmail, MasterPasswordHash);
         await _factory.LoginWithNewAccount(bobEmail, MasterPasswordHash);
 
-        var familySignup = await OrganizationTestHelpers.SignUpAsync(
-            _factory,
-            ownerEmail: aliceEmail,
-            billingEmail: aliceEmail,
-            name: "Safeory Family Space",
-            ownerKey: "family-key-for-alice");
-        var family = familySignup.Item1;
+        var userRepository = _factory.GetService<IUserRepository>();
+        var alice = await userRepository.GetByEmailAsync(aliceEmail);
+        Assert.NotNull(alice);
+
+        // Arrange the sharing boundary directly in persistence. The cloud organization signup
+        // command depends on the hosted pricing API, which is deliberately absent from this
+        // cleaned self-hosted behavior fixture and is unrelated to Space delivery semantics.
+        var organizationRepository = _factory.GetService<IOrganizationRepository>();
+        var family = await organizationRepository.CreateAsync(new Organization
+        {
+            Name = "Safeory Family Space",
+            BillingEmail = aliceEmail,
+            Plan = "Families",
+            PlanType = PlanType.FamiliesAnnually,
+            Seats = 6,
+            MaxCollections = 50,
+            Enabled = true,
+            UsePasswordManager = true,
+        });
+
+        var organizationUserRepository = _factory.GetService<IOrganizationUserRepository>();
+        await organizationUserRepository.CreateAsync(new OrganizationUser
+        {
+            OrganizationId = family.Id,
+            UserId = alice!.Id,
+            Key = "family-key-for-alice",
+            Status = OrganizationUserStatusType.Confirmed,
+            Type = OrganizationUserType.Owner,
+        });
 
         var bobMembership = await OrganizationTestHelpers.CreateUserAsync(
             _factory,
@@ -418,7 +442,6 @@ public sealed class PasswordManagerServerBehaviorTests : IClassFixture<ApiApplic
             bobEmail,
             OrganizationUserType.User);
         bobMembership.Key = "family-key-for-bob";
-        var organizationUserRepository = _factory.GetService<IOrganizationUserRepository>();
         await organizationUserRepository.ReplaceAsync(bobMembership);
 
         var familyCollection = await OrganizationTestHelpers.CreateCollectionAsync(

@@ -167,6 +167,55 @@ jobs:
       - name: Verify restored server dependency boundary
         run: node scripts/check-bitwarden-server-proof.mjs .proof/bitwarden-server-ci --require-restored
 
+  foundation-continuity-proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Node 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Install Rust 1.98.1
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+          rustup default 1.98.1
+
+      - name: Clone pinned Bitwarden SDK continuity input
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .proof
+          SDK_REPOSITORY="$(node -p "require('./docs/provenance/foundation-seed.json').sources.sdk.repository")"
+          SDK_COMMIT="$(node -p "require('./docs/provenance/foundation-seed.json').sources.sdk.commit")"
+          git clone --no-checkout "$SDK_REPOSITORY" .proof/bitwarden-sdk-continuity
+          git -C .proof/bitwarden-sdk-continuity checkout --detach "$SDK_COMMIT"
+          test -z "$(git -C .proof/bitwarden-sdk-continuity status --porcelain)"
+
+      - name: Prepare cleaned SDK and selected-key continuity bridge
+        run: |
+          node scripts/prepare-bitwarden-sdk-proof.mjs .proof/bitwarden-sdk-continuity
+          node scripts/check-bitwarden-sdk-proof.mjs .proof/bitwarden-sdk-continuity
+          node scripts/prepare-safeory-continuity-sdk-proof.mjs .proof/bitwarden-sdk-continuity
+          node scripts/check-safeory-continuity-sdk-proof.mjs .proof/bitwarden-sdk-continuity
+
+      - name: Verify continuity dependency and JS/WASM boundary
+        run: node scripts/check-safeory-continuity-behavior-proof.mjs
+
+      - name: Run selected-key trustee capsule proof
+        run: cargo test --manifest-path tests/foundation/continuity-behavior/Cargo.toml --locked
+
+      - name: Run opaque-reference timed-release proof
+        run: cargo test -p vault-emergency timed_release_uses_only_an_opaque_capsule_reference --locked
+
+      - name: Re-check selected-key patch boundary
+        run: |
+          node scripts/check-bitwarden-sdk-proof.mjs .proof/bitwarden-sdk-continuity
+          node scripts/check-safeory-continuity-sdk-proof.mjs .proof/bitwarden-sdk-continuity
+          node scripts/check-safeory-continuity-behavior-proof.mjs
+
   foundation-server-behavior:
     runs-on: ubuntu-latest
     timeout-minutes: 35

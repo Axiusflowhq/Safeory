@@ -1,4 +1,5 @@
 /target/
+tests/foundation/continuity-behavior/target/
 /node_modules/
 /.proof/
 /docs/provenance/generated/

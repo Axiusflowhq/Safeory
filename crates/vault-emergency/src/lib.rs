@@ -707,6 +707,56 @@ mod tests {
     }
 
     #[test]
+    fn timed_release_uses_only_an_opaque_capsule_reference() {
+        let trustee = Uuid::new_v4();
+        let capsule_ref =
+            "capsule:sha256:7a68e9b0b51c1d473ab4c2fdc250db53d261a923e6f047e95d78fa39cde0d9f1";
+        let mut policy = AccessPolicy::new(true);
+        policy
+            .add_grant(
+                AccessGrant::new(
+                    trustee,
+                    capsule_ref,
+                    Permission::View,
+                    AccessCondition::Emergency,
+                    WaitPeriod::OneHour,
+                    GrantDuration::OneHour,
+                    0,
+                    BTreeSet::new(),
+                )
+                .expect("opaque capsule grant"),
+            )
+            .expect("add grant");
+
+        let mut request = begin_release_request(
+            &policy,
+            capsule_ref,
+            AccessCondition::Emergency,
+            trustee,
+            11,
+            1_000,
+        )
+        .expect("begin opaque capsule release");
+        assert_eq!(request.what(), capsule_ref);
+        assert_eq!(
+            request.status(&policy, 11, 1_100).expect("waiting"),
+            ReleaseStatus::Waiting {
+                not_before: 4_600,
+                remaining_seconds: 3_500,
+            }
+        );
+        assert_eq!(
+            request.release(&policy, 11, 4_600).expect("release"),
+            ReleaseStatus::Released {
+                permission: Permission::View,
+                released_at: 4_600,
+                expires_at: Some(8_200),
+            }
+        );
+        assert_eq!(request.what(), capsule_ref);
+    }
+
+    #[test]
     fn timed_release_requires_distinct_configured_approvals() {
         let trustee = Uuid::new_v4();
         let first = Uuid::new_v4();
