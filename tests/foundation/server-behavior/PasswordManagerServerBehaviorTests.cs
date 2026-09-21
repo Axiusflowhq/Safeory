@@ -3,13 +3,16 @@ using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
 using Bit.Api.IntegrationTest.Factories;
+using Bit.Api.IntegrationTest.Helpers;
 using Bit.Api.Vault.Models;
 using Bit.Api.Vault.Models.Request;
 using Bit.Api.Vault.Models.Response;
 using Bit.Core.Enums;
+using Bit.Core.Models.Data;
 using Bit.Core.Repositories;
 using Bit.Core.Vault.Enums;
 using Bit.Core.Vault.Models.Data;
+using Bit.Core.Vault.Repositories;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -392,6 +395,81 @@ public sealed class PasswordManagerServerBehaviorTests : IClassFixture<ApiApplic
         Assert.Equal(UpdatedBlobKey, restoredCarrier.GetProperty("key").GetString());
     }
 
+    [Fact]
+    public async Task RevokedFamilyMemberStopsReceivingOrganizationKeyAndCipher()
+    {
+        var suffix = Guid.NewGuid().ToString("N");
+        var aliceEmail = $"safeory-space-alice-{suffix}@example.com";
+        var bobEmail = $"safeory-space-bob-{suffix}@example.com";
+        await _factory.LoginWithNewAccount(aliceEmail, MasterPasswordHash);
+        await _factory.LoginWithNewAccount(bobEmail, MasterPasswordHash);
+
+        var familySignup = await OrganizationTestHelpers.SignUpAsync(
+            _factory,
+            ownerEmail: aliceEmail,
+            billingEmail: aliceEmail,
+            name: "Safeory Family Space",
+            ownerKey: "family-key-for-alice");
+        var family = familySignup.Item1;
+
+        var bobMembership = await OrganizationTestHelpers.CreateUserAsync(
+            _factory,
+            family.Id,
+            bobEmail,
+            OrganizationUserType.User);
+        bobMembership.Key = "family-key-for-bob";
+        var organizationUserRepository = _factory.GetService<IOrganizationUserRepository>();
+        await organizationUserRepository.ReplaceAsync(bobMembership);
+
+        var familyCollection = await OrganizationTestHelpers.CreateCollectionAsync(
+            _factory,
+            family.Id,
+            "Safeory Family records",
+            users:
+            [
+                new CollectionAccessSelection
+                {
+                    Id = bobMembership.Id,
+                    ReadOnly = false,
+                    HidePasswords = false,
+                    Manage = false,
+                },
+            ]);
+
+        var familyCipher = new Bit.Core.Vault.Entities.Cipher
+        {
+            OrganizationId = family.Id,
+            Type = CipherType.SecureNote,
+            Data = BlobData,
+            Key = BlobKey,
+            Reprompt = CipherRepromptType.None,
+        };
+        familyCipher.SetNewId();
+        var cipherRepository = _factory.GetService<ICipherRepository>();
+        await cipherRepository.CreateAsync(familyCipher, [familyCollection.Id]);
+
+        var bobTokens = await _factory.Identity.TokenFromPasswordAsync(
+            bobEmail,
+            MasterPasswordHash,
+            $"safeory-family-bob-{suffix}",
+            deviceType: DeviceType.ChromeBrowser,
+            deviceName: "safeory-family-bob");
+        using var bobClient = _factory.CreateAuthedClient(bobTokens.Token);
+
+        var beforeRemoval = await Sync(bobClient);
+        var deliveredOrganization = FindProfileOrganization(beforeRemoval.RootElement, family.Id);
+        Assert.Equal("family-key-for-bob", deliveredOrganization.GetProperty("key").GetString());
+        var deliveredCipher = FindCipher(beforeRemoval.RootElement, familyCipher.Id);
+        Assert.Equal(BlobData, deliveredCipher.GetProperty("data").GetString());
+        Assert.Equal(BlobKey, deliveredCipher.GetProperty("key").GetString());
+
+        await organizationUserRepository.RevokeAsync(bobMembership.Id, RevocationReason.Manual);
+
+        var afterRemoval = await Sync(bobClient);
+        Assert.Null(TryFindProfileOrganization(afterRemoval.RootElement, family.Id));
+        Assert.Null(TryFindCipher(afterRemoval.RootElement, familyCipher.Id));
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_attachmentDirectory))
@@ -485,6 +563,30 @@ public sealed class PasswordManagerServerBehaviorTests : IClassFixture<ApiApplic
             if (cipher.GetProperty("id").GetGuid() == id)
             {
                 return cipher.Clone();
+            }
+        }
+
+        return null;
+    }
+
+    private static JsonElement FindProfileOrganization(JsonElement sync, Guid id) =>
+        TryFindProfileOrganization(sync, id)
+        ?? throw new Xunit.Sdk.XunitException($"organization {id} was missing from sync profile");
+
+    private static JsonElement? TryFindProfileOrganization(JsonElement sync, Guid id)
+    {
+        if (!sync.TryGetProperty("profile", out var profile) ||
+            !profile.TryGetProperty("organizations", out var organizations) ||
+            organizations.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        foreach (var organization in organizations.EnumerateArray())
+        {
+            if (organization.GetProperty("id").GetGuid() == id)
+            {
+                return organization.Clone();
             }
         }
 
