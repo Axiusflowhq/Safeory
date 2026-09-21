@@ -210,6 +210,14 @@ public sealed class PasswordManagerServerBehaviorTests : IClassFixture<ApiApplic
         var email = $"safeory-blob-{suffix}@example.com";
         await _factory.LoginWithNewAccount(email, MasterPasswordHash);
 
+        var users = _factory.GetService<IUserRepository>();
+        var user = await users.GetByEmailAsync(email);
+        Assert.NotNull(user);
+        user.Premium = true;
+        user.MaxStorageGb = 1;
+        user.Storage = 0;
+        await users.UpsertAsync(user);
+
         var device1Tokens = await _factory.Identity.TokenFromPasswordAsync(
             email,
             MasterPasswordHash,
@@ -261,6 +269,71 @@ public sealed class PasswordManagerServerBehaviorTests : IClassFixture<ApiApplic
         var preserved = FindCipher(afterRejectedDowngrade.RootElement, cipherId);
         Assert.Equal(BlobData, preserved.GetProperty("data").GetString());
         Assert.True(preserved.GetProperty("favorite").GetBoolean());
+
+        // Exercise the complete attachment lifecycle on the selected Safeory blob carrier:
+        // upload, second-device download, encrypted metadata rename, re-download, and delete.
+        var attachmentBytes = Encoding.UTF8.GetBytes("safeory-blob-carrier-opaque-attachment");
+        using var attachmentForm = new MultipartFormDataContent();
+        attachmentForm.Add(new StringContent(EncryptedValue), "key");
+        attachmentForm.Add(new ByteArrayContent(attachmentBytes), "data", "proof.bin");
+
+        var uploadResponse = await device1.PostAsync($"/ciphers/{cipherId}/attachment", attachmentForm);
+        uploadResponse.EnsureSuccessStatusCode();
+        using var uploadedCipher = JsonDocument.Parse(await uploadResponse.Content.ReadAsStringAsync());
+        var uploadedRevision = uploadedCipher.RootElement.GetProperty("revisionDate").GetDateTime();
+        var uploadedAttachment = uploadedCipher.RootElement.GetProperty("attachments")[0];
+        var attachmentId = uploadedAttachment.GetProperty("id").GetString();
+        Assert.False(string.IsNullOrWhiteSpace(attachmentId));
+
+        var persistedAttachmentPath = Path.Combine(_attachmentDirectory, cipherId.ToString(), attachmentId!);
+        Assert.True(File.Exists(persistedAttachmentPath));
+
+        using var initialMetadataResponse = await device2.GetAsync($"/ciphers/{cipherId}/attachment/{attachmentId}");
+        initialMetadataResponse.EnsureSuccessStatusCode();
+        using var initialMetadata = JsonDocument.Parse(await initialMetadataResponse.Content.ReadAsStringAsync());
+        var initialDownloadUrl = initialMetadata.RootElement.GetProperty("url").GetString();
+        Assert.False(string.IsNullOrWhiteSpace(initialDownloadUrl));
+        using var initialDownload = await device2.GetAsync(initialDownloadUrl);
+        initialDownload.EnsureSuccessStatusCode();
+        Assert.Equal(attachmentBytes, await initialDownload.Content.ReadAsByteArrayAsync());
+
+        var renameRequest = BlobRequest(uploadedRevision, favorite: true);
+        renameRequest.Attachments2 = new Dictionary<string, CipherAttachmentModel>
+        {
+            [attachmentId!] = new CipherAttachmentModel
+            {
+                FileName = EncryptedValue,
+                Key = EncryptedValue,
+            },
+        };
+        var renameResponse = await device1.PutAsJsonAsync($"/ciphers/{cipherId}", renameRequest);
+        renameResponse.EnsureSuccessStatusCode();
+        using var renamedCipher = JsonDocument.Parse(await renameResponse.Content.ReadAsStringAsync());
+        Assert.Equal(EncryptedValue,
+            renamedCipher.RootElement.GetProperty("attachments")[0].GetProperty("fileName").GetString());
+
+        using var renamedMetadataResponse = await device2.GetAsync($"/ciphers/{cipherId}/attachment/{attachmentId}");
+        renamedMetadataResponse.EnsureSuccessStatusCode();
+        using var renamedMetadata = JsonDocument.Parse(await renamedMetadataResponse.Content.ReadAsStringAsync());
+        Assert.Equal(EncryptedValue, renamedMetadata.RootElement.GetProperty("fileName").GetString());
+        var renamedDownloadUrl = renamedMetadata.RootElement.GetProperty("url").GetString();
+        Assert.False(string.IsNullOrWhiteSpace(renamedDownloadUrl));
+        using var renamedDownload = await device2.GetAsync(renamedDownloadUrl);
+        renamedDownload.EnsureSuccessStatusCode();
+        Assert.Equal(attachmentBytes, await renamedDownload.Content.ReadAsByteArrayAsync());
+
+        var secondDeviceAfterRename = await Sync(device2);
+        var carrierAfterRename = FindCipher(secondDeviceAfterRename.RootElement, cipherId);
+        Assert.Equal(EncryptedValue,
+            carrierAfterRename.GetProperty("attachments")[0].GetProperty("fileName").GetString());
+        Assert.Equal(BlobData, carrierAfterRename.GetProperty("data").GetString());
+
+        using var deleteAttachment = await device1.DeleteAsync($"/ciphers/{cipherId}/attachment/{attachmentId}");
+        deleteAttachment.EnsureSuccessStatusCode();
+        Assert.False(File.Exists(persistedAttachmentPath));
+
+        using var deletedMetadata = await device2.GetAsync($"/ciphers/{cipherId}/attachment/{attachmentId}");
+        Assert.Equal(HttpStatusCode.NotFound, deletedMetadata.StatusCode);
     }
 
     public void Dispose()
