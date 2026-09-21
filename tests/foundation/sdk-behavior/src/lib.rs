@@ -422,45 +422,63 @@ mod tests {
 
     #[tokio::test]
     async fn tracked_safeory_carrier_fixture_decrypts_to_representative_envelope() {
-        let fixture_path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/safeory-insurance-carrier.json");
-        let fixture: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(fixture_path).unwrap()).unwrap();
-        assert_eq!(fixture["fixture_version"], 1);
-        assert_eq!(fixture["record_id"], "11111111-1111-4111-8111-111111111111");
+        for (file, expected_variant, expected_title, expected_renewal) in [
+            (
+                "safeory-insurance-carrier.json",
+                "initial",
+                "Family health policy",
+                "2027-01-15",
+            ),
+            (
+                "safeory-insurance-carrier-updated.json",
+                "updated",
+                "Family health policy renewed",
+                "2028-01-15",
+            ),
+        ] {
+            let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("fixtures")
+                .join(file);
+            let fixture: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(fixture_path).unwrap()).unwrap();
+            assert_eq!(fixture["fixture_version"], 1);
+            assert_eq!(fixture["fixture_variant"], expected_variant);
+            assert_eq!(fixture["record_id"], "11111111-1111-4111-8111-111111111111");
 
-        let response = CipherDetailsResponseModel {
-            id: Some("11111111-1111-4111-8111-111111111111".parse().unwrap()),
-            r#type: Some(CipherType::SecureNote.into()),
-            data: Some(fixture["data"].as_str().unwrap().to_owned()),
-            key: Some(fixture["key"].as_str().unwrap().to_owned()),
-            favorite: Some(false),
-            edit: Some(true),
-            view_password: Some(true),
-            organization_use_totp: Some(false),
-            revision_date: Some("2026-09-21T00:00:01Z".to_owned()),
-            creation_date: Some("2026-09-21T00:00:00Z".to_owned()),
-            ..Default::default()
-        };
-        let cipher: bitwarden_vault::Cipher = response.try_into().unwrap();
-        let decrypted = client()
-            .await
-            .vault()
-            .ciphers()
-            .decrypt(cipher)
-            .await
-            .unwrap();
-        assert_eq!(decrypted.name, "Safeory insurance record");
-        assert_eq!(decrypted.notes.as_deref(), fixture["envelope"].as_str());
-        let envelope: serde_json::Value =
-            serde_json::from_str(decrypted.notes.as_deref().unwrap()).unwrap();
-        assert_eq!(envelope["marker"], "safeory.life_record");
-        assert_eq!(envelope["record_kind"], "insurance");
-        assert_eq!(envelope["data"]["title"], "Family health policy");
-        assert_eq!(
-            envelope["extensions"]["safeory.example.future"]["preserved"],
-            true
-        );
+            let response = CipherDetailsResponseModel {
+                id: Some("11111111-1111-4111-8111-111111111111".parse().unwrap()),
+                r#type: Some(CipherType::SecureNote.into()),
+                data: Some(fixture["data"].as_str().unwrap().to_owned()),
+                key: Some(fixture["key"].as_str().unwrap().to_owned()),
+                favorite: Some(false),
+                edit: Some(true),
+                view_password: Some(true),
+                organization_use_totp: Some(false),
+                revision_date: Some("2026-09-21T00:00:01Z".to_owned()),
+                creation_date: Some("2026-09-21T00:00:00Z".to_owned()),
+                ..Default::default()
+            };
+            let cipher: bitwarden_vault::Cipher = response.try_into().unwrap();
+            let decrypted = client()
+                .await
+                .vault()
+                .ciphers()
+                .decrypt(cipher)
+                .await
+                .unwrap();
+            assert_eq!(decrypted.name, "Safeory insurance record");
+            assert_eq!(decrypted.notes.as_deref(), fixture["envelope"].as_str());
+            let envelope: serde_json::Value =
+                serde_json::from_str(decrypted.notes.as_deref().unwrap()).unwrap();
+            assert_eq!(envelope["marker"], "safeory.life_record");
+            assert_eq!(envelope["record_kind"], "insurance");
+            assert_eq!(envelope["data"]["title"], expected_title);
+            assert_eq!(envelope["data"]["renewal"], expected_renewal);
+            assert_eq!(
+                envelope["extensions"]["safeory.example.future"]["preserved"],
+                true
+            );
+        }
     }
 
     #[tokio::test]

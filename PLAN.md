@@ -598,6 +598,14 @@ Phase 0.5 implementation evidence (2026-09-21):
   the Linux server behavior test now persists and syncs the exact SDK-produced
   ciphertext/key rather than a synthetic blob-shaped placeholder. The persistence
   checkbox remains open until that shared-fixture path passes Linux CI.
+- The fixture generator now emits both an initial and an updated encrypted version
+  of the same Safeory record ID. Rust decrypts both tracked ciphertext/key pairs
+  and verifies the updated fixture changes the insurance title/renewal while
+  preserving the record identity and extension payload. The server behavior test
+  creates fixture A, PUTs fixture B using A's `revisionDate`, then requires device 2
+  sync to return fixture B's different `data` and wrapped key before continuing
+  downgrade, attachment, trash, and restore checks. This is the concrete
+  edit/revision-sync path; its checklist gates remain open until Linux CI passes.
 - The retained exporter previously bypassed the blob-aware cipher client and used
   direct `KeyStore` decryption; it also used `flat_map(Result)` for cipher
   conversion, which could silently omit a record from a backup. The adapter now

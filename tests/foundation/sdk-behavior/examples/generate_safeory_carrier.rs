@@ -3,6 +3,7 @@ use safeory_foundation_sdk_behavior::fixture_support::{client, safeory_envelope_
 
 #[tokio::main]
 async fn main() {
+    let updated = std::env::args().nth(1).as_deref() == Some("updated");
     let client = client().await;
     client
         .0
@@ -10,17 +11,29 @@ async fn main() {
         .get_key_store()
         .set_security_state_version(BLOB_SECURITY_VERSION);
 
+    let title = if updated {
+        "Family health policy renewed"
+    } else {
+        "Family health policy"
+    };
+    let renewal = if updated { "2028-01-15" } else { "2027-01-15" };
+    let notes = if updated {
+        "Renewed after annual review."
+    } else {
+        "Call before renewal."
+    };
+
     let envelope = serde_json::json!({
         "marker": "safeory.life_record",
         "schema_version": 1,
         "record_id": "11111111-1111-4111-8111-111111111111",
         "record_kind": "insurance",
         "data": {
-            "title": "Family health policy",
+            "title": title,
             "provider": "Example Mutual",
             "policy_number": "POL-123",
-            "renewal": "2027-01-15",
-            "notes": "Call before renewal."
+            "renewal": renewal,
+            "notes": notes
         },
         "links": ["22222222-2222-4222-8222-222222222222"],
         "relationships": [{
@@ -53,6 +66,7 @@ async fn main() {
 
     let fixture = serde_json::json!({
         "fixture_version": 1,
+        "fixture_variant": if updated { "updated" } else { "initial" },
         "record_id": "11111111-1111-4111-8111-111111111111",
         "envelope": serialized,
         "data": encrypted.data.unwrap(),

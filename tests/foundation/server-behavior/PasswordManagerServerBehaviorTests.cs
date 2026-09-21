@@ -21,6 +21,7 @@ public sealed class PasswordManagerServerBehaviorTests : IClassFixture<ApiApplic
     private const string EncryptedValue =
         "2.3Uk+WNBIoU5xzmVFNcoWzz==|1MsPIYuRfdOHfu/0uY6H2Q==|/98sp4wb6pHP1VTZ9JcNCYgQjEUMFPlqJgCwRk1YXKg=";
     private static readonly JsonElement CarrierFixture = LoadCarrierFixture();
+    private static readonly JsonElement UpdatedCarrierFixture = LoadCarrierFixture(updated: true);
     private static readonly string AttachmentDirectory =
         Path.Combine(Path.GetTempPath(), $"safeory-foundation-attachments-{Guid.NewGuid():N}");
     private static string BlobData =>
@@ -29,6 +30,12 @@ public sealed class PasswordManagerServerBehaviorTests : IClassFixture<ApiApplic
     private static string BlobKey =>
         CarrierFixture.GetProperty("key").GetString()
         ?? throw new InvalidOperationException("carrier fixture key is missing");
+    private static string UpdatedBlobData =>
+        UpdatedCarrierFixture.GetProperty("data").GetString()
+        ?? throw new InvalidOperationException("updated carrier fixture data is missing");
+    private static string UpdatedBlobKey =>
+        UpdatedCarrierFixture.GetProperty("key").GetString()
+        ?? throw new InvalidOperationException("updated carrier fixture key is missing");
 
     private readonly ApiApplicationFactory _factory;
     private readonly ITestOutputHelper _output;
@@ -258,14 +265,22 @@ public sealed class PasswordManagerServerBehaviorTests : IClassFixture<ApiApplic
 
         var blobUpdate = await device1.PutAsJsonAsync(
             $"/ciphers/{cipherId}",
-            BlobRequest(createdRevision, favorite: true));
+            UpdatedBlobRequest(createdRevision, favorite: true));
         blobUpdate.EnsureSuccessStatusCode();
         using var updated = JsonDocument.Parse(await blobUpdate.Content.ReadAsStringAsync());
         var updatedRevision = updated.RootElement.GetProperty("revisionDate").GetDateTime();
         Assert.True(updatedRevision >= createdRevision);
         Assert.True(updated.RootElement.GetProperty("favorite").GetBoolean());
-        Assert.Equal(BlobData, updated.RootElement.GetProperty("data").GetString());
-        Assert.Equal(BlobKey, updated.RootElement.GetProperty("key").GetString());
+        Assert.NotEqual(BlobData, UpdatedBlobData);
+        Assert.NotEqual(BlobKey, UpdatedBlobKey);
+        Assert.Equal(UpdatedBlobData, updated.RootElement.GetProperty("data").GetString());
+        Assert.Equal(UpdatedBlobKey, updated.RootElement.GetProperty("key").GetString());
+
+        var secondDeviceAfterUpdate = await Sync(device2);
+        var syncedUpdate = FindCipher(secondDeviceAfterUpdate.RootElement, cipherId);
+        Assert.Equal(UpdatedBlobData, syncedUpdate.GetProperty("data").GetString());
+        Assert.Equal(UpdatedBlobKey, syncedUpdate.GetProperty("key").GetString());
+        Assert.True(syncedUpdate.GetProperty("favorite").GetBoolean());
 
         var downgrade = await device1.PutAsJsonAsync(
             $"/ciphers/{cipherId}",
@@ -276,8 +291,8 @@ public sealed class PasswordManagerServerBehaviorTests : IClassFixture<ApiApplic
 
         var afterRejectedDowngrade = await Sync(device2);
         var preserved = FindCipher(afterRejectedDowngrade.RootElement, cipherId);
-        Assert.Equal(BlobData, preserved.GetProperty("data").GetString());
-        Assert.Equal(BlobKey, preserved.GetProperty("key").GetString());
+        Assert.Equal(UpdatedBlobData, preserved.GetProperty("data").GetString());
+        Assert.Equal(UpdatedBlobKey, preserved.GetProperty("key").GetString());
         Assert.True(preserved.GetProperty("favorite").GetBoolean());
 
         // Exercise the complete attachment lifecycle on the selected Safeory blob carrier:
@@ -307,7 +322,7 @@ public sealed class PasswordManagerServerBehaviorTests : IClassFixture<ApiApplic
         initialDownload.EnsureSuccessStatusCode();
         Assert.Equal(attachmentBytes, await initialDownload.Content.ReadAsByteArrayAsync());
 
-        var corruptedRenameRequest = BlobRequest(uploadedRevision, favorite: true);
+        var corruptedRenameRequest = UpdatedBlobRequest(uploadedRevision, favorite: true);
         corruptedRenameRequest.Attachments2 = new Dictionary<string, CipherAttachmentModel>
         {
             [attachmentId!] = new CipherAttachmentModel
@@ -327,7 +342,7 @@ public sealed class PasswordManagerServerBehaviorTests : IClassFixture<ApiApplic
             JsonDocument.Parse(await metadataAfterCorruptRename.Content.ReadAsStringAsync());
         Assert.Equal("proof.bin", unchangedMetadata.RootElement.GetProperty("fileName").GetString());
 
-        var renameRequest = BlobRequest(uploadedRevision, favorite: true);
+        var renameRequest = UpdatedBlobRequest(uploadedRevision, favorite: true);
         renameRequest.Attachments2 = new Dictionary<string, CipherAttachmentModel>
         {
             [attachmentId!] = new CipherAttachmentModel
@@ -356,8 +371,8 @@ public sealed class PasswordManagerServerBehaviorTests : IClassFixture<ApiApplic
         var carrierAfterRename = FindCipher(secondDeviceAfterRename.RootElement, cipherId);
         Assert.Equal(EncryptedValue,
             carrierAfterRename.GetProperty("attachments")[0].GetProperty("fileName").GetString());
-        Assert.Equal(BlobData, carrierAfterRename.GetProperty("data").GetString());
-        Assert.Equal(BlobKey, carrierAfterRename.GetProperty("key").GetString());
+        Assert.Equal(UpdatedBlobData, carrierAfterRename.GetProperty("data").GetString());
+        Assert.Equal(UpdatedBlobKey, carrierAfterRename.GetProperty("key").GetString());
 
         using var deleteAttachment = await device1.DeleteAsync($"/ciphers/{cipherId}/attachment/{attachmentId}");
         deleteAttachment.EnsureSuccessStatusCode();
@@ -371,8 +386,8 @@ public sealed class PasswordManagerServerBehaviorTests : IClassFixture<ApiApplic
         var secondDeviceAfterDelete = await Sync(device2);
         var deletedCarrier = FindCipher(secondDeviceAfterDelete.RootElement, cipherId);
         Assert.NotEqual(JsonValueKind.Null, deletedCarrier.GetProperty("deletedDate").ValueKind);
-        Assert.Equal(BlobData, deletedCarrier.GetProperty("data").GetString());
-        Assert.Equal(BlobKey, deletedCarrier.GetProperty("key").GetString());
+        Assert.Equal(UpdatedBlobData, deletedCarrier.GetProperty("data").GetString());
+        Assert.Equal(UpdatedBlobKey, deletedCarrier.GetProperty("key").GetString());
 
         var restoreCarrier = await device1.PutAsync($"/ciphers/{cipherId}/restore", null);
         restoreCarrier.EnsureSuccessStatusCode();
@@ -381,8 +396,8 @@ public sealed class PasswordManagerServerBehaviorTests : IClassFixture<ApiApplic
         Assert.True(
             !restoredCarrier.TryGetProperty("deletedDate", out var restoredDeleted) ||
             restoredDeleted.ValueKind == JsonValueKind.Null);
-        Assert.Equal(BlobData, restoredCarrier.GetProperty("data").GetString());
-        Assert.Equal(BlobKey, restoredCarrier.GetProperty("key").GetString());
+        Assert.Equal(UpdatedBlobData, restoredCarrier.GetProperty("data").GetString());
+        Assert.Equal(UpdatedBlobKey, restoredCarrier.GetProperty("key").GetString());
     }
 
     public void Dispose()
@@ -434,6 +449,19 @@ public sealed class PasswordManagerServerBehaviorTests : IClassFixture<ApiApplic
             LastKnownRevisionDate = lastKnownRevisionDate,
         };
 
+    private static CipherRequestModel UpdatedBlobRequest(
+        DateTime? lastKnownRevisionDate = null,
+        bool favorite = false) =>
+        new()
+        {
+            Type = CipherType.SecureNote,
+            Favorite = favorite,
+            Reprompt = CipherRepromptType.None,
+            Data = UpdatedBlobData,
+            Key = UpdatedBlobKey,
+            LastKnownRevisionDate = lastKnownRevisionDate,
+        };
+
     private static CipherRequestModel LegacySecureNoteRequest(DateTime lastKnownRevisionDate) =>
         new()
         {
@@ -471,9 +499,12 @@ public sealed class PasswordManagerServerBehaviorTests : IClassFixture<ApiApplic
         return null;
     }
 
-    private static JsonElement LoadCarrierFixture()
+    private static JsonElement LoadCarrierFixture(bool updated = false)
     {
-        var fixturePath = Path.Combine(AppContext.BaseDirectory, "fixtures", "safeory-insurance-carrier.json");
+        var fileName = updated
+            ? "safeory-insurance-carrier-updated.json"
+            : "safeory-insurance-carrier.json";
+        var fixturePath = Path.Combine(AppContext.BaseDirectory, "fixtures", fileName);
         using var document = JsonDocument.Parse(File.ReadAllText(fixturePath));
         return document.RootElement.Clone();
     }
